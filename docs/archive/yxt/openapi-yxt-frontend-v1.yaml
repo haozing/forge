@@ -1,0 +1,446 @@
+openapi: 3.1.0
+info:
+  title: Forge Member Frontend API
+  version: 1.0.0
+  description: Workspace-scoped API for the Forge knowledge asset workbench.
+servers:
+  - url: /
+security:
+  - sessionCookie: []
+paths:
+  /api/sessions:
+    post:
+      security: []
+      summary: Create a member session
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '201':
+          description: Session created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/me:
+    get:
+      summary: Current authenticated user
+      responses:
+        '200':
+          description: Current user
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/frontend/workspaces:
+    get:
+      summary: List workspaces available to the current member
+      responses:
+        '200':
+          description: Workspace summaries
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkspaceList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/frontend/workspaces/{workspaceId}:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceId'
+    get:
+      summary: Get one workspace summary
+      responses:
+        '200':
+          description: Workspace summary
+          headers:
+            ETag:
+              $ref: '#/components/headers/ETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkspaceSummary'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/frontend/workspaces/{workspaceId}/members/me:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceId'
+    get:
+      summary: Get current member role in a workspace
+      responses:
+        '200':
+          description: Membership
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkspaceMember'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/frontend/workspaces/{workspaceId}/agent-applications:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceId'
+    get:
+      summary: List enabled Agent applications for a workspace
+      responses:
+        '200':
+          description: Agent applications
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentApplicationList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/frontend/workspaces/{workspaceId}/counts:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceId'
+    get:
+      summary: Workspace navigation counts
+      responses:
+        '200':
+          description: Counts
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkspaceCounts'
+  /api/frontend/workspaces/{workspaceId}/stats:
+    get: {summary: Workspace statistics, responses: {'200': {$ref: '#/components/responses/GenericOK'}}}
+  /api/frontend/workspaces/{workspaceId}/activity:
+    get: {summary: Workspace audit activity, responses: {'200': {$ref: '#/components/responses/GenericListOK'}}}
+  /api/frontend/workspaces/{workspaceId}/settings:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceId'
+    get:
+      summary: Read workspace settings
+      responses:
+        '200':
+          description: Settings
+          headers:
+            ETag:
+              $ref: '#/components/headers/ETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkspaceSettings'
+    patch:
+      summary: Update workspace settings
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WorkspaceSettingsPatch'
+      responses:
+        '200':
+          description: Updated settings
+          headers:
+            ETag:
+              $ref: '#/components/headers/ETag'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+  /api/frontend/me/preferences:
+    get:
+      summary: Read member preferences
+      responses:
+        '200':
+          description: Preferences object
+    patch:
+      summary: Replace member preferences
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200':
+          description: Updated preferences
+  /api/frontend/workspaces/{workspaceId}/resource-models:
+    get: {summary: List resource models, responses: {'200': {$ref: '#/components/responses/GenericOK'}}}
+    post: {summary: Create resource model, responses: {'201': {$ref: '#/components/responses/GenericCreated'}, '422': {$ref: '#/components/responses/ValidationError'}}}
+  /api/frontend/resource-models/{resourceModelId}:
+    get: {summary: Get resource model, responses: {'200': {$ref: '#/components/responses/GenericOK'}}}
+    patch: {summary: Patch resource model, responses: {'200': {$ref: '#/components/responses/GenericOK'}, '409': {$ref: '#/components/responses/Conflict'}}}
+  /api/frontend/resource-models/{resourceModelId}/versions:
+    get: {summary: List resource model versions, responses: {'200': {$ref: '#/components/responses/GenericOK'}}}
+    post: {summary: Create resource model version, responses: {'201': {$ref: '#/components/responses/GenericCreated'}}}
+  /api/frontend/resource-model-versions/{versionId}:
+    get: {summary: Get resource model version, responses: {'200': {$ref: '#/components/responses/GenericOK'}}}
+    patch: {summary: Patch draft resource model version, responses: {'200': {$ref: '#/components/responses/GenericOK'}, '409': {$ref: '#/components/responses/Conflict'}}}
+  /api/frontend/resource-model-versions/{versionId}/validate:
+    post: {summary: Validate resource model version, responses: {'200': {$ref: '#/components/responses/GenericOK'}}}
+  /api/frontend/resource-model-versions/{versionId}/publish:
+    post: {summary: Publish resource model version, responses: {'200': {$ref: '#/components/responses/GenericOK'}}}
+  /api/frontend/resource-models/{resourceModelId}/migration-previews:
+    post: {summary: Preview model migration, responses: {'200': {$ref: '#/components/responses/GenericOK'}, '422': {$ref: '#/components/responses/ValidationError'}}}
+  /api/frontend/resource-models/{resourceModelId}/migrations:
+    post: {summary: Queue model migration, responses: {'202': {$ref: '#/components/responses/GenericAccepted'}}}
+  /api/frontend/resource-model-migrations/{migrationId}:
+    get: {summary: Get model migration, responses: {'200': {$ref: '#/components/responses/GenericOK'}}}
+  /api/frontend/resource-model-migrations/{migrationId}/cancel:
+    post: {summary: Cancel model migration, responses: {'200': {$ref: '#/components/responses/GenericOK'}}}
+  /api/frontend/workspaces/{workspaceId}/assets:
+    get: {summary: List member assets, responses: {'200': {$ref: '#/components/responses/GenericListOK'}}}
+    post: {summary: Create member asset, responses: {'201': {$ref: '#/components/responses/GenericCreated'}}}
+  /api/frontend/assets/{assetId}:
+    get: {summary: Get member asset, responses: {'200': {$ref: '#/components/responses/GenericOK'}}}
+    patch: {summary: Patch member asset, responses: {'200': {$ref: '#/components/responses/GenericOK'}, '409': {$ref: '#/components/responses/Conflict'}}}
+  /api/frontend/workspaces/{workspaceId}/query:
+    post: {summary: Query member-visible assets, responses: {'200': {$ref: '#/components/responses/GenericListOK'}}}
+  /api/frontend/workspaces/{workspaceId}/reviews:
+    get: {summary: List review queue, responses: {'200': {$ref: '#/components/responses/GenericListOK'}}}
+  /api/frontend/reviews/{reviewId}:
+    get: {summary: Get review, responses: {'200': {$ref: '#/components/responses/GenericOK'}}}
+  /api/frontend/reviews/{reviewId}/approve:
+    post: {summary: Approve review, responses: {'200': {$ref: '#/components/responses/GenericOK'}}}
+  /api/frontend/reviews/{reviewId}/reject:
+    post: {summary: Reject review, responses: {'200': {$ref: '#/components/responses/GenericOK'}}}
+  /api/frontend/reviews/batch:
+    post: {summary: Batch review decisions, responses: {'200': {$ref: '#/components/responses/GenericListOK'}}}
+  /api/frontend/workspaces/{workspaceId}/containers/tree:
+    get: {summary: List container tree, responses: {'200': {$ref: '#/components/responses/GenericListOK'}}}
+    post: {summary: Create container, responses: {'201': {$ref: '#/components/responses/GenericCreated'}}}
+  /api/frontend/containers/{containerId}:
+    get: {summary: Get container, responses: {'200': {$ref: '#/components/responses/GenericOK'}}}
+    patch: {summary: Patch container, responses: {'200': {$ref: '#/components/responses/GenericOK'}}}
+    delete: {summary: Archive container, responses: {'204': {description: Deleted}}}
+  /api/frontend/containers/{containerId}/assets:
+    get: {summary: List container assets, responses: {'200': {$ref: '#/components/responses/GenericListOK'}}}
+  /api/frontend/workspaces/{workspaceId}/conversations:
+    get: {summary: List conversations, responses: {'200': {$ref: '#/components/responses/GenericListOK'}}}
+    post: {summary: Create conversation, responses: {'201': {$ref: '#/components/responses/GenericCreated'}}}
+  /api/frontend/conversations/{conversationId}:
+    get: {summary: Get conversation, responses: {'200': {$ref: '#/components/responses/GenericOK'}}}
+  /api/frontend/conversations/{conversationId}/messages:
+    get: {summary: List messages, responses: {'200': {$ref: '#/components/responses/GenericListOK'}}}
+    post: {summary: Append message, responses: {'201': {$ref: '#/components/responses/GenericCreated'}}}
+  /api/frontend/workspaces/{workspaceId}/automation-jobs:
+    get: {summary: List automation jobs, responses: {'200': {$ref: '#/components/responses/GenericListOK'}}}
+    post: {summary: Create automation job, responses: {'201': {$ref: '#/components/responses/GenericCreated'}}}
+  /api/frontend/automation-jobs/{jobId}:
+    get: {summary: Get automation job, responses: {'200': {$ref: '#/components/responses/GenericOK'}}}
+    patch: {summary: Patch automation job, responses: {'200': {$ref: '#/components/responses/GenericOK'}}}
+  /api/frontend/automation-jobs/{jobId}/pause:
+    post: {summary: Pause automation job, responses: {'200': {$ref: '#/components/responses/GenericOK'}}}
+  /api/frontend/automation-jobs/{jobId}/resume:
+    post: {summary: Resume automation job, responses: {'200': {$ref: '#/components/responses/GenericOK'}}}
+  /api/frontend/automation-jobs/{jobId}/runs:
+    get: {summary: List task runs, responses: {'200': {$ref: '#/components/responses/GenericListOK'}}}
+    post: {summary: Create task run, responses: {'202': {$ref: '#/components/responses/GenericAccepted'}}}
+  /api/frontend/task-runs/{runId}:
+    get: {summary: Get task run, responses: {'200': {$ref: '#/components/responses/GenericOK'}}}
+  /api/frontend/task-runs/{runId}/attempts:
+    get: {summary: List task attempts, responses: {'200': {$ref: '#/components/responses/GenericListOK'}}}
+  /api/frontend/task-runs/{runId}/retry:
+    post: {summary: Retry task run, responses: {'202': {$ref: '#/components/responses/GenericAccepted'}}}
+  /api/frontend/task-runs/{runId}/cancel:
+    post: {summary: Cancel task run, responses: {'200': {$ref: '#/components/responses/GenericOK'}}}
+  /api/frontend/workspaces/{workspaceId}/assets/imports:
+    post: {summary: Queue asset import, responses: {'202': {$ref: '#/components/responses/GenericAccepted'}}}
+  /api/frontend/import-jobs/{jobId}:
+    get: {summary: Get import job, responses: {'200': {$ref: '#/components/responses/GenericOK'}}}
+  /api/frontend/workspaces/{workspaceId}/assets/exports:
+    post: {summary: Queue asset export, responses: {'202': {$ref: '#/components/responses/GenericAccepted'}}}
+  /api/frontend/export-jobs/{jobId}:
+    get: {summary: Get export job, responses: {'200': {$ref: '#/components/responses/GenericOK'}}}
+components:
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: agent_session
+  parameters:
+    WorkspaceId:
+      name: workspaceId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    IfMatch:
+      name: If-Match
+      in: header
+      required: false
+      schema:
+        type: string
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema:
+        type: string
+        minLength: 16
+        maxLength: 200
+  headers:
+    ETag:
+      description: Opaque representation version.
+      schema:
+        type: string
+  responses:
+    GenericOK:
+      description: Successful response
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/GenericObject'}
+    GenericListOK:
+      description: Successful list response
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/GenericList'}
+    GenericCreated:
+      description: Resource created
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/GenericObject'}
+    GenericAccepted:
+      description: Job queued
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/GenericObject'}
+    Unauthorized:
+      description: Authentication required
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Forbidden:
+      description: Workspace or action permission denied
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: Resource not found or not visible
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Conflict:
+      description: ETag, state, or idempotency conflict
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    ValidationError:
+      description: Request validation failed
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+  schemas:
+    LoginRequest:
+      type: object
+      required: [login_name, password]
+      properties:
+        login_name: {type: string}
+        password: {type: string, format: password}
+    LoginResponse:
+      type: object
+      required: [user_id, organization_id, user_type, expires_at]
+      properties:
+        user_id: {type: string, format: uuid}
+        organization_id: {type: string, format: uuid}
+        user_type: {type: string, enum: [member]}
+        expires_at: {type: string, format: date-time}
+    WorkspaceCounts:
+      type: object
+      required: [pending_conversations, documents, pending_reviews, running_task_runs]
+      properties:
+        pending_conversations: {type: integer, format: int64}
+        documents: {type: integer, format: int64}
+        pending_reviews: {type: integer, format: int64}
+        running_task_runs: {type: integer, format: int64}
+    WorkspaceSummary:
+      type: object
+      required: [id, name, description, role, default_visibility, counts, updated_at]
+      properties:
+        id: {type: string, format: uuid}
+        name: {type: string}
+        description: {type: string}
+        role: {type: string, enum: [owner, admin, editor, reviewer, viewer]}
+        default_resource_model_id: {type: string, format: uuid}
+        default_visibility: {type: string, enum: [private, workspace, internal]}
+        counts: {$ref: '#/components/schemas/WorkspaceCounts'}
+        updated_at: {type: string, format: date-time}
+    WorkspaceList:
+      type: object
+      required: [items, has_more]
+      properties:
+        items:
+          type: array
+          items: {$ref: '#/components/schemas/WorkspaceSummary'}
+        has_more: {type: boolean}
+    WorkspaceMember:
+      type: object
+      required: [id, display_name, role]
+      properties:
+        id: {type: string, format: uuid}
+        display_name: {type: string}
+        login_name: {type: string}
+        role: {type: string}
+    AgentApplication:
+      type: object
+      required: [id, name, provider, status, capabilities, bound_agent_user_id]
+      properties:
+        id: {type: string, format: uuid}
+        name: {type: string}
+        provider: {type: string}
+        status: {type: string}
+        capabilities: {type: array, items: {type: string}}
+        bound_agent_user_id: {type: string, format: uuid}
+    AgentApplicationList:
+      type: object
+      required: [items, has_more]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/AgentApplication'}}
+        has_more: {type: boolean}
+    WorkspaceSettings:
+      type: object
+      required: [name, default_visibility, description]
+      properties:
+        name: {type: string}
+        description: {type: string}
+        default_visibility: {type: string, enum: [private, workspace, internal]}
+        default_resource_model_id: {type: string, format: uuid}
+    WorkspaceSettingsPatch:
+      allOf:
+        - $ref: '#/components/schemas/WorkspaceSettings'
+    Error:
+      type: object
+      required: [code, message, request_id]
+      properties:
+        code: {type: string}
+        message: {type: string}
+        request_id: {type: string}
+        details: {type: object, additionalProperties: true}
+    GenericObject:
+      type: object
+      additionalProperties: true
+    GenericList:
+      type: object
+      required: [items]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/GenericObject'}}
+        has_more: {type: boolean}
+        next_cursor: {type: string, nullable: true}

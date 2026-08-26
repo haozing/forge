@@ -1,0 +1,181 @@
+package tools
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"strings"
+
+	"github.com/cloudwego/eino/components/tool"
+	"github.com/cloudwego/eino/schema"
+)
+
+const (
+	maxToolArgumentsBytes = 32 * 1024
+	maxToolResultBytes    = 64 * 1024
+)
+
+type JSONHandler func(context.Context, map[string]any) (any, error)
+
+// BuiltinHandlers are bound to one run's server-side organization, principal,
+// agent user and workspace. Those identities are deliberately absent from tool
+// arguments so model output cannot change the authorization scope.
+type BuiltinHandlers struct {
+	SearchKnowledge      JSONHandler
+	QueryAssets          JSONHandler
+	GetAsset             JSONHandler
+	GetSchema            JSONHandler
+	GetRelatedAssets     JSONHandler
+	GetAttachmentText    JSONHandler
+	GetTaskStatus        JSONHandler
+	CreateInternalAsset  JSONHandler
+	UpdateInternalAsset  JSONHandler
+	CreateRelation       JSONHandler
+	SubmitProcessingTask JSONHandler
+	PublishAsset         JSONHandler
+	ArchiveAsset         JSONHandler
+	DeleteAsset          JSONHandler
+	ExportAssets         JSONHandler
+}
+
+type builtinSpec struct {
+	name         string
+	description  string
+	risk         Risk
+	capabilities []string
+	handler      JSONHandler
+	parameters   map[string]*schema.ParameterInfo
+}
+
+func RegisterBuiltins(registry *Registry, handlers BuiltinHandlers) error {
+	if registry == nil {
+		return errors.New("tool registry is nil")
+	}
+	for _, spec := range builtinSpecs(handlers) {
+		if spec.handler == nil {
+			continue
+		}
+		implementation := &builtinTool{info: &schema.ToolInfo{
+			Name: spec.name, Desc: spec.description,
+			ParamsOneOf: schema.NewParamsOneOfByParams(spec.parameters),
+		}, parameters: spec.parameters, handler: spec.handler}
+		if err := registry.Register(Definition{
+			Name: spec.name, Risk: spec.risk, Capabilities: spec.capabilities, Tool: implementation,
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func builtinSpecs(handlers BuiltinHandlers) []builtinSpec {
+	id := func(description string) *schema.ParameterInfo {
+		return &schema.ParameterInfo{Type: schema.String, Desc: description, Required: true}
+	}
+	return []builtinSpec{
+		{name: "search_knowledge", description: "Search authorized published knowledge", risk: ReadOnly, capabilities: []string{"query.read"}, handler: handlers.SearchKnowledge, parameters: map[string]*schema.ParameterInfo{"query": id("Search query"), "limit": {Type: schema.Integer, Desc: "Maximum 50 results"}}},
+		{name: "query_assets", description: "Query authorized assets with server-validated filters", risk: ReadOnly, capabilities: []string{"asset.read"}, handler: handlers.QueryAssets, parameters: map[string]*schema.ParameterInfo{"query": {Type: schema.String}, "limit": {Type: schema.Integer}}},
+		{name: "get_asset", description: "Read one authorized asset", risk: ReadOnly, capabilities: []string{"asset.read"}, handler: handlers.GetAsset, parameters: map[string]*schema.ParameterInfo{"asset_id": id("Asset ID")}},
+		{name: "get_schema", description: "Read an authorized resource model schema", risk: ReadOnly, capabilities: []string{"schema.read"}, handler: handlers.GetSchema, parameters: map[string]*schema.ParameterInfo{"resource_model_id": id("Resource model ID")}},
+		{name: "get_related_assets", description: "Read authorized relations for an asset", risk: ReadOnly, capabilities: []string{"asset.read"}, handler: handlers.GetRelatedAssets, parameters: map[string]*schema.ParameterInfo{"asset_id": id("Asset ID"), "limit": {Type: schema.Integer}}},
+		{name: "get_attachment_text", description: "Read policy-approved extracted attachment text", risk: ReadOnly, capabilities: []string{"attachment.read"}, handler: handlers.GetAttachmentText, parameters: map[string]*schema.ParameterInfo{"attachment_id": id("Attachment ID")}},
+		{name: "get_task_status", description: "Read an authorized task status", risk: ReadOnly, capabilities: []string{"task.read"}, handler: handlers.GetTaskStatus, parameters: map[string]*schema.ParameterInfo{"task_id": id("Task ID")}},
+		{name: "create_internal_asset", description: "Create an internal draft asset", risk: LowWrite, capabilities: []string{"asset.write"}, handler: handlers.CreateInternalAsset, parameters: map[string]*schema.ParameterInfo{"resource_model_id": id("Resource model ID"), "fields": {Type: schema.Object}}},
+		{name: "update_internal_asset", description: "Update an internal draft asset", risk: LowWrite, capabilities: []string{"asset.write"}, handler: handlers.UpdateInternalAsset, parameters: map[string]*schema.ParameterInfo{"asset_id": id("Asset ID"), "expected_version_id": id("Current working version ID"), "title": {Type: schema.String}, "markdown": {Type: schema.String}, "fields": {Type: schema.Object}}},
+		{name: "create_relation", description: "Create a relation between authorized internal assets", risk: LowWrite, capabilities: []string{"asset.write"}, handler: handlers.CreateRelation, parameters: map[string]*schema.ParameterInfo{"source_asset_id": id("Source asset ID"), "target_asset_id": id("Target asset ID"), "relation_type": id("Relation type")}},
+		{name: "submit_processing_task", description: "Submit an idempotent processing task", risk: LowWrite, capabilities: []string{"task.write"}, handler: handlers.SubmitProcessingTask, parameters: map[string]*schema.ParameterInfo{"asset_id": id("Asset ID"), "operation": id("Registered operation")}},
+		{name: "publish_asset", description: "Publish an approved internal asset", risk: HighWrite, capabilities: []string{"asset.publish"}, handler: handlers.PublishAsset, parameters: map[string]*schema.ParameterInfo{"asset_id": id("Asset ID"), "version_id": id("Asset version ID")}},
+		{name: "archive_asset", description: "Archive a published asset", risk: HighWrite, capabilities: []string{"asset.archive"}, handler: handlers.ArchiveAsset, parameters: map[string]*schema.ParameterInfo{"asset_id": id("Asset ID")}},
+		{name: "delete_asset", description: "Delete an authorized asset", risk: HighWrite, capabilities: []string{"asset.delete"}, handler: handlers.DeleteAsset, parameters: map[string]*schema.ParameterInfo{"asset_id": id("Asset ID")}},
+		{name: "export_assets", description: "Create an export of authorized assets", risk: HighWrite, capabilities: []string{"asset.export"}, handler: handlers.ExportAssets, parameters: map[string]*schema.ParameterInfo{"format": id("Registered export format")}},
+	}
+}
+
+type builtinTool struct {
+	info       *schema.ToolInfo
+	parameters map[string]*schema.ParameterInfo
+	handler    JSONHandler
+}
+
+func (t *builtinTool) Info(context.Context) (*schema.ToolInfo, error) {
+	if t == nil || t.info == nil {
+		return nil, errors.New("tool is not initialized")
+	}
+	return t.info, nil
+}
+
+func (t *builtinTool) InvokableRun(ctx context.Context, argumentsInJSON string, _ ...tool.Option) (string, error) {
+	if t == nil || t.handler == nil {
+		return structuredToolError("tool_unavailable"), nil
+	}
+	if len(argumentsInJSON) == 0 || len(argumentsInJSON) > maxToolArgumentsBytes || strings.ContainsRune(argumentsInJSON, '\x00') {
+		return structuredToolError("invalid_tool_arguments"), nil
+	}
+	arguments := map[string]any{}
+	decoder := json.NewDecoder(strings.NewReader(argumentsInJSON))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&arguments); err != nil {
+		return structuredToolError("invalid_tool_arguments"), nil
+	}
+	if !validBuiltinArguments(arguments, t.parameters) {
+		return structuredToolError("invalid_tool_arguments"), nil
+	}
+	result, err := t.handler(ctx, arguments)
+	if err != nil {
+		return structuredToolError("tool_failed"), nil
+	}
+	body, err := json.Marshal(map[string]any{"ok": true, "data": result})
+	if err != nil || len(body) > maxToolResultBytes {
+		return structuredToolError("tool_result_too_large"), nil
+	}
+	return string(body), nil
+}
+
+func validBuiltinArguments(arguments map[string]any, parameters map[string]*schema.ParameterInfo) bool {
+	for key, value := range arguments {
+		parameter, ok := parameters[key]
+		if !ok || parameter == nil || !matchesParameterType(value, parameter.Type) {
+			return false
+		}
+	}
+	for key, parameter := range parameters {
+		if parameter != nil && parameter.Required {
+			if _, ok := arguments[key]; !ok {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func matchesParameterType(value any, parameterType schema.DataType) bool {
+	switch parameterType {
+	case schema.String:
+		_, ok := value.(string)
+		return ok
+	case schema.Integer:
+		number, ok := value.(float64)
+		return ok && number == float64(int64(number))
+	case schema.Number:
+		_, ok := value.(float64)
+		return ok
+	case schema.Boolean:
+		_, ok := value.(bool)
+		return ok
+	case schema.Object:
+		_, ok := value.(map[string]any)
+		return ok
+	case schema.Array:
+		_, ok := value.([]any)
+		return ok
+	default:
+		return false
+	}
+}
+
+func structuredToolError(code string) string {
+	body, _ := json.Marshal(map[string]any{"ok": false, "code": code})
+	return string(body)
+}
+
+var _ tool.InvokableTool = (*builtinTool)(nil)

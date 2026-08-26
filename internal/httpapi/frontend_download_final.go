@@ -1,0 +1,35 @@
+package httpapi
+
+import (
+	"net/http"
+	"time"
+)
+
+func presignedAttachmentDownloadFinal(deps Dependencies) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
+			return
+		}
+		principal, ok := requireMemberSession(w, r, deps)
+		if !ok {
+			return
+		}
+		if _, ok := requiredIdempotencyKey(r); !ok {
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+			return
+		}
+		id := r.PathValue("attachmentId")
+		allowed, err := deps.ScopeResolver.AllowedModelIDs(r.Context(), principal, "attachment.read")
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "authorization_scope_failed")
+			return
+		}
+		if _, err := deps.AttachmentService.Status(r.Context(), principal, id, allowed); err != nil {
+			writeError(w, http.StatusNotFound, "attachment_not_found")
+			return
+		}
+		expires := time.Now().UTC().Add(10 * time.Minute)
+		writeJSON(w, http.StatusOK, map[string]string{"download_url": "/api/frontend/attachments/" + id + "/download", "expires_at": expires.Format(time.RFC3339)})
+	}
+}

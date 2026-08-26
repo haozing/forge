@@ -1,0 +1,8 @@
+.git
+.tools
+artifacts
+tmp_*
+docs
+*.md
+.env
+.env.*

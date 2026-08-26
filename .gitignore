@@ -1,0 +1,8 @@
+/bin/
+/tmp/
+tmp_*
+/.env
+/.tools/
+*.log
+*.local
+/artifacts/*.dump

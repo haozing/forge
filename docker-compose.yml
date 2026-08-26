@@ -1,0 +1,110 @@
+services:
+  postgres:
+    image: agentchunzhi-postgres-r3:pg18-pgroonga-pgvector0.8.6
+    build:
+      context: .
+      dockerfile: docker/postgres-r3/Dockerfile
+      args:
+        PGROONGA_BASE_IMAGE: ${PGROONGA_BASE_IMAGE:-docker.m.daocloud.io/groonga/pgroonga@sha256:50e95d8f0708d43f76adf641580e3b94edf57490d655316e1b9698cfbe702581}
+        ALPINE_MIRROR: ${ALPINE_MIRROR:-https://mirrors.tuna.tsinghua.edu.cn/alpine}
+        PGVECTOR_VERSION: ${PGVECTOR_VERSION:-0.8.6}
+        PGVECTOR_REPO: ${PGVECTOR_REPO:-https://github.com/pgvector/pgvector.git}
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-agentchunzhi}
+      POSTGRES_USER: ${POSTGRES_USER:-agentchunzhi}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    networks: [internal]
+
+  clamav:
+    image: ${CLAMAV_IMAGE:-docker.m.daocloud.io/clamav/clamav@sha256:761f6c99b8d9134b39431f8c200189cda749b17310091561bfa8b732f32bfada}
+    restart: unless-stopped
+    volumes:
+      - clamav-data:/var/lib/clamav
+    healthcheck:
+      test: ["CMD-SHELL", "clamdscan --ping=1"]
+      interval: 10s
+      timeout: 35s
+      retries: 12
+      start_period: 2m
+    networks: [internal]
+
+  api:
+    build:
+      context: .
+      args:
+        GO_BASE_IMAGE: ${GO_BASE_IMAGE:-docker.m.daocloud.io/library/golang:1.27.0-bookworm}
+        GO_PROXY: ${GO_PROXY:-https://goproxy.cn,direct}
+    restart: unless-stopped
+    env_file:
+      - path: ${APP_ENV_FILE:-.env}
+        required: false
+    environment:
+      HTTP_ADDR: :8080
+      MIGRATION_PATH: db/migrations
+      AGENT_MODEL_SECRET_ENCRYPTION_KEY: ${AGENT_MODEL_SECRET_ENCRYPTION_KEY:?AGENT_MODEL_SECRET_ENCRYPTION_KEY must be set}
+      AGENT_MODEL_ALLOWED_HOSTS: ${AGENT_MODEL_ALLOWED_HOSTS:-api.openai.com}
+      SEARCH_CURSOR_SECRET: ${SEARCH_CURSOR_SECRET:?SEARCH_CURSOR_SECRET must be set}
+      AGENT_MODEL_MAX_CONCURRENT_REQUESTS: ${AGENT_MODEL_MAX_CONCURRENT_REQUESTS:-20}
+      OSS_REGION: ${OSS_REGION-}
+      OSS_BUCKET: ${OSS_BUCKET-}
+      OSS_ENDPOINT: ${OSS_ENDPOINT-}
+      OSS_PREFIX: ${OSS_PREFIX:-attachments/}
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-agentchunzhi}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/${POSTGRES_DB:-agentchunzhi}?sslmode=disable"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "${API_HOST_PORT:-8080}:8080"
+    networks: [internal]
+
+  worker:
+    build:
+      context: .
+      args:
+        GO_BASE_IMAGE: ${GO_BASE_IMAGE:-docker.m.daocloud.io/library/golang:1.27.0-bookworm}
+        GO_PROXY: ${GO_PROXY:-https://goproxy.cn,direct}
+    command: ["/app/agentchunzhi-worker"]
+    restart: unless-stopped
+    env_file:
+      - path: ${APP_ENV_FILE:-.env}
+        required: false
+    environment:
+      MIGRATION_PATH: db/migrations
+      AGENT_MODEL_SECRET_ENCRYPTION_KEY: ${AGENT_MODEL_SECRET_ENCRYPTION_KEY:?AGENT_MODEL_SECRET_ENCRYPTION_KEY must be set}
+      AGENT_CHECKPOINT_ENCRYPTION_KEY: ${AGENT_CHECKPOINT_ENCRYPTION_KEY:?AGENT_CHECKPOINT_ENCRYPTION_KEY must be set}
+      AGENT_MODEL_ALLOWED_HOSTS: ${AGENT_MODEL_ALLOWED_HOSTS:-api.openai.com}
+      SEARCH_CURSOR_SECRET: ${SEARCH_CURSOR_SECRET:?SEARCH_CURSOR_SECRET must be set}
+      AGENT_MODEL_MAX_CONCURRENT_REQUESTS: ${AGENT_MODEL_MAX_CONCURRENT_REQUESTS:-20}
+      OSS_REGION: ${OSS_REGION-}
+      OSS_BUCKET: ${OSS_BUCKET-}
+      OSS_ENDPOINT: ${OSS_ENDPOINT-}
+      OSS_PREFIX: ${OSS_PREFIX:-attachments/}
+      ATTACHMENT_CLAMAV_ADDR: ${ATTACHMENT_CLAMAV_ADDR:-clamav:3310}
+      ATTACHMENT_SCAN_TIMEOUT_SECONDS: ${ATTACHMENT_SCAN_TIMEOUT_SECONDS:-120}
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-agentchunzhi}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/${POSTGRES_DB:-agentchunzhi}?sslmode=disable"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clamav:
+        condition: service_healthy
+    networks: [internal]
+
+volumes:
+  postgres-data:
+  clamav-data:
+
+networks:
+  internal:
+    name: ${AGENTCHUNZHI_DOCKER_NETWORK:-agentchunzhi}

@@ -1,0 +1,167 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"log"
+	"net/http"
+	"os"
+	"os/signal"
+	"strings"
+	"syscall"
+	"time"
+
+	adminservice "agentchunzhi/internal/admin"
+	"agentchunzhi/internal/agentapp"
+	"agentchunzhi/internal/agentruntime"
+	agenttask "agentchunzhi/internal/agenttask"
+	assetservice "agentchunzhi/internal/asset"
+	"agentchunzhi/internal/attachment"
+	"agentchunzhi/internal/auth"
+	"agentchunzhi/internal/authz"
+	"agentchunzhi/internal/automation"
+	"agentchunzhi/internal/config"
+	"agentchunzhi/internal/container"
+	contentservice "agentchunzhi/internal/content"
+	"agentchunzhi/internal/conversation"
+	"agentchunzhi/internal/eventing"
+	"agentchunzhi/internal/httpapi"
+	"agentchunzhi/internal/modelendpoint"
+	"agentchunzhi/internal/objectstore"
+	"agentchunzhi/internal/query"
+	"agentchunzhi/internal/resourcemodel"
+	"agentchunzhi/internal/retrieval"
+	"agentchunzhi/internal/review"
+	"agentchunzhi/internal/store"
+	"agentchunzhi/internal/workspace"
+)
+
+func main() {
+	cfg := config.Load()
+	startupCtx, startupCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	db, err := store.Open(startupCtx, cfg.DatabaseURL)
+	if err != nil {
+		startupCancel()
+		log.Fatalf("database startup failed: %v", err)
+	}
+	if err := store.ApplyMigration(startupCtx, db, cfg.MigrationPath); err != nil {
+		db.Close()
+		startupCancel()
+		log.Fatalf("database migration failed: %v", err)
+	}
+	if err := eventing.Migrate(startupCtx, db.Pool); err != nil {
+		db.Close()
+		startupCancel()
+		log.Fatalf("River migration failed: %v", err)
+	}
+	startupCancel()
+	defer db.Close()
+	credentialCipher, err := modelendpoint.NewCredentialCipher(cfg.AgentModelSecretEncryptionKey)
+	if err != nil {
+		log.Fatalf("model credential encryption startup failed: %v", err)
+	}
+	modelRegistry := &agentruntime.ModelRegistry{
+		Source:  agentruntime.PostgresConfigSource{Store: db},
+		Cipher:  credentialCipher,
+		Secrets: agentruntime.EnvironmentSecretResolver{},
+		Factory: agentruntime.OpenAIModelFactory{
+			AllowedHosts: cfg.AgentModelAllowedHosts,
+			Limiter:      agentruntime.NewModelRequestLimiter(cfg.AgentModelMaxConcurrentRequests),
+		},
+		MaxEntries: cfg.AgentModelMaxCacheEntries,
+	}
+	events, err := eventing.NewEventStore(db.Pool)
+	if err != nil {
+		log.Fatalf("event store startup failed: %v", err)
+	}
+	var objects objectstore.ObjectStore
+	ossRegion, ossBucket := strings.TrimSpace(cfg.OSSRegion), strings.TrimSpace(cfg.OSSBucket)
+	if (ossRegion == "") != (ossBucket == "") {
+		log.Fatalf("OSS_REGION and OSS_BUCKET must be provided together")
+	}
+	if ossRegion != "" && ossBucket != "" {
+		ossStore, ossErr := objectstore.NewOSS(objectstore.OSSConfig{
+			Region:   ossRegion,
+			Bucket:   ossBucket,
+			Endpoint: cfg.OSSEndpoint,
+			Prefix:   cfg.OSSPrefix,
+		})
+		if ossErr != nil {
+			log.Fatalf("object storage startup failed: %v", ossErr)
+		}
+		objects = ossStore
+	}
+	var embeddings retrieval.EmbeddingProvider = retrieval.HTTPEmbeddingProvider{Endpoint: cfg.EmbeddingEndpoint, Token: cfg.EmbeddingToken, Model: cfg.EmbeddingModel, Protocol: cfg.EmbeddingProtocol, Dimension: cfg.EmbeddingDimension, Timeout: 5 * time.Second}
+	if cfg.EmbeddingEndpoint == "" && (cfg.Environment == "development" || cfg.Environment == "test") {
+		embeddings = retrieval.HashEmbeddingProvider{Dimensions: retrieval.DefaultEmbeddingDimensions}
+	} else if cfg.EmbeddingEndpoint != "" {
+		embeddings = retrieval.HTTPEmbeddingProvider{Endpoint: cfg.EmbeddingEndpoint, Token: cfg.EmbeddingToken, Model: cfg.EmbeddingModel, Protocol: cfg.EmbeddingProtocol, Dimension: cfg.EmbeddingDimension, Timeout: 5 * time.Second}
+	}
+	var reranker query.Reranker
+	if cfg.RerankerEndpoint != "" {
+		reranker = query.HTTPReranker{Endpoint: cfg.RerankerEndpoint, Token: cfg.RerankerToken, ModelVersion: cfg.RerankerModelVersion, Protocol: cfg.RerankerProtocol, Timeout: time.Second}
+	}
+	scopeResolver := authz.ScopeResolver{Store: db}
+	queryService := query.Service{Store: db, Embeddings: embeddings, Reranker: reranker, CursorSecret: cfg.SearchCursorSecret}
+	ragRuntime := agentruntime.RAGRuntime{
+		Models: modelRegistry,
+		Retriever: agentruntime.QueryKnowledgeRetriever{
+			Scope: scopeResolver,
+			Query: queryService,
+		},
+	}
+	deps := httpapi.Dependencies{
+		Store:           db,
+		Authenticator:   auth.APIKeyAuthenticator{Store: db},
+		SessionService:  auth.SessionService{Store: db},
+		ScopeResolver:   scopeResolver,
+		WorkspacePolicy: authz.WorkspacePolicyService{Store: db},
+		QueryService:    queryService,
+		AttachmentService: attachment.Service{
+			Store:        db,
+			Events:       events,
+			Objects:      objects,
+			ObjectPrefix: cfg.OSSPrefix,
+			MaxBytes:     cfg.AttachmentMaxBytes,
+		},
+		AssetService:     assetservice.Service{Store: db, Events: events},
+		AgentAppService:  agentapp.Service{Store: db},
+		AgentRuntime:     ragRuntime,
+		AgentTaskService: agenttask.Service{Store: db},
+		ModelEndpointService: modelendpoint.Service{
+			Store: db, Cipher: credentialCipher, AllowedHosts: cfg.AgentModelAllowedHosts,
+			DefaultTimeout: cfg.AgentModelDefaultTimeout, Health: modelRegistry,
+		},
+		AdminService:         adminservice.Service{Store: db},
+		WorkspaceService:     workspace.Service{Store: db},
+		ResourceModelService: resourcemodel.Service{Store: db, Policy: authz.WorkspacePolicyService{Store: db}},
+		MemberAssetService:   assetservice.MemberService{Store: db, Events: events, Policy: authz.WorkspacePolicyService{Store: db}},
+		TransferService:      assetservice.TransferService{Store: db, Policy: authz.WorkspacePolicyService{Store: db}},
+		ReviewService:        review.Service{Store: db, Policy: authz.WorkspacePolicyService{Store: db}},
+		ContainerService:     container.Service{Store: db, Policy: authz.WorkspacePolicyService{Store: db}},
+		ConversationService:  conversation.Service{Store: db, Policy: authz.WorkspacePolicyService{Store: db}, Content: contentservice.Service{Store: db, Events: events}},
+		AutomationService:    automation.Service{Store: db, Policy: authz.WorkspacePolicyService{Store: db}},
+	}
+	server := &http.Server{
+		Addr:              cfg.HTTPAddr,
+		Handler:           httpapi.NewHandlerWithDeps(deps),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	go func() {
+		log.Printf("api listening on %s environment=%s", cfg.HTTPAddr, cfg.Environment)
+		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("api server failed: %v", err)
+		}
+	}()
+
+	<-ctx.Done()
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		log.Printf("api shutdown failed: %v", err)
+	}
+}

@@ -1,0 +1,1635 @@
+package content
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	"agentchunzhi/internal/auth"
+	"agentchunzhi/internal/eventing"
+	"agentchunzhi/internal/retrieval"
+	"agentchunzhi/internal/store"
+
+	"github.com/jackc/pgx/v5"
+)
+
+var (
+	ErrInvalidInput = errors.New("invalid content input")
+	ErrForbidden    = errors.New("content access denied")
+	ErrNotFound     = errors.New("content not found")
+	ErrConflict     = errors.New("content conflict")
+)
+
+type Service struct {
+	Store  *store.Store
+	Events eventing.EventStore
+}
+
+type CreateConversationInput struct {
+	WorkspaceID        string
+	AgentApplicationID string
+	ContainerID        string
+	Title              string
+	Source             string
+	Visibility         string
+}
+
+type ConversationResult struct {
+	ConversationID     string `json:"conversation_id"`
+	WorkspaceID        string `json:"workspace_id"`
+	ContainerID        string `json:"container_id"`
+	NoteContainerID    string `json:"note_container_id"`
+	NoteAssetID        string `json:"note_asset_id"`
+	AgentApplicationID string `json:"agent_application_id"`
+	BoundAgentUserID   string `json:"bound_agent_user_id"`
+	Status             string `json:"status"`
+}
+
+type Conversation struct {
+	ConversationResult
+	Title      string `json:"title"`
+	Source     string `json:"source"`
+	Visibility string `json:"visibility"`
+	CreatedAt  string `json:"created_at"`
+	UpdatedAt  string `json:"updated_at"`
+}
+
+type RegisterMediaInput struct {
+	ConversationID string
+	AttachmentID   string
+	MediaKind      string
+	Language       string
+	DurationMS     *int64
+}
+
+type MediaResult struct {
+	MediaID                      string `json:"media_id"`
+	ConversationID               string `json:"conversation_id"`
+	AttachmentID                 string `json:"attachment_id"`
+	MediaKind                    string `json:"media_kind"`
+	Status                       string `json:"status"`
+	Language                     string `json:"language,omitempty"`
+	DurationMS                   *int64 `json:"duration_ms,omitempty"`
+	TranscriptionJobID           string `json:"transcription_job_id,omitempty"`
+	TranscriptionBlockRevisionID string `json:"transcription_block_revision_id,omitempty"`
+	CreatedAt                    string `json:"created_at"`
+	UpdatedAt                    string `json:"updated_at"`
+}
+
+type AppendMessageInput struct {
+	ConversationID         string
+	Role                   string
+	Content                string
+	ContentFormat          string
+	ProviderConversationID string
+	ProviderMessageID      string
+	Status                 string
+	ReplyToBlockID         string
+	References             []MessageReferenceInput
+}
+
+type MessageReferenceInput struct {
+	AssetID        string
+	AssetVersionID string
+	Title          string
+	URL            string
+	SourceExcerpt  string
+	UpdatedAt      string
+}
+
+type MessageResult struct {
+	BlockRevisionID string `json:"block_revision_id"`
+	BlockID         string `json:"block_id"`
+	ConversationID  string `json:"conversation_id"`
+	SequenceNo      int64  `json:"sequence_no"`
+	Role            string `json:"role"`
+	Status          string `json:"status"`
+}
+
+type Message struct {
+	BlockRevisionID      string             `json:"block_revision_id"`
+	BlockID              string             `json:"block_id"`
+	ConversationID       string             `json:"conversation_id"`
+	Role                 string             `json:"role"`
+	Content              string             `json:"content"`
+	ContentFormat        string             `json:"content_format"`
+	Status               string             `json:"status"`
+	ProviderConversation string             `json:"provider_conversation_id,omitempty"`
+	ProviderMessage      string             `json:"provider_message_id,omitempty"`
+	SequenceNo           int64              `json:"sequence_no"`
+	CreatedAt            string             `json:"created_at"`
+	References           []MessageReference `json:"references"`
+}
+
+type MessageReference struct {
+	AssetID        string `json:"asset_id"`
+	AssetVersionID string `json:"asset_version_id"`
+	Title          string `json:"title"`
+	URL            string `json:"url"`
+	SourceExcerpt  string `json:"source_excerpt,omitempty"`
+	UpdatedAt      string `json:"updated_at"`
+}
+
+type NoteSyncResult struct {
+	ConversationID string `json:"conversation_id"`
+	NoteAssetID    string `json:"note_asset_id"`
+	AssetVersionID string `json:"asset_version_id"`
+	MessageCount   int    `json:"message_count"`
+	Status         string `json:"status"`
+}
+
+type NotePublishResult struct {
+	ConversationID    string `json:"conversation_id"`
+	NoteAssetID       string `json:"note_asset_id"`
+	AssetVersionID    string `json:"asset_version_id"`
+	PublicationStatus string `json:"publication_status"`
+	Quality           string `json:"quality"`
+}
+
+type CreateDerivationInput struct {
+	SourceConversationID   string
+	SourceBlockRevisionIDs []string
+	ContextPolicy          string
+	Title                  string
+}
+
+type DerivationResult struct {
+	DerivationID         string `json:"derivation_id"`
+	SourceConversationID string `json:"source_conversation_id"`
+	TargetConversationID string `json:"target_conversation_id"`
+	TargetNoteAssetID    string `json:"target_note_asset_id"`
+	Operation            string `json:"operation"`
+	ContextPolicy        string `json:"context_policy"`
+	Status               string `json:"status"`
+}
+
+func (s Service) CreateDerivation(ctx context.Context, principal auth.Principal, idempotencyKey string, input CreateDerivationInput) (DerivationResult, error) {
+	if principal.UserType != "member" || !validID(principal.OrganizationID) || !validID(principal.UserID) ||
+		!validID(input.SourceConversationID) || !validIdempotencyKey(idempotencyKey) || len(input.SourceBlockRevisionIDs) == 0 || len(input.SourceBlockRevisionIDs) > 50 {
+		return DerivationResult{}, ErrInvalidInput
+	}
+	input.ContextPolicy = strings.TrimSpace(input.ContextPolicy)
+	if input.ContextPolicy == "" {
+		input.ContextPolicy = "summary_only"
+	}
+	if input.ContextPolicy != "summary_only" && input.ContextPolicy != "selected_only" && input.ContextPolicy != "full" {
+		return DerivationResult{}, ErrInvalidInput
+	}
+	for _, id := range input.SourceBlockRevisionIDs {
+		if !validID(id) {
+			return DerivationResult{}, ErrInvalidInput
+		}
+	}
+	if s.Store == nil || s.Store.Pool == nil {
+		return DerivationResult{}, errors.New("database store is not initialized")
+	}
+	tx, err := s.Store.Pool.Begin(ctx)
+	if err != nil {
+		return DerivationResult{}, fmt.Errorf("begin derivation create: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	state, err := reserveIdempotency(ctx, tx, principal, "conversation.derivation.create", idempotencyKey, hashRequest(input))
+	if err != nil {
+		return DerivationResult{}, err
+	}
+	if state.replay {
+		var result DerivationResult
+		if err := json.Unmarshal(state.body, &result); err != nil {
+			return DerivationResult{}, fmt.Errorf("decode idempotent derivation: %w", err)
+		}
+		return result, nil
+	}
+	var workspaceID, sourceContainerID, sourceVersionID, sourceTitle, sourceVisibility, appID, boundAgent string
+	var noteModelID, noteModelVersionID string
+	err = tx.QueryRow(ctx, `
+		SELECT c.workspace_id::text, c.container_id::text, cv.id::text, c.title, c.visibility,
+		       c.agent_application_id::text, c.bound_agent_user_id::text,
+		       av.resource_model_id::text, av.resource_model_version_id::text
+		FROM content.conversations c
+                JOIN content.workspace_members wm ON wm.workspace_id = c.workspace_id AND wm.user_id = $3::uuid
+		JOIN content.containers cc ON cc.id = c.container_id AND cc.organization_id = c.organization_id
+		JOIN content.container_versions cv ON cv.id = cc.current_version_id
+		JOIN content.note_bindings nb ON nb.conversation_id = c.id
+		JOIN asset.assets a ON a.id = nb.note_asset_id AND a.organization_id = c.organization_id
+		JOIN asset.asset_versions av ON av.id = a.current_working_version_id
+		WHERE c.organization_id = $1::uuid AND c.id = $2::uuid AND c.status = 'active'
+		FOR UPDATE OF c, cc, cv, nb, a
+	`, principal.OrganizationID, input.SourceConversationID, principal.UserID).Scan(
+		&workspaceID, &sourceContainerID, &sourceVersionID, &sourceTitle, &sourceVisibility, &appID, &boundAgent,
+		&noteModelID, &noteModelVersionID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return DerivationResult{}, ErrNotFound
+	}
+	if err != nil {
+		return DerivationResult{}, fmt.Errorf("load derivation source conversation: %w", err)
+	}
+	type sourceBlock struct {
+		ID      string `json:"id"`
+		Content string `json:"content"`
+	}
+	sources := make(map[string]sourceBlock, len(input.SourceBlockRevisionIDs))
+	rows, err := tx.Query(ctx, `
+		SELECT br.id::text, br.content
+		FROM content.block_revisions br
+		JOIN content.message_blocks mb ON mb.block_revision_id = br.id
+		WHERE br.organization_id = $1::uuid AND mb.organization_id = $1::uuid
+		  AND mb.conversation_id = $2::uuid AND br.id = ANY($3::uuid[])
+		UNION
+		SELECT br.id::text, br.content
+		FROM content.block_revisions br
+		JOIN content.block_placements bp ON bp.block_revision_id = br.id
+		WHERE br.organization_id = $1::uuid AND bp.organization_id = $1::uuid
+		  AND bp.container_version_id = $4::uuid AND br.id = ANY($3::uuid[])
+	`, principal.OrganizationID, input.SourceConversationID, input.SourceBlockRevisionIDs, sourceVersionID)
+	if err != nil {
+		return DerivationResult{}, fmt.Errorf("load derivation source blocks: %w", err)
+	}
+	for rows.Next() {
+		var item sourceBlock
+		if err := rows.Scan(&item.ID, &item.Content); err != nil {
+			rows.Close()
+			return DerivationResult{}, fmt.Errorf("scan derivation source block: %w", err)
+		}
+		sources[item.ID] = item
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return DerivationResult{}, fmt.Errorf("iterate derivation source blocks: %w", err)
+	}
+	rows.Close()
+	for _, id := range input.SourceBlockRevisionIDs {
+		if _, ok := sources[id]; !ok {
+			return DerivationResult{}, ErrNotFound
+		}
+	}
+	title := strings.TrimSpace(input.Title)
+	if title == "" {
+		title = "Derived: " + sourceTitle
+	}
+	contextItems := make([]sourceBlock, 0, len(input.SourceBlockRevisionIDs))
+	for _, id := range input.SourceBlockRevisionIDs {
+		item := sources[id]
+		if len(item.Content) > 2000 {
+			item.Content = item.Content[:2000]
+		}
+		contextItems = append(contextItems, item)
+	}
+	contextSnapshot, _ := json.Marshal(map[string]any{
+		"source_conversation_id":      input.SourceConversationID,
+		"source_container_version_id": sourceVersionID,
+		"source_block_revision_ids":   input.SourceBlockRevisionIDs,
+		"blocks":                      contextItems,
+	})
+	var derivationID string
+	if err := tx.QueryRow(ctx, `
+		INSERT INTO content.derivations
+			(organization_id, workspace_id, source_conversation_id, operation, context_policy, context_snapshot, created_by, status)
+		VALUES ($1::uuid, $2::uuid, $3::uuid, 'create_chat', $4, $5::jsonb, $6::uuid, 'requested')
+		RETURNING id::text
+	`, principal.OrganizationID, workspaceID, input.SourceConversationID, input.ContextPolicy, string(contextSnapshot), principal.UserID).Scan(&derivationID); err != nil {
+		return DerivationResult{}, fmt.Errorf("create derivation: %w", err)
+	}
+	var chatContainer, noteContainer string
+	if err := tx.QueryRow(ctx, `
+		INSERT INTO content.containers (organization_id, workspace_id, kind, title, visibility, created_by)
+		VALUES ($1::uuid, $2::uuid, 'chat', $3, $4, $5::uuid) RETURNING id::text
+	`, principal.OrganizationID, workspaceID, title, sourceVisibility, principal.UserID).Scan(&chatContainer); err != nil {
+		return DerivationResult{}, fmt.Errorf("create derived chat container: %w", err)
+	}
+	if err := createEmptyContainerVersion(ctx, tx, principal.OrganizationID, chatContainer, principal.UserID, emptyChecksum()); err != nil {
+		return DerivationResult{}, err
+	}
+	if err := tx.QueryRow(ctx, `
+		INSERT INTO content.containers (organization_id, workspace_id, kind, title, visibility, created_by)
+		VALUES ($1::uuid, $2::uuid, 'note', $3, $4, $5::uuid) RETURNING id::text
+	`, principal.OrganizationID, workspaceID, title, sourceVisibility, principal.UserID).Scan(&noteContainer); err != nil {
+		return DerivationResult{}, fmt.Errorf("create derived note container: %w", err)
+	}
+	if err := createEmptyContainerVersion(ctx, tx, principal.OrganizationID, noteContainer, principal.UserID, emptyChecksum()); err != nil {
+		return DerivationResult{}, err
+	}
+	var noteAsset string
+	if err := tx.QueryRow(ctx, `
+			INSERT INTO asset.assets (organization_id, workspace_id, resource_model_id, publication_status, created_by)
+			VALUES ($1::uuid, $2::uuid, $3::uuid, 'draft', $4::uuid) RETURNING id::text
+		`, principal.OrganizationID, workspaceID, noteModelID, principal.UserID).Scan(&noteAsset); err != nil {
+		return DerivationResult{}, fmt.Errorf("create derived note asset: %w", err)
+	}
+	var noteVersion string
+	if err := tx.QueryRow(ctx, `
+		INSERT INTO asset.asset_versions
+				(organization_id, workspace_id, asset_id, resource_model_id, resource_model_version_id, version_no,
+				 workflow_status, quality, title, markdown, fields, content_checksum, created_by)
+			VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid, 1, 'draft', 'raw', $6, '', '{}'::jsonb, $7, $8::uuid)
+			RETURNING id::text
+		`, principal.OrganizationID, workspaceID, noteAsset, noteModelID, noteModelVersionID, title, emptyChecksum(), principal.UserID).Scan(&noteVersion); err != nil {
+		return DerivationResult{}, fmt.Errorf("create derived note version: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE asset.assets SET current_working_version_id = $2::uuid WHERE id = $1::uuid`, noteAsset, noteVersion); err != nil {
+		return DerivationResult{}, fmt.Errorf("set derived note working version: %w", err)
+	}
+	var targetConversation string
+	if err := tx.QueryRow(ctx, `
+		INSERT INTO content.conversations
+			(organization_id, workspace_id, container_id, initiator_user_id, agent_application_id,
+			 bound_agent_user_id, parent_conversation_id, origin_derivation_id, title, source, visibility, source_summary)
+		VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6::uuid, $7::uuid, $8::uuid, $9, 'chat_interface', $10, $11::jsonb)
+		RETURNING id::text
+	`, principal.OrganizationID, workspaceID, chatContainer, principal.UserID, appID, boundAgent, input.SourceConversationID, derivationID, title, sourceVisibility, string(contextSnapshot)).Scan(&targetConversation); err != nil {
+		return DerivationResult{}, fmt.Errorf("create derived conversation: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO content.note_bindings (organization_id, conversation_id, note_container_id, note_asset_id)
+		VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid)
+	`, principal.OrganizationID, targetConversation, noteContainer, noteAsset); err != nil {
+		return DerivationResult{}, fmt.Errorf("bind derived note: %w", err)
+	}
+	for ordinal, id := range input.SourceBlockRevisionIDs {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO content.derivation_sources
+				(derivation_id, ordinal, source_container_id, source_container_version_id, source_block_revision_id, source_excerpt, context_role)
+			VALUES ($1::uuid, $2, $3::uuid, $4::uuid, $5::uuid, $6, 'selected')
+		`, derivationID, ordinal, sourceContainerID, sourceVersionID, id, sources[id].Content); err != nil {
+			return DerivationResult{}, fmt.Errorf("save derivation source: %w", err)
+		}
+	}
+	if _, err := tx.Exec(ctx, `UPDATE content.derivations SET target_conversation_id = $2::uuid, status = 'discussing', updated_at = now() WHERE id = $1::uuid`, derivationID, targetConversation); err != nil {
+		return DerivationResult{}, fmt.Errorf("advance derivation status: %w", err)
+	}
+	result := DerivationResult{DerivationID: derivationID, SourceConversationID: input.SourceConversationID, TargetConversationID: targetConversation, TargetNoteAssetID: noteAsset, Operation: "create_chat", ContextPolicy: input.ContextPolicy, Status: "discussing"}
+	body, _ := json.Marshal(result)
+	if err := saveIdempotency(ctx, tx, principal, "conversation.derivation.create", idempotencyKey, body); err != nil {
+		return DerivationResult{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return DerivationResult{}, fmt.Errorf("commit derivation create: %w", err)
+	}
+	return result, nil
+}
+
+func (s Service) GetDerivation(ctx context.Context, principal auth.Principal, derivationID string) (DerivationResult, error) {
+	if principal.UserType != "member" || !validID(principal.OrganizationID) || !validID(principal.UserID) || !validID(derivationID) {
+		return DerivationResult{}, ErrInvalidInput
+	}
+	if s.Store == nil || s.Store.Pool == nil {
+		return DerivationResult{}, errors.New("database store is not initialized")
+	}
+	var result DerivationResult
+	err := s.Store.Pool.QueryRow(ctx, `
+		SELECT d.id::text, d.source_conversation_id::text, d.target_conversation_id::text,
+		       COALESCE(nb.note_asset_id::text, ''), d.operation, d.context_policy, d.status
+		FROM content.derivations d
+		JOIN content.workspace_members wm ON wm.workspace_id = d.workspace_id AND wm.user_id = $3::uuid
+		LEFT JOIN content.note_bindings nb ON nb.conversation_id = d.target_conversation_id
+		WHERE d.organization_id = $1::uuid AND d.id = $2::uuid
+	`, principal.OrganizationID, derivationID, principal.UserID).Scan(
+		&result.DerivationID, &result.SourceConversationID, &result.TargetConversationID,
+		&result.TargetNoteAssetID, &result.Operation, &result.ContextPolicy, &result.Status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return DerivationResult{}, ErrNotFound
+	}
+	if err != nil {
+		return DerivationResult{}, fmt.Errorf("load derivation: %w", err)
+	}
+	return result, nil
+}
+
+type FinalizeDerivationInput struct {
+	Disposition                  string
+	TargetAssetID                string
+	ExpectedSourceAssetVersionID string
+	ExpectedTargetAssetVersionID string
+	ExpectedContainerVersionID   string
+	MergeMode                    string
+	TargetBlockID                string
+}
+
+type FinalizeResult struct {
+	DerivationID   string `json:"derivation_id"`
+	Disposition    string `json:"disposition"`
+	AssetID        string `json:"asset_id"`
+	AssetVersionID string `json:"asset_version_id"`
+	RelationID     string `json:"relation_id,omitempty"`
+	Status         string `json:"status"`
+}
+
+func (s Service) FinalizeDerivation(ctx context.Context, principal auth.Principal, idempotencyKey, derivationID string, input FinalizeDerivationInput) (FinalizeResult, error) {
+	if principal.UserType != "member" || !validID(principal.OrganizationID) || !validID(principal.UserID) ||
+		!validID(derivationID) || !validIdempotencyKey(idempotencyKey) {
+		return FinalizeResult{}, ErrInvalidInput
+	}
+	input.Disposition = strings.TrimSpace(input.Disposition)
+	input.MergeMode = strings.TrimSpace(input.MergeMode)
+	if input.Disposition != "independent" && input.Disposition != "reference" && input.Disposition != "merge" {
+		return FinalizeResult{}, ErrInvalidInput
+	}
+	if input.ExpectedSourceAssetVersionID != "" && !validID(input.ExpectedSourceAssetVersionID) {
+		return FinalizeResult{}, ErrInvalidInput
+	}
+	if input.TargetAssetID != "" && !validID(input.TargetAssetID) {
+		return FinalizeResult{}, ErrInvalidInput
+	}
+	if input.ExpectedTargetAssetVersionID != "" && !validID(input.ExpectedTargetAssetVersionID) {
+		return FinalizeResult{}, ErrInvalidInput
+	}
+	if input.ExpectedContainerVersionID != "" && !validID(input.ExpectedContainerVersionID) {
+		return FinalizeResult{}, ErrInvalidInput
+	}
+	if input.TargetBlockID != "" && !validID(input.TargetBlockID) {
+		return FinalizeResult{}, ErrInvalidInput
+	}
+	if input.Disposition == "merge" && (input.TargetAssetID == "" || input.ExpectedTargetAssetVersionID == "" || input.MergeMode == "") {
+		return FinalizeResult{}, ErrInvalidInput
+	}
+	if input.Disposition == "merge" && input.MergeMode != "append" {
+		return FinalizeResult{}, fmt.Errorf("%w: only append merge mode is currently supported", ErrConflict)
+	}
+	if s.Store == nil || s.Store.Pool == nil {
+		return FinalizeResult{}, errors.New("database store is not initialized")
+	}
+	tx, err := s.Store.Pool.Begin(ctx)
+	if err != nil {
+		return FinalizeResult{}, fmt.Errorf("begin derivation finalize: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	state, err := reserveIdempotency(ctx, tx, principal, "conversation.derivation.finalize", idempotencyKey, hashRequest(input))
+	if err != nil {
+		return FinalizeResult{}, err
+	}
+	if state.replay {
+		var result FinalizeResult
+		if err := json.Unmarshal(state.body, &result); err != nil {
+			return FinalizeResult{}, fmt.Errorf("decode idempotent derivation finalize: %w", err)
+		}
+		return result, nil
+	}
+	var workspaceID, sourceConversationID, targetConversationID, sourceNoteAssetID, targetNoteAssetID, derivationStatus string
+	if err := tx.QueryRow(ctx, `
+		SELECT d.workspace_id::text, d.source_conversation_id::text, d.target_conversation_id::text,
+		       snb.note_asset_id::text, tnb.note_asset_id::text, d.status
+		FROM content.derivations d
+		JOIN content.workspace_members wm ON wm.workspace_id = d.workspace_id AND wm.user_id = $3::uuid
+		JOIN content.note_bindings snb ON snb.conversation_id = d.source_conversation_id
+		JOIN content.note_bindings tnb ON tnb.conversation_id = d.target_conversation_id
+		WHERE d.organization_id = $1::uuid AND d.id = $2::uuid
+		FOR UPDATE OF d, snb, tnb
+	`, principal.OrganizationID, derivationID, principal.UserID).Scan(&workspaceID, &sourceConversationID, &targetConversationID, &sourceNoteAssetID, &targetNoteAssetID, &derivationStatus); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return FinalizeResult{}, ErrNotFound
+		}
+		return FinalizeResult{}, fmt.Errorf("load derivation for finalize: %w", err)
+	}
+	if derivationStatus == "completed" {
+		return FinalizeResult{}, ErrConflict
+	}
+	if derivationStatus != "discussing" && derivationStatus != "result_ready" && derivationStatus != "finalizing" {
+		return FinalizeResult{}, fmt.Errorf("%w: derivation is not ready", ErrConflict)
+	}
+	var sourceVersionID, sourceModelID, sourceModelVersionID, sourceTitle string
+	var sourceMarkdown, sourceFields []byte
+	if err := tx.QueryRow(ctx, `
+		SELECT av.id::text, av.resource_model_id::text, av.resource_model_version_id::text,
+		       COALESCE(av.title, ''), COALESCE(av.markdown, ''), av.fields
+		FROM asset.assets a JOIN asset.asset_versions av ON av.id = a.current_working_version_id
+		WHERE a.organization_id = $1::uuid AND a.id = $2::uuid
+		FOR UPDATE OF a, av
+	`, principal.OrganizationID, sourceNoteAssetID).Scan(&sourceVersionID, &sourceModelID, &sourceModelVersionID, &sourceTitle, &sourceMarkdown, &sourceFields); err != nil {
+		return FinalizeResult{}, fmt.Errorf("load source note version: %w", err)
+	}
+	if input.ExpectedSourceAssetVersionID != "" && input.ExpectedSourceAssetVersionID != sourceVersionID {
+		return FinalizeResult{}, fmt.Errorf("%w: source version changed", ErrConflict)
+	}
+	result := FinalizeResult{DerivationID: derivationID, Disposition: input.Disposition, Status: "completed"}
+	if input.Disposition == "merge" {
+		var targetVersionID, targetModelID, targetModelVersionID, targetTitle string
+		var targetMarkdown, targetFields []byte
+		if err := tx.QueryRow(ctx, `
+			SELECT av.id::text, av.resource_model_id::text, av.resource_model_version_id::text,
+			       COALESCE(av.title, ''), COALESCE(av.markdown, ''), av.fields
+			FROM asset.assets a JOIN asset.asset_versions av ON av.id = a.current_working_version_id
+			WHERE a.organization_id = $1::uuid AND a.id = $2::uuid
+			FOR UPDATE OF a, av
+		`, principal.OrganizationID, input.TargetAssetID).Scan(&targetVersionID, &targetModelID, &targetModelVersionID, &targetTitle, &targetMarkdown, &targetFields); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return FinalizeResult{}, ErrNotFound
+			}
+			return FinalizeResult{}, fmt.Errorf("load merge target: %w", err)
+		}
+		if targetVersionID != input.ExpectedTargetAssetVersionID {
+			return FinalizeResult{}, fmt.Errorf("%w: target version changed", ErrConflict)
+		}
+		if input.ExpectedContainerVersionID != "" {
+			var currentContainerVersion string
+			err := tx.QueryRow(ctx, `
+				SELECT cv.id::text FROM content.note_bindings nb
+				JOIN content.containers c ON c.id = nb.note_container_id
+				JOIN content.container_versions cv ON cv.id = c.current_version_id
+				WHERE nb.organization_id = $1::uuid AND nb.note_asset_id = $2::uuid
+			`, principal.OrganizationID, input.TargetAssetID).Scan(&currentContainerVersion)
+			if errors.Is(err, pgx.ErrNoRows) || currentContainerVersion != input.ExpectedContainerVersionID {
+				return FinalizeResult{}, fmt.Errorf("%w: target container version changed", ErrConflict)
+			}
+		}
+		var nextVersion int
+		if err := tx.QueryRow(ctx, `SELECT COALESCE(MAX(version_no), 0) + 1 FROM asset.asset_versions WHERE asset_id = $1::uuid`, input.TargetAssetID).Scan(&nextVersion); err != nil {
+			return FinalizeResult{}, fmt.Errorf("allocate merge version: %w", err)
+		}
+		mergedMarkdown := strings.TrimSpace(string(targetMarkdown)) + "\n\n" + strings.TrimSpace(string(sourceMarkdown))
+		if err := tx.QueryRow(ctx, `
+			INSERT INTO asset.asset_versions
+						(organization_id, workspace_id, asset_id, resource_model_id, resource_model_version_id, version_no,
+						 workflow_status, quality, title, markdown, fields, parent_version_id, content_checksum, created_by)
+					VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6, 'draft', 'raw', $7, $8, $9::jsonb, $10::uuid, $11, $12::uuid)
+					RETURNING id::text
+				`, principal.OrganizationID, workspaceID, input.TargetAssetID, targetModelID, targetModelVersionID, nextVersion, targetTitle, mergedMarkdown, string(targetFields), targetVersionID, hashBytes(mergedMarkdown), principal.UserID).Scan(&result.AssetVersionID); err != nil {
+			return FinalizeResult{}, fmt.Errorf("create merge version: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `UPDATE asset.assets SET current_working_version_id = $2::uuid, updated_at = now() WHERE organization_id = $1::uuid AND id = $3::uuid`, principal.OrganizationID, result.AssetVersionID, input.TargetAssetID); err != nil {
+			return FinalizeResult{}, fmt.Errorf("advance merge target: %w", err)
+		}
+		result.AssetID = input.TargetAssetID
+		if err := tx.QueryRow(ctx, `
+			INSERT INTO content.asset_relations
+				(organization_id, source_type, source_id, target_type, target_id, derivation_id, relation_type, created_by)
+			VALUES ($1::uuid, 'asset_version', $2::uuid, 'asset_version', $3::uuid, $4::uuid, 'continues_from', $5::uuid)
+			RETURNING id::text
+		`, principal.OrganizationID, sourceVersionID, result.AssetVersionID, derivationID, principal.UserID).Scan(&result.RelationID); err != nil {
+			return FinalizeResult{}, fmt.Errorf("create merge relation: %w", err)
+		}
+	} else {
+		var title string
+		if err := tx.QueryRow(ctx, `SELECT title FROM content.conversations WHERE organization_id = $1::uuid AND id = $2::uuid`, principal.OrganizationID, targetConversationID).Scan(&title); err != nil {
+			return FinalizeResult{}, fmt.Errorf("load result note title: %w", err)
+		}
+		var documentContainer string
+		if err := tx.QueryRow(ctx, `
+			INSERT INTO content.containers (organization_id, workspace_id, kind, title, visibility, created_by)
+			SELECT $1::uuid, $2::uuid, 'document', $3, visibility, $4::uuid
+			FROM content.conversations WHERE organization_id = $1::uuid AND id = $5::uuid
+			RETURNING id::text
+		`, principal.OrganizationID, workspaceID, title, principal.UserID, targetConversationID).Scan(&documentContainer); err != nil {
+			return FinalizeResult{}, fmt.Errorf("create result document container: %w", err)
+		}
+		if err := createEmptyContainerVersion(ctx, tx, principal.OrganizationID, documentContainer, principal.UserID, hashBytes(string(sourceMarkdown))); err != nil {
+			return FinalizeResult{}, err
+		}
+		if err := tx.QueryRow(ctx, `
+					INSERT INTO asset.assets (organization_id, workspace_id, resource_model_id, publication_status, created_by)
+					VALUES ($1::uuid, $2::uuid, $3::uuid, 'draft', $4::uuid) RETURNING id::text
+				`, principal.OrganizationID, workspaceID, sourceModelID, principal.UserID).Scan(&result.AssetID); err != nil {
+			return FinalizeResult{}, fmt.Errorf("create result document asset: %w", err)
+		}
+		if err := tx.QueryRow(ctx, `
+			INSERT INTO asset.asset_versions
+						(organization_id, workspace_id, asset_id, resource_model_id, resource_model_version_id, version_no,
+						 workflow_status, quality, title, markdown, fields, content_checksum, created_by)
+					VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid, 1, 'draft', 'raw', $6, $7, $8::jsonb, $9, $10::uuid)
+					RETURNING id::text
+				`, principal.OrganizationID, workspaceID, result.AssetID, sourceModelID, sourceModelVersionID, title, string(sourceMarkdown), string(sourceFields), hashBytes(string(sourceMarkdown)), principal.UserID).Scan(&result.AssetVersionID); err != nil {
+			return FinalizeResult{}, fmt.Errorf("create result document version: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `UPDATE asset.assets SET current_working_version_id = $2::uuid, updated_at = now() WHERE organization_id = $1::uuid AND id = $3::uuid`, principal.OrganizationID, result.AssetVersionID, result.AssetID); err != nil {
+			return FinalizeResult{}, fmt.Errorf("set result document version: %w", err)
+		}
+		if input.Disposition == "reference" {
+			if err := tx.QueryRow(ctx, `
+				INSERT INTO content.asset_relations
+					(organization_id, source_type, source_id, target_type, target_id, derivation_id, relation_type, created_by)
+				VALUES ($1::uuid, 'asset_version', $2::uuid, 'asset_version', $3::uuid, $4::uuid, 'derived_from', $5::uuid)
+				RETURNING id::text
+			`, principal.OrganizationID, sourceVersionID, result.AssetVersionID, derivationID, principal.UserID).Scan(&result.RelationID); err != nil {
+				return FinalizeResult{}, fmt.Errorf("create reference relation: %w", err)
+			}
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO content.asset_relations
+					(organization_id, source_type, source_id, target_type, target_id, derivation_id, relation_type, created_by)
+				VALUES ($1::uuid, 'asset_version', $2::uuid, 'asset_version', $3::uuid, $4::uuid, 'references', $5::uuid)
+			`, principal.OrganizationID, result.AssetVersionID, sourceVersionID, derivationID, principal.UserID); err != nil {
+				return FinalizeResult{}, fmt.Errorf("create reverse reference relation: %w", err)
+			}
+		}
+	}
+	if _, err := tx.Exec(ctx, `UPDATE content.derivations SET status = 'completed', updated_at = now() WHERE organization_id = $1::uuid AND id = $2::uuid`, principal.OrganizationID, derivationID); err != nil {
+		return FinalizeResult{}, fmt.Errorf("complete derivation: %w", err)
+	}
+	body, _ := json.Marshal(result)
+	if err := saveIdempotency(ctx, tx, principal, "conversation.derivation.finalize", idempotencyKey, body); err != nil {
+		return FinalizeResult{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return FinalizeResult{}, fmt.Errorf("commit derivation finalize: %w", err)
+	}
+	return result, nil
+}
+
+func (s Service) PublishNote(ctx context.Context, principal auth.Principal, idempotencyKey, conversationID, expectedVersionID string) (NotePublishResult, error) {
+	if principal.UserType != "member" || !validID(principal.OrganizationID) || !validID(principal.UserID) ||
+		!validID(conversationID) || !validID(expectedVersionID) || !validIdempotencyKey(idempotencyKey) {
+		return NotePublishResult{}, ErrInvalidInput
+	}
+	if s.Store == nil || s.Store.Pool == nil {
+		return NotePublishResult{}, errors.New("database store is not initialized")
+	}
+	tx, err := s.Store.Pool.Begin(ctx)
+	if err != nil {
+		return NotePublishResult{}, fmt.Errorf("begin note publish: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	state, err := reserveIdempotency(ctx, tx, principal, "conversation.note.publish", idempotencyKey,
+		hashRequest(struct {
+			ConversationID    string
+			ExpectedVersionID string
+		}{conversationID, expectedVersionID}))
+	if err != nil {
+		return NotePublishResult{}, err
+	}
+	if state.replay {
+		var result NotePublishResult
+		if err := json.Unmarshal(state.body, &result); err != nil {
+			return NotePublishResult{}, fmt.Errorf("decode idempotent note publish: %w", err)
+		}
+		return result, nil
+	}
+	var organizationID, noteAssetID, versionID, workflow, previousPublished string
+	err = tx.QueryRow(ctx, `
+		SELECT nb.organization_id::text, nb.note_asset_id::text, av.id::text, av.workflow_status,
+		       COALESCE(a.current_published_version_id::text, '')
+		FROM content.note_bindings nb
+		JOIN content.conversations c ON c.id = nb.conversation_id
+		JOIN content.workspace_members wm ON wm.workspace_id = c.workspace_id AND wm.user_id = $3::uuid
+		JOIN asset.assets a ON a.id = nb.note_asset_id AND a.organization_id = $1::uuid
+		JOIN asset.asset_versions av ON av.id = a.current_working_version_id
+                WHERE nb.organization_id = $1::uuid AND nb.conversation_id = $2::uuid
+                  AND av.id = $4::uuid
+                  AND wm.role <> 'viewer' AND (c.visibility = 'workspace' OR c.initiator_user_id = $3::uuid)
+		FOR UPDATE OF nb, a, av
+	`, principal.OrganizationID, conversationID, principal.UserID, expectedVersionID).Scan(&organizationID, &noteAssetID, &versionID, &workflow, &previousPublished)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return NotePublishResult{}, ErrNotFound
+	}
+	if err != nil {
+		return NotePublishResult{}, fmt.Errorf("load note for publish: %w", err)
+	}
+	if workflow != "draft" {
+		return NotePublishResult{}, fmt.Errorf("%w: note version is not publishable", ErrConflict)
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE asset.asset_versions
+		SET quality = CASE WHEN quality = 'high_quality' THEN quality ELSE 'human_confirmed' END
+		WHERE id = $1::uuid
+	`, versionID); err != nil {
+		return NotePublishResult{}, fmt.Errorf("confirm note version: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE asset.assets
+		SET current_published_version_id = $2::uuid, publication_status = 'published', updated_at = now()
+		WHERE id = $1::uuid
+	`, noteAssetID, versionID); err != nil {
+		return NotePublishResult{}, fmt.Errorf("publish note asset: %w", err)
+	}
+	if s.Events.Queue == nil {
+		return NotePublishResult{}, errors.New("event store is not initialized")
+	}
+	if previousPublished != "" && previousPublished != versionID {
+		if err := retrieval.EnqueueProjectionTx(ctx, tx, s.Events, organizationID, previousPublished, retrieval.ProjectionDelete); err != nil {
+			return NotePublishResult{}, err
+		}
+	}
+	if err := retrieval.EnqueueProjectionTx(ctx, tx, s.Events, organizationID, versionID, retrieval.ProjectionRebuild); err != nil {
+		return NotePublishResult{}, err
+	}
+	result := NotePublishResult{ConversationID: conversationID, NoteAssetID: noteAssetID, AssetVersionID: versionID, PublicationStatus: "published", Quality: "human_confirmed"}
+	body, _ := json.Marshal(result)
+	if err := saveIdempotency(ctx, tx, principal, "conversation.note.publish", idempotencyKey, body); err != nil {
+		return NotePublishResult{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return NotePublishResult{}, fmt.Errorf("commit note publish: %w", err)
+	}
+	return result, nil
+}
+
+func (s Service) SyncNote(ctx context.Context, principal auth.Principal, idempotencyKey, conversationID string) (NoteSyncResult, error) {
+	if principal.UserType != "member" || !validID(principal.OrganizationID) || !validID(principal.UserID) ||
+		!validID(conversationID) || !validIdempotencyKey(idempotencyKey) {
+		return NoteSyncResult{}, ErrInvalidInput
+	}
+	if s.Store == nil || s.Store.Pool == nil {
+		return NoteSyncResult{}, errors.New("database store is not initialized")
+	}
+	tx, err := s.Store.Pool.Begin(ctx)
+	if err != nil {
+		return NoteSyncResult{}, fmt.Errorf("begin note sync: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	requestHash := hashRequest(struct{ ConversationID string }{conversationID})
+	state, err := reserveIdempotency(ctx, tx, principal, "conversation.note.sync", idempotencyKey, requestHash)
+	if err != nil {
+		return NoteSyncResult{}, err
+	}
+	if state.replay {
+		var result NoteSyncResult
+		if err := json.Unmarshal(state.body, &result); err != nil {
+			return NoteSyncResult{}, fmt.Errorf("decode idempotent note sync: %w", err)
+		}
+		return result, nil
+	}
+	var noteContainerID, noteAssetID, resourceModelID, resourceModelVersionID string
+	if err := tx.QueryRow(ctx, `
+		SELECT nb.note_container_id::text, nb.note_asset_id::text, av.resource_model_id::text, av.resource_model_version_id::text
+		FROM content.note_bindings nb
+		JOIN content.conversations c ON c.id = nb.conversation_id
+                JOIN content.workspace_members wm ON wm.workspace_id = c.workspace_id AND wm.user_id = $3::uuid
+		JOIN asset.assets a ON a.id = nb.note_asset_id AND a.organization_id = $1::uuid
+		JOIN asset.asset_versions av ON av.id = a.current_working_version_id
+                WHERE nb.organization_id = $1::uuid AND nb.conversation_id = $2::uuid
+                  AND wm.role <> 'viewer' AND (c.visibility = 'workspace' OR c.initiator_user_id = $3::uuid)
+		FOR UPDATE OF nb, a
+	`, principal.OrganizationID, conversationID, principal.UserID).Scan(&noteContainerID, &noteAssetID, &resourceModelID, &resourceModelVersionID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return NoteSyncResult{}, ErrNotFound
+		}
+		return NoteSyncResult{}, fmt.Errorf("load note binding: %w", err)
+	}
+	rows, err := tx.Query(ctx, `
+		SELECT mb.role, br.content, mb.sequence_no
+		FROM content.message_blocks mb
+		JOIN content.block_revisions br ON br.id = mb.block_revision_id
+		WHERE mb.organization_id = $1::uuid AND mb.conversation_id = $2::uuid
+		ORDER BY mb.sequence_no
+	`, principal.OrganizationID, conversationID)
+	if err != nil {
+		return NoteSyncResult{}, fmt.Errorf("load conversation messages: %w", err)
+	}
+	defer rows.Close()
+	var markdown strings.Builder
+	messageCount := 0
+	lastSequence := int64(0)
+	for rows.Next() {
+		var role, content string
+		var sequence int64
+		if err := rows.Scan(&role, &content, &sequence); err != nil {
+			return NoteSyncResult{}, fmt.Errorf("scan conversation message: %w", err)
+		}
+		messageCount++
+		if sequence > lastSequence {
+			lastSequence = sequence
+		}
+		if markdown.Len() > 0 {
+			markdown.WriteString("\n\n")
+		}
+		markdown.WriteString("## ")
+		markdown.WriteString(strings.Title(role))
+		markdown.WriteString("\n\n")
+		markdown.WriteString(content)
+	}
+	if err := rows.Err(); err != nil {
+		return NoteSyncResult{}, fmt.Errorf("iterate conversation messages: %w", err)
+	}
+	content := markdown.String()
+	checksum := hashBytes(content)
+	var currentContainerVersion string
+	var containerVersionNo int64
+	if err := tx.QueryRow(ctx, `
+		SELECT cv.id::text, cv.version_no
+		FROM content.containers c
+		JOIN content.container_versions cv ON cv.id = c.current_version_id
+		WHERE c.organization_id = $1::uuid AND c.id = $2::uuid
+		FOR UPDATE OF c, cv
+	`, principal.OrganizationID, noteContainerID).Scan(&currentContainerVersion, &containerVersionNo); err != nil {
+		return NoteSyncResult{}, fmt.Errorf("load note container version: %w", err)
+	}
+	var noteContainerVersionID string
+	if err := tx.QueryRow(ctx, `
+		INSERT INTO content.container_versions
+			(organization_id, container_id, version_no, created_by, content_checksum)
+		VALUES ($1::uuid, $2::uuid, $3, $4::uuid, $5)
+		RETURNING id::text
+	`, principal.OrganizationID, noteContainerID, containerVersionNo+1, principal.UserID, checksum).Scan(&noteContainerVersionID); err != nil {
+		return NoteSyncResult{}, fmt.Errorf("create note container version: %w", err)
+	}
+	var blockID, blockRevisionID string
+	if err := tx.QueryRow(ctx, `
+		INSERT INTO content.blocks (organization_id, block_type, created_by)
+		VALUES ($1::uuid, 'paragraph', $2::uuid)
+		RETURNING id::text
+	`, principal.OrganizationID, principal.UserID).Scan(&blockID); err != nil {
+		return NoteSyncResult{}, fmt.Errorf("create note snapshot block: %w", err)
+	}
+	if err := tx.QueryRow(ctx, `
+		INSERT INTO content.block_revisions
+			(organization_id, block_id, revision_no, content, content_format, created_by, content_checksum)
+		VALUES ($1::uuid, $2::uuid, 1, $3, 'markdown', $4::uuid, $5)
+		RETURNING id::text
+	`, principal.OrganizationID, blockID, content, principal.UserID, checksum).Scan(&blockRevisionID); err != nil {
+		return NoteSyncResult{}, fmt.Errorf("create note snapshot revision: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO content.block_placements
+			(organization_id, container_version_id, block_revision_id, position)
+		VALUES ($1::uuid, $2::uuid, $3::uuid, 0)
+	`, principal.OrganizationID, noteContainerVersionID, blockRevisionID); err != nil {
+		return NoteSyncResult{}, fmt.Errorf("place note snapshot block: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE content.containers SET current_version_id = $2::uuid, updated_at = now() WHERE organization_id = $1::uuid AND id = $3::uuid`, principal.OrganizationID, noteContainerVersionID, noteContainerID); err != nil {
+		return NoteSyncResult{}, fmt.Errorf("advance note container version: %w", err)
+	}
+	var nextVersion int
+	if err := tx.QueryRow(ctx, `SELECT COALESCE(MAX(version_no), 0) + 1 FROM asset.asset_versions WHERE asset_id = $1::uuid`, noteAssetID).Scan(&nextVersion); err != nil {
+		return NoteSyncResult{}, fmt.Errorf("allocate note version: %w", err)
+	}
+	var versionID string
+	if err := tx.QueryRow(ctx, `
+		INSERT INTO asset.asset_versions
+				(organization_id, workspace_id, asset_id, resource_model_id, resource_model_version_id, version_no,
+				 workflow_status, quality, title, markdown, fields, parent_version_id, content_checksum, created_by)
+			SELECT a.organization_id, a.workspace_id, a.id, $2::uuid, $3::uuid, $4, 'draft', 'raw',
+		       COALESCE(av.title, 'Untitled Note'), $5, COALESCE(av.fields, '{}'::jsonb), av.id, $6, $7::uuid
+		FROM asset.assets a
+		JOIN asset.asset_versions av ON av.id = a.current_working_version_id
+		WHERE a.id = $1::uuid
+		RETURNING id::text
+	`, noteAssetID, resourceModelID, resourceModelVersionID, nextVersion, content, checksum, principal.UserID).Scan(&versionID); err != nil {
+		return NoteSyncResult{}, fmt.Errorf("create note version: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE asset.assets SET current_working_version_id = $2::uuid, updated_at = now() WHERE id = $1::uuid`, noteAssetID, versionID); err != nil {
+		return NoteSyncResult{}, fmt.Errorf("advance note version: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE content.note_bindings SET last_synced_message_sequence = $2, updated_at = now() WHERE conversation_id = $1::uuid`, conversationID, lastSequence); err != nil {
+		return NoteSyncResult{}, fmt.Errorf("advance note sync cursor: %w", err)
+	}
+	result := NoteSyncResult{ConversationID: conversationID, NoteAssetID: noteAssetID, AssetVersionID: versionID, MessageCount: messageCount, Status: "draft"}
+	body, _ := json.Marshal(result)
+	if err := saveIdempotency(ctx, tx, principal, "conversation.note.sync", idempotencyKey, body); err != nil {
+		return NoteSyncResult{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return NoteSyncResult{}, fmt.Errorf("commit note sync: %w", err)
+	}
+	return result, nil
+}
+
+func (s Service) AppendMessage(ctx context.Context, principal auth.Principal, idempotencyKey string, input AppendMessageInput) (MessageResult, error) {
+	if principal.UserType != "member" || !validID(principal.OrganizationID) || !validID(principal.UserID) ||
+		!validID(input.ConversationID) || !validIdempotencyKey(idempotencyKey) {
+		return MessageResult{}, ErrInvalidInput
+	}
+	input.Role = strings.TrimSpace(input.Role)
+	input.ContentFormat = strings.TrimSpace(input.ContentFormat)
+	input.Status = strings.TrimSpace(input.Status)
+	if input.ContentFormat == "" {
+		input.ContentFormat = "plain_text"
+	}
+	if input.Status == "" {
+		input.Status = "completed"
+	}
+	if input.Role != "user" && input.Role != "assistant" && input.Role != "system" && input.Role != "tool" {
+		return MessageResult{}, ErrInvalidInput
+	}
+	if input.ContentFormat != "plain_text" && input.ContentFormat != "markdown" && input.ContentFormat != "json" {
+		return MessageResult{}, ErrInvalidInput
+	}
+	if input.Status != "pending" && input.Status != "completed" && input.Status != "failed" && input.Status != "cancelled" {
+		return MessageResult{}, ErrInvalidInput
+	}
+	if input.ReplyToBlockID != "" && !validID(input.ReplyToBlockID) {
+		return MessageResult{}, ErrInvalidInput
+	}
+	if len(input.References) > 100 {
+		return MessageResult{}, ErrInvalidInput
+	}
+	for _, reference := range input.References {
+		if !validID(reference.AssetID) || !validID(reference.AssetVersionID) {
+			return MessageResult{}, ErrInvalidInput
+		}
+	}
+	if s.Store == nil || s.Store.Pool == nil {
+		return MessageResult{}, errors.New("database store is not initialized")
+	}
+	tx, err := s.Store.Pool.Begin(ctx)
+	if err != nil {
+		return MessageResult{}, fmt.Errorf("begin message create: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	state, err := reserveIdempotency(ctx, tx, principal, "conversation.message.create", idempotencyKey, hashRequest(input))
+	if err != nil {
+		return MessageResult{}, err
+	}
+	if state.replay {
+		var result MessageResult
+		if err := json.Unmarshal(state.body, &result); err != nil {
+			return MessageResult{}, fmt.Errorf("decode idempotent message: %w", err)
+		}
+		return result, nil
+	}
+	var workspaceID, containerID string
+	if err := tx.QueryRow(ctx, `
+		SELECT c.workspace_id::text, c.container_id::text
+		FROM content.conversations c
+				JOIN content.workspace_members wm ON wm.workspace_id = c.workspace_id AND wm.user_id = $3::uuid
+				WHERE c.organization_id = $1::uuid AND c.id = $2::uuid AND c.status = 'active'
+				  AND wm.role <> 'viewer' AND (c.visibility = 'workspace' OR c.initiator_user_id = $3::uuid)
+				FOR UPDATE OF c
+	`, principal.OrganizationID, input.ConversationID, principal.UserID).Scan(&workspaceID, &containerID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return MessageResult{}, ErrNotFound
+		}
+		return MessageResult{}, fmt.Errorf("load conversation for message: %w", err)
+	}
+	var currentVersion string
+	var versionNo int64
+	if err := tx.QueryRow(ctx, `
+		SELECT cv.id::text, cv.version_no
+		FROM content.containers c
+		JOIN content.container_versions cv ON cv.id = c.current_version_id
+		WHERE c.organization_id = $1::uuid AND c.id = $2::uuid
+		FOR UPDATE OF c, cv
+	`, principal.OrganizationID, containerID).Scan(&currentVersion, &versionNo); err != nil {
+		return MessageResult{}, fmt.Errorf("load chat container version: %w", err)
+	}
+	var nextSequence int64
+	if err := tx.QueryRow(ctx, `
+		SELECT COALESCE(MAX(sequence_no), 0) + 1
+		FROM content.message_blocks
+		WHERE organization_id = $1::uuid AND conversation_id = $2::uuid
+	`, principal.OrganizationID, input.ConversationID).Scan(&nextSequence); err != nil {
+		return MessageResult{}, fmt.Errorf("allocate message sequence: %w", err)
+	}
+	checksum := hashBytes(input.Content)
+	var blockID, revisionID string
+	if err := tx.QueryRow(ctx, `
+		INSERT INTO content.blocks (organization_id, block_type, created_by)
+		VALUES ($1::uuid, 'message', $2::uuid) RETURNING id::text
+	`, principal.OrganizationID, principal.UserID).Scan(&blockID); err != nil {
+		return MessageResult{}, fmt.Errorf("create message block: %w", err)
+	}
+	if err := tx.QueryRow(ctx, `
+		INSERT INTO content.block_revisions
+			(organization_id, block_id, revision_no, content, content_format, created_by, content_checksum)
+		VALUES ($1::uuid, $2::uuid, 1, $3, $4, $5::uuid, $6)
+		RETURNING id::text
+	`, principal.OrganizationID, blockID, input.Content, input.ContentFormat, principal.UserID, checksum).Scan(&revisionID); err != nil {
+		return MessageResult{}, fmt.Errorf("create message revision: %w", err)
+	}
+	newChecksum := hashRequest(struct{ Previous, Message string }{currentVersion, input.Content})
+	var newVersion string
+	if err := tx.QueryRow(ctx, `
+		INSERT INTO content.container_versions
+			(organization_id, container_id, version_no, created_by, content_checksum)
+		VALUES ($1::uuid, $2::uuid, $3, $4::uuid, $5)
+		RETURNING id::text
+	`, principal.OrganizationID, containerID, versionNo+1, principal.UserID, newChecksum).Scan(&newVersion); err != nil {
+		return MessageResult{}, fmt.Errorf("create message container version: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		WITH mapping AS MATERIALIZED (
+			SELECT id AS old_id, gen_random_uuid() AS new_id, block_revision_id, parent_placement_id, position, role_in_parent
+			FROM content.block_placements
+			WHERE organization_id = $1::uuid AND container_version_id = $3::uuid
+		)
+		INSERT INTO content.block_placements
+			(id, organization_id, container_version_id, block_revision_id, parent_placement_id, position, role_in_parent)
+		SELECT m.new_id, $1::uuid, $2::uuid, m.block_revision_id, parent.new_id, m.position, m.role_in_parent
+		FROM mapping m
+		LEFT JOIN mapping parent ON parent.old_id = m.parent_placement_id
+	`, principal.OrganizationID, newVersion, currentVersion); err != nil {
+		return MessageResult{}, fmt.Errorf("copy message placements: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO content.block_placements
+			(organization_id, container_version_id, block_revision_id, position)
+		VALUES ($1::uuid, $2::uuid, $3::uuid, $4)
+	`, principal.OrganizationID, newVersion, revisionID, nextSequence-1); err != nil {
+		return MessageResult{}, fmt.Errorf("place message block: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE content.containers SET current_version_id = $2::uuid, updated_at = now() WHERE id = $1::uuid`, containerID, newVersion); err != nil {
+		return MessageResult{}, fmt.Errorf("advance chat container: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO content.message_blocks
+			(organization_id, block_revision_id, conversation_id, role, provider_conversation_id,
+			 provider_message_id, status, reply_to_block_id, sequence_no)
+		VALUES ($1::uuid, $2::uuid, $3::uuid, $4, NULLIF($5, ''), NULLIF($6, ''), $7, NULLIF($8, '')::uuid, $9)
+	`, principal.OrganizationID, revisionID, input.ConversationID, input.Role, input.ProviderConversationID, input.ProviderMessageID, input.Status, input.ReplyToBlockID, nextSequence); err != nil {
+		return MessageResult{}, fmt.Errorf("persist message metadata: %w", err)
+	}
+	for ordinal, reference := range input.References {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO content.message_references
+				(organization_id, block_revision_id, ordinal, asset_id, asset_version_id, title, url, source_excerpt, updated_at_snapshot)
+			VALUES ($1::uuid, $2::uuid, $3, $4::uuid, $5::uuid, $6, $7, $8, $9)
+		`, principal.OrganizationID, revisionID, ordinal, reference.AssetID, reference.AssetVersionID,
+			reference.Title, reference.URL, reference.SourceExcerpt, reference.UpdatedAt); err != nil {
+			return MessageResult{}, fmt.Errorf("persist message reference: %w", err)
+		}
+	}
+	result := MessageResult{BlockRevisionID: revisionID, BlockID: blockID, ConversationID: input.ConversationID, SequenceNo: nextSequence, Role: input.Role, Status: input.Status}
+	body, _ := json.Marshal(result)
+	if err := saveIdempotency(ctx, tx, principal, "conversation.message.create", idempotencyKey, body); err != nil {
+		return MessageResult{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return MessageResult{}, fmt.Errorf("commit message create: %w", err)
+	}
+	return result, nil
+}
+
+func (s Service) ListMessages(ctx context.Context, principal auth.Principal, conversationID string) ([]Message, error) {
+	if principal.UserType != "member" || !validID(principal.OrganizationID) || !validID(principal.UserID) || !validID(conversationID) {
+		return nil, ErrInvalidInput
+	}
+	if s.Store == nil || s.Store.Pool == nil {
+		return nil, errors.New("database store is not initialized")
+	}
+	rows, err := s.Store.Pool.Query(ctx, `
+		SELECT br.id::text, b.id::text, mb.conversation_id::text, mb.role,
+		       br.content, br.content_format, mb.status,
+		       COALESCE(mb.provider_conversation_id, ''), COALESCE(mb.provider_message_id, ''),
+		       mb.sequence_no, br.created_at::text,
+		       COALESCE((
+		           SELECT jsonb_agg(jsonb_build_object(
+		               'asset_id', mr.asset_id::text,
+		               'asset_version_id', mr.asset_version_id::text,
+		               'title', mr.title,
+		               'url', mr.url,
+		               'source_excerpt', mr.source_excerpt,
+		               'updated_at', mr.updated_at_snapshot
+		           ) ORDER BY mr.ordinal)
+		           FROM content.message_references mr
+		           WHERE mr.organization_id = mb.organization_id AND mr.block_revision_id = mb.block_revision_id
+		       ), '[]'::jsonb)
+		FROM content.message_blocks mb
+		JOIN content.block_revisions br ON br.id = mb.block_revision_id
+		JOIN content.blocks b ON b.id = br.block_id
+		JOIN content.conversations c ON c.id = mb.conversation_id
+		JOIN content.workspace_members wm ON wm.workspace_id = c.workspace_id AND wm.user_id = $3::uuid
+		WHERE mb.organization_id = $1::uuid AND mb.conversation_id = $2::uuid
+		  AND (c.visibility = 'workspace' OR c.initiator_user_id = $3::uuid)
+		ORDER BY mb.sequence_no
+	`, principal.OrganizationID, conversationID, principal.UserID)
+	if err != nil {
+		return nil, fmt.Errorf("list conversation messages: %w", err)
+	}
+	defer rows.Close()
+	result := make([]Message, 0)
+	for rows.Next() {
+		var message Message
+		var references []byte
+		if err := rows.Scan(&message.BlockRevisionID, &message.BlockID, &message.ConversationID, &message.Role,
+			&message.Content, &message.ContentFormat, &message.Status, &message.ProviderConversation,
+			&message.ProviderMessage, &message.SequenceNo, &message.CreatedAt, &references); err != nil {
+			return nil, fmt.Errorf("scan conversation message: %w", err)
+		}
+		message.References = []MessageReference{}
+		if err := json.Unmarshal(references, &message.References); err != nil {
+			return nil, fmt.Errorf("decode conversation message references: %w", err)
+		}
+		result = append(result, message)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate conversation messages: %w", err)
+	}
+	if len(result) == 0 {
+		var exists bool
+		if err := s.Store.Pool.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM content.conversations c
+				JOIN content.workspace_members wm ON wm.workspace_id = c.workspace_id AND wm.user_id = $3::uuid
+					WHERE c.organization_id = $1::uuid AND c.id = $2::uuid
+					  AND (c.visibility = 'workspace' OR c.initiator_user_id = $3::uuid)
+			)
+		`, principal.OrganizationID, conversationID, principal.UserID).Scan(&exists); err != nil {
+			return nil, fmt.Errorf("check conversation access: %w", err)
+		}
+		if !exists {
+			return nil, ErrNotFound
+		}
+	}
+	return result, nil
+}
+
+func (s Service) CreateConversation(ctx context.Context, principal auth.Principal, idempotencyKey string, input CreateConversationInput) (ConversationResult, error) {
+	if principal.UserType != "member" || !validID(principal.OrganizationID) || !validID(principal.UserID) ||
+		!validID(input.WorkspaceID) || !validIdempotencyKey(idempotencyKey) {
+		return ConversationResult{}, ErrInvalidInput
+	}
+	input.Title = strings.TrimSpace(input.Title)
+	input.Source = strings.TrimSpace(input.Source)
+	input.Visibility = strings.TrimSpace(input.Visibility)
+	if input.Source == "" {
+		input.Source = "chat_interface"
+	}
+	if input.Visibility == "" {
+		input.Visibility = "private"
+	}
+	if input.Source != "chat_interface" && input.Source != "document" && input.Source != "asset" && input.Source != "automation" {
+		return ConversationResult{}, ErrInvalidInput
+	}
+	if input.Visibility != "private" && input.Visibility != "workspace" {
+		return ConversationResult{}, ErrInvalidInput
+	}
+	if input.AgentApplicationID != "" && !validID(input.AgentApplicationID) {
+		return ConversationResult{}, ErrInvalidInput
+	}
+	if input.ContainerID != "" && !validID(input.ContainerID) {
+		return ConversationResult{}, ErrInvalidInput
+	}
+	if s.Store == nil || s.Store.Pool == nil {
+		return ConversationResult{}, errors.New("database store is not initialized")
+	}
+	tx, err := s.Store.Pool.Begin(ctx)
+	if err != nil {
+		return ConversationResult{}, fmt.Errorf("begin conversation create: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	requestHash := hashRequest(input)
+	state, err := reserveIdempotency(ctx, tx, principal, "conversation.create", idempotencyKey, requestHash)
+	if err != nil {
+		return ConversationResult{}, err
+	}
+	if state.replay {
+		var result ConversationResult
+		if err := json.Unmarshal(state.body, &result); err != nil {
+			return ConversationResult{}, fmt.Errorf("decode idempotent conversation: %w", err)
+		}
+		return result, nil
+	}
+	var defaultApp, defaultModel string
+	var memberRole string
+	err = tx.QueryRow(ctx, `
+		SELECT COALESCE(w.default_agent_application_id::text, ''), COALESCE(w.default_resource_model_id::text, ''), wm.role
+		FROM content.workspaces w
+		JOIN content.workspace_members wm ON wm.workspace_id = w.id AND wm.user_id = $3::uuid
+		WHERE w.organization_id = $1::uuid AND w.id = $2::uuid AND w.status = 'active'
+	`, principal.OrganizationID, input.WorkspaceID, principal.UserID).Scan(&defaultApp, &defaultModel, &memberRole)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ConversationResult{}, ErrNotFound
+	}
+	if err != nil {
+		return ConversationResult{}, fmt.Errorf("load workspace membership: %w", err)
+	}
+	if memberRole == "viewer" {
+		return ConversationResult{}, ErrForbidden
+	}
+	appID := input.AgentApplicationID
+	if appID == "" {
+		appID = defaultApp
+	}
+	if !validID(appID) || !validID(defaultModel) {
+		return ConversationResult{}, ErrConflict
+	}
+	var boundAgent string
+	err = tx.QueryRow(ctx, `
+		SELECT aa.bound_agent_user_id::text
+		FROM content.workspace_agent_applications wa
+		JOIN integration.agent_applications aa ON aa.id = wa.agent_application_id
+		WHERE wa.organization_id = $1::uuid AND wa.workspace_id = $2::uuid
+		  AND wa.agent_application_id = $3::uuid AND wa.enabled = true
+		  AND aa.organization_id = $1::uuid AND aa.status = 'active'
+	`, principal.OrganizationID, input.WorkspaceID, appID).Scan(&boundAgent)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ConversationResult{}, ErrForbidden
+	}
+	if err != nil {
+		return ConversationResult{}, fmt.Errorf("load workspace agent application: %w", err)
+	}
+	var modelVersion string
+	if err := tx.QueryRow(ctx, `
+			SELECT COALESCE(current_version_id::text, '')
+			FROM model.resource_models
+			WHERE organization_id = $1::uuid AND workspace_id = $3::uuid AND id = $2::uuid AND status = 'active'
+		`, principal.OrganizationID, defaultModel, input.WorkspaceID).Scan(&modelVersion); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ConversationResult{}, ErrConflict
+		}
+		return ConversationResult{}, fmt.Errorf("load default resource model: %w", err)
+	}
+	if !validID(modelVersion) {
+		return ConversationResult{}, ErrConflict
+	}
+	parentContainer := ""
+	if input.ContainerID != "" {
+		if err := tx.QueryRow(ctx, `
+			SELECT id::text FROM content.containers
+			WHERE organization_id = $1::uuid AND workspace_id = $2::uuid AND id = $3::uuid AND status = 'active'
+		`, principal.OrganizationID, input.WorkspaceID, input.ContainerID).Scan(&parentContainer); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ConversationResult{}, ErrNotFound
+			}
+			return ConversationResult{}, fmt.Errorf("load conversation parent container: %w", err)
+		}
+	}
+	checksum := emptyChecksum()
+	var chatContainer, noteContainer string
+	if err := tx.QueryRow(ctx, `
+		INSERT INTO content.containers (organization_id, workspace_id, parent_id, kind, title, visibility, created_by)
+		VALUES ($1::uuid, $2::uuid, NULLIF($3, '')::uuid, 'chat', $4, $5, $6::uuid) RETURNING id::text
+	`, principal.OrganizationID, input.WorkspaceID, parentContainer, input.Title, input.Visibility, principal.UserID).Scan(&chatContainer); err != nil {
+		return ConversationResult{}, fmt.Errorf("create chat container: %w", err)
+	}
+	if err := createEmptyContainerVersion(ctx, tx, principal.OrganizationID, chatContainer, principal.UserID, checksum); err != nil {
+		return ConversationResult{}, err
+	}
+	if err := tx.QueryRow(ctx, `
+		INSERT INTO content.containers (organization_id, workspace_id, parent_id, kind, title, visibility, created_by)
+		VALUES ($1::uuid, $2::uuid, NULLIF($3, '')::uuid, 'note', $4, $5, $6::uuid) RETURNING id::text
+	`, principal.OrganizationID, input.WorkspaceID, parentContainer, input.Title, input.Visibility, principal.UserID).Scan(&noteContainer); err != nil {
+		return ConversationResult{}, fmt.Errorf("create note container: %w", err)
+	}
+	if err := createEmptyContainerVersion(ctx, tx, principal.OrganizationID, noteContainer, principal.UserID, checksum); err != nil {
+		return ConversationResult{}, err
+	}
+	var noteAsset string
+	if err := tx.QueryRow(ctx, `
+			INSERT INTO asset.assets
+					(organization_id, workspace_id, resource_model_id, publication_status, created_by)
+				VALUES ($1::uuid, $2::uuid, $3::uuid, 'draft', $4::uuid) RETURNING id::text
+		`, principal.OrganizationID, input.WorkspaceID, defaultModel, principal.UserID).Scan(&noteAsset); err != nil {
+		return ConversationResult{}, fmt.Errorf("create note asset: %w", err)
+	}
+	var noteVersion string
+	if err := tx.QueryRow(ctx, `
+			INSERT INTO asset.asset_versions
+					(organization_id, workspace_id, asset_id, resource_model_id, resource_model_version_id, version_no,
+						 workflow_status, quality, title, markdown, fields, content_checksum, created_by)
+				VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid, 1, 'draft', 'raw', $6, '', '{}'::jsonb, $7, $8::uuid)
+				RETURNING id::text
+		`, principal.OrganizationID, input.WorkspaceID, noteAsset, defaultModel, modelVersion, input.Title, checksum, principal.UserID).Scan(&noteVersion); err != nil {
+		return ConversationResult{}, fmt.Errorf("create note asset version: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE asset.assets SET current_working_version_id = $2::uuid WHERE id = $1::uuid`, noteAsset, noteVersion); err != nil {
+		return ConversationResult{}, fmt.Errorf("set note working version: %w", err)
+	}
+	var conversationID string
+	if err := tx.QueryRow(ctx, `
+		INSERT INTO content.conversations
+			(organization_id, workspace_id, container_id, initiator_user_id, agent_application_id,
+			 bound_agent_user_id, title, source, visibility)
+		VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6::uuid, $7, $8, $9)
+		RETURNING id::text
+	`, principal.OrganizationID, input.WorkspaceID, chatContainer, principal.UserID, appID, boundAgent, input.Title, input.Source, input.Visibility).Scan(&conversationID); err != nil {
+		return ConversationResult{}, fmt.Errorf("create conversation: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO content.note_bindings
+			(organization_id, conversation_id, note_container_id, note_asset_id)
+		VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid)
+	`, principal.OrganizationID, conversationID, noteContainer, noteAsset); err != nil {
+		return ConversationResult{}, fmt.Errorf("bind conversation note: %w", err)
+	}
+	result := ConversationResult{ConversationID: conversationID, WorkspaceID: input.WorkspaceID, ContainerID: chatContainer, NoteContainerID: noteContainer, NoteAssetID: noteAsset, AgentApplicationID: appID, BoundAgentUserID: boundAgent, Status: "active"}
+	body, _ := json.Marshal(result)
+	if err := saveIdempotency(ctx, tx, principal, "conversation.create", idempotencyKey, body); err != nil {
+		return ConversationResult{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return ConversationResult{}, fmt.Errorf("commit conversation create: %w", err)
+	}
+	return result, nil
+}
+
+func (s Service) GetConversation(ctx context.Context, principal auth.Principal, conversationID string) (Conversation, error) {
+	if principal.UserType != "member" || !validID(principal.OrganizationID) || !validID(principal.UserID) || !validID(conversationID) {
+		return Conversation{}, ErrInvalidInput
+	}
+	if s.Store == nil || s.Store.Pool == nil {
+		return Conversation{}, errors.New("database store is not initialized")
+	}
+	var result Conversation
+	err := s.Store.Pool.QueryRow(ctx, `
+		SELECT c.id::text, c.workspace_id::text, c.container_id::text, nb.note_container_id::text,
+		       nb.note_asset_id::text, c.agent_application_id::text, c.bound_agent_user_id::text,
+		       c.status, c.title, c.source, c.visibility, c.created_at::text, c.updated_at::text
+		FROM content.conversations c
+		JOIN content.note_bindings nb ON nb.conversation_id = c.id
+		JOIN content.workspace_members wm ON wm.workspace_id = c.workspace_id AND wm.user_id = $3::uuid
+		WHERE c.organization_id = $1::uuid AND c.id = $2::uuid
+		  AND (c.visibility = 'workspace' OR c.initiator_user_id = $3::uuid)
+	`, principal.OrganizationID, conversationID, principal.UserID).Scan(
+		&result.ConversationID, &result.WorkspaceID, &result.ContainerID, &result.NoteContainerID,
+		&result.NoteAssetID, &result.AgentApplicationID, &result.BoundAgentUserID, &result.Status,
+		&result.Title, &result.Source, &result.Visibility, &result.CreatedAt, &result.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Conversation{}, ErrNotFound
+	}
+	if err != nil {
+		return Conversation{}, fmt.Errorf("load conversation: %w", err)
+	}
+	return result, nil
+}
+
+func (s Service) RegisterMedia(ctx context.Context, principal auth.Principal, idempotencyKey string, input RegisterMediaInput) (MediaResult, error) {
+	if principal.UserType != "member" || !validID(principal.OrganizationID) || !validID(principal.UserID) ||
+		!validIdempotencyKey(idempotencyKey) || !validID(input.ConversationID) || !validID(input.AttachmentID) {
+		return MediaResult{}, ErrInvalidInput
+	}
+	input.MediaKind = strings.TrimSpace(input.MediaKind)
+	input.Language = strings.TrimSpace(input.Language)
+	if input.MediaKind != "audio" && input.MediaKind != "video" || len(input.Language) > 32 {
+		return MediaResult{}, ErrInvalidInput
+	}
+	if input.DurationMS != nil && (*input.DurationMS < 0 || *input.DurationMS > 86_400_000) {
+		return MediaResult{}, ErrInvalidInput
+	}
+	if s.Store == nil || s.Store.Pool == nil {
+		return MediaResult{}, errors.New("database store is not initialized")
+	}
+	tx, err := s.Store.Pool.Begin(ctx)
+	if err != nil {
+		return MediaResult{}, fmt.Errorf("begin media registration: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	state, err := reserveIdempotency(ctx, tx, principal, "conversation.media.register", idempotencyKey, hashRequest(input))
+	if err != nil {
+		return MediaResult{}, err
+	}
+	if state.replay {
+		var result MediaResult
+		if err := json.Unmarshal(state.body, &result); err != nil {
+			return MediaResult{}, fmt.Errorf("decode idempotent media registration: %w", err)
+		}
+		return result, nil
+	}
+	var noteAssetID string
+	if err := tx.QueryRow(ctx, `
+		SELECT nb.note_asset_id::text
+		FROM content.conversations c
+                JOIN content.workspace_members wm ON wm.workspace_id = c.workspace_id AND wm.user_id = $3::uuid
+                JOIN content.note_bindings nb ON nb.conversation_id = c.id
+                WHERE c.organization_id = $1::uuid AND c.id = $2::uuid AND c.status = 'active'
+                  AND wm.role <> 'viewer' AND (c.visibility = 'workspace' OR c.initiator_user_id = $3::uuid)
+	`, principal.OrganizationID, input.ConversationID, principal.UserID).Scan(&noteAssetID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return MediaResult{}, ErrNotFound
+		}
+		return MediaResult{}, fmt.Errorf("load media conversation: %w", err)
+	}
+	var mediaType, scanStatus string
+	if err := tx.QueryRow(ctx, `
+		SELECT at.media_type, at.scan_status
+		FROM asset.attachments at
+		JOIN asset.asset_versions av ON av.id = at.asset_version_id
+		JOIN asset.assets a ON a.id = av.asset_id
+		WHERE at.organization_id = $1::uuid AND at.id = $2::uuid
+		  AND a.id = $3::uuid AND a.current_working_version_id = av.id
+	`, principal.OrganizationID, input.AttachmentID, noteAssetID).Scan(&mediaType, &scanStatus); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return MediaResult{}, ErrNotFound
+		}
+		return MediaResult{}, fmt.Errorf("load conversation media attachment: %w", err)
+	}
+	if !strings.HasPrefix(mediaType, input.MediaKind+"/") || scanStatus != "clean" {
+		return MediaResult{}, fmt.Errorf("%w: attachment is not an allowed %s media", ErrConflict, input.MediaKind)
+	}
+	var result MediaResult
+	err = tx.QueryRow(ctx, `
+		INSERT INTO content.conversation_media
+			(organization_id, conversation_id, attachment_id, media_kind, language, duration_ms, created_by)
+		VALUES ($1::uuid, $2::uuid, $3::uuid, $4, NULLIF($5, ''), $6, $7::uuid)
+		RETURNING id::text, conversation_id::text, attachment_id::text, media_kind, status,
+		          COALESCE(language, ''), duration_ms, created_at::text, updated_at::text
+	`, principal.OrganizationID, input.ConversationID, input.AttachmentID, input.MediaKind, input.Language, input.DurationMS, principal.UserID).Scan(
+		&result.MediaID, &result.ConversationID, &result.AttachmentID, &result.MediaKind, &result.Status,
+		&result.Language, &result.DurationMS, &result.CreatedAt, &result.UpdatedAt)
+	if err != nil {
+		if strings.Contains(err.Error(), "conversation_media_organization_id_attachment_id_key") {
+			return MediaResult{}, ErrConflict
+		}
+		return MediaResult{}, fmt.Errorf("register conversation media: %w", err)
+	}
+	body, _ := json.Marshal(result)
+	if err := saveIdempotency(ctx, tx, principal, "conversation.media.register", idempotencyKey, body); err != nil {
+		return MediaResult{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return MediaResult{}, fmt.Errorf("commit media registration: %w", err)
+	}
+	return result, nil
+}
+
+func (s Service) GetMedia(ctx context.Context, principal auth.Principal, mediaID string) (MediaResult, error) {
+	if principal.UserType != "member" || !validID(principal.OrganizationID) || !validID(principal.UserID) || !validID(mediaID) {
+		return MediaResult{}, ErrInvalidInput
+	}
+	if s.Store == nil || s.Store.Pool == nil {
+		return MediaResult{}, errors.New("database store is not initialized")
+	}
+	var result MediaResult
+	err := s.Store.Pool.QueryRow(ctx, `
+		SELECT cm.id::text, cm.conversation_id::text, cm.attachment_id::text, cm.media_kind, cm.status,
+		       COALESCE(cm.language, ''), cm.duration_ms, COALESCE(cm.transcription_block_revision_id::text, ''),
+		       cm.created_at::text, cm.updated_at::text
+		FROM content.conversation_media cm
+		JOIN content.conversations c ON c.id = cm.conversation_id
+                JOIN content.workspace_members wm ON wm.workspace_id = c.workspace_id AND wm.user_id = $3::uuid
+                WHERE cm.organization_id = $1::uuid AND cm.id = $2::uuid
+                  AND (c.visibility = 'workspace' OR c.initiator_user_id = $3::uuid)
+	`, principal.OrganizationID, mediaID, principal.UserID).Scan(
+		&result.MediaID, &result.ConversationID, &result.AttachmentID, &result.MediaKind, &result.Status,
+		&result.Language, &result.DurationMS, &result.TranscriptionBlockRevisionID, &result.CreatedAt, &result.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return MediaResult{}, ErrNotFound
+	}
+	if err != nil {
+		return MediaResult{}, fmt.Errorf("load conversation media: %w", err)
+	}
+	return result, nil
+}
+
+func (s Service) RequestTranscription(ctx context.Context, principal auth.Principal, idempotencyKey, mediaID string) (MediaResult, error) {
+	if principal.UserType != "member" || !validID(principal.OrganizationID) || !validID(principal.UserID) ||
+		!validID(mediaID) || !validIdempotencyKey(idempotencyKey) {
+		return MediaResult{}, ErrInvalidInput
+	}
+	if s.Store == nil || s.Store.Pool == nil {
+		return MediaResult{}, errors.New("database store is not initialized")
+	}
+	tx, err := s.Store.Pool.Begin(ctx)
+	if err != nil {
+		return MediaResult{}, fmt.Errorf("begin transcription request: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	state, err := reserveIdempotency(ctx, tx, principal, "conversation.media.transcribe", idempotencyKey, hashRequest(struct{ MediaID string }{mediaID}))
+	if err != nil {
+		return MediaResult{}, err
+	}
+	if state.replay {
+		var result MediaResult
+		if err := json.Unmarshal(state.body, &result); err != nil {
+			return MediaResult{}, fmt.Errorf("decode idempotent transcription request: %w", err)
+		}
+		return result, nil
+	}
+	var result MediaResult
+	if err := tx.QueryRow(ctx, `
+		SELECT cm.id::text, cm.conversation_id::text, cm.attachment_id::text, cm.media_kind, cm.status,
+		       COALESCE(cm.language, ''), cm.duration_ms, COALESCE(cm.transcription_block_revision_id::text, ''),
+		       cm.created_at::text, cm.updated_at::text
+		FROM content.conversation_media cm
+		JOIN content.conversations c ON c.id = cm.conversation_id
+                JOIN content.workspace_members wm ON wm.workspace_id = c.workspace_id AND wm.user_id = $3::uuid
+                WHERE cm.organization_id = $1::uuid AND cm.id = $2::uuid
+                  AND wm.role <> 'viewer' AND (c.visibility = 'workspace' OR c.initiator_user_id = $3::uuid)
+		FOR UPDATE OF cm
+	`, principal.OrganizationID, mediaID, principal.UserID).Scan(
+		&result.MediaID, &result.ConversationID, &result.AttachmentID, &result.MediaKind, &result.Status,
+		&result.Language, &result.DurationMS, &result.TranscriptionBlockRevisionID, &result.CreatedAt, &result.UpdatedAt); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return MediaResult{}, ErrNotFound
+		}
+		return MediaResult{}, fmt.Errorf("load media for transcription: %w", err)
+	}
+	if result.Status == "transcribed" {
+		return MediaResult{}, fmt.Errorf("%w: media transcription already completed", ErrConflict)
+	}
+	if result.Status != "registered" && result.Status != "failed" {
+		return MediaResult{}, fmt.Errorf("%w: media transcription is already active", ErrConflict)
+	}
+	var jobID string
+	inputSnapshot, _ := json.Marshal(map[string]any{
+		"media_id": mediaID, "attachment_id": result.AttachmentID,
+		"media_kind": result.MediaKind, "language": result.Language,
+	})
+	if err := tx.QueryRow(ctx, `
+		INSERT INTO content.processing_jobs
+			(organization_id, workspace_id, job_type, source_type, source_id, idempotency_key, input_snapshot)
+		SELECT $1::uuid, c.workspace_id, 'transcription', 'conversation_media', cm.id, $3, $4::jsonb
+		FROM content.conversation_media cm
+		JOIN content.conversations c ON c.id = cm.conversation_id
+		WHERE cm.organization_id = $1::uuid AND cm.id = $2::uuid
+		RETURNING id::text
+	`, principal.OrganizationID, mediaID, idempotencyKey, string(inputSnapshot)).Scan(&jobID); err != nil {
+		return MediaResult{}, fmt.Errorf("create transcription job: %w", err)
+	}
+	if s.Events.Queue == nil {
+		return MediaResult{}, errors.New("event store is not initialized")
+	}
+	if _, err := s.Events.AppendTx(ctx, tx, eventing.Event{
+		OrganizationID:   principal.OrganizationID,
+		EventType:        "conversation.media.transcription_requested",
+		AggregateType:    "conversation_media",
+		AggregateID:      mediaID,
+		AggregateVersion: 1,
+		PayloadVersion:   1,
+		Payload:          map[string]string{"job_id": jobID, "media_id": mediaID},
+	}); err != nil {
+		return MediaResult{}, fmt.Errorf("enqueue transcription event: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE content.conversation_media SET status = 'transcribing', updated_at = now() WHERE organization_id = $1::uuid AND id = $2::uuid`, principal.OrganizationID, mediaID); err != nil {
+		return MediaResult{}, fmt.Errorf("queue media transcription: %w", err)
+	}
+	result.Status = "transcribing"
+	result.TranscriptionJobID = jobID
+	result.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	body, _ := json.Marshal(result)
+	if err := saveIdempotency(ctx, tx, principal, "conversation.media.transcribe", idempotencyKey, body); err != nil {
+		return MediaResult{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return MediaResult{}, fmt.Errorf("commit transcription request: %w", err)
+	}
+	return result, nil
+}
+
+type idempotencyState struct {
+	replay bool
+	body   []byte
+}
+
+func reserveIdempotency(ctx context.Context, tx pgx.Tx, principal auth.Principal, operation, key, requestHash string) (idempotencyState, error) {
+	var id string
+	err := tx.QueryRow(ctx, `
+		INSERT INTO system.idempotency_keys (organization_id, subject_id, operation, idempotency_key, request_hash, expires_at)
+		VALUES ($1::uuid, $2::uuid, $3, $4, $5, now() + interval '24 hours')
+		ON CONFLICT (organization_id, subject_id, operation, idempotency_key) DO NOTHING
+		RETURNING id::text
+	`, principal.OrganizationID, principal.UserID, operation, key, requestHash).Scan(&id)
+	if err == nil {
+		return idempotencyState{}, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return idempotencyState{}, fmt.Errorf("reserve content idempotency key: %w", err)
+	}
+	var storedHash string
+	var body []byte
+	if err := tx.QueryRow(ctx, `
+		SELECT request_hash, response_body FROM system.idempotency_keys
+		WHERE organization_id = $1::uuid AND subject_id = $2::uuid AND operation = $3 AND idempotency_key = $4
+		FOR UPDATE
+	`, principal.OrganizationID, principal.UserID, operation, key).Scan(&storedHash, &body); err != nil {
+		return idempotencyState{}, fmt.Errorf("load content idempotency key: %w", err)
+	}
+	if storedHash != requestHash {
+		return idempotencyState{}, ErrConflict
+	}
+	if len(body) == 0 {
+		return idempotencyState{}, ErrConflict
+	}
+	return idempotencyState{replay: true, body: body}, nil
+}
+
+func saveIdempotency(ctx context.Context, tx pgx.Tx, principal auth.Principal, operation, key string, result []byte) error {
+	if _, err := tx.Exec(ctx, `
+		UPDATE system.idempotency_keys SET response_status = 201, response_body = $5::jsonb
+		WHERE organization_id = $1::uuid AND subject_id = $2::uuid AND operation = $3 AND idempotency_key = $4
+	`, principal.OrganizationID, principal.UserID, operation, key, string(result)); err != nil {
+		return fmt.Errorf("save content idempotency response: %w", err)
+	}
+	return nil
+}
+
+func createEmptyContainerVersion(ctx context.Context, tx pgx.Tx, organizationID, containerID, userID, checksum string) error {
+	var versionID string
+	if err := tx.QueryRow(ctx, `
+		INSERT INTO content.container_versions (organization_id, container_id, version_no, created_by, content_checksum)
+		VALUES ($1::uuid, $2::uuid, 1, $3::uuid, $4) RETURNING id::text
+	`, organizationID, containerID, userID, checksum).Scan(&versionID); err != nil {
+		return fmt.Errorf("create initial container version: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE content.containers SET current_version_id = $2::uuid WHERE id = $1::uuid`, containerID, versionID); err != nil {
+		return fmt.Errorf("set initial container version: %w", err)
+	}
+	return nil
+}
+
+func emptyChecksum() string {
+	sum := sha256.Sum256([]byte(""))
+	return hex.EncodeToString(sum[:])
+}
+
+func hashBytes(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:])
+}
+
+func hashRequest(value any) string {
+	body, _ := json.Marshal(value)
+	sum := sha256.Sum256(body)
+	return hex.EncodeToString(sum[:])
+}
+
+func validID(value string) bool {
+	value = strings.TrimSpace(value)
+	if len(value) != 36 {
+		return false
+	}
+	for i, r := range value {
+		if (i == 8 || i == 13 || i == 18 || i == 23) && r == '-' {
+			continue
+		}
+		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')) {
+			return false
+		}
+	}
+	return true
+}
+
+func validIdempotencyKey(value string) bool {
+	value = strings.TrimSpace(value)
+	return len(value) > 0 && len(value) <= 200 && !strings.ContainsRune(value, '\x00')
+}

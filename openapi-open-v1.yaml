@@ -1,0 +1,449 @@
+openapi: 3.1.0
+info:
+  title: Agent Chunzhi Open API
+  version: 0.1.0
+  description: |
+    面向 Agent 用户和受控内部任务调用的最小开放 API 草案。
+    API Key 解析出的 Agent 用户是唯一数据授权主体；前台发起用户不作为请求参数，也不参与数据权限取交集。
+servers:
+  - url: /api/open/v1
+    description: 外部 Agent API（具体域名由部署环境配置）
+security:
+  - AgentApiKey: []
+tags:
+  - name: Query
+    description: structured、fulltext、semantic、hybrid 检索和引用快照
+  - name: Assets
+    description: 资产创建、更新和发布
+  - name: References
+    description: 引用详情和附件
+  - name: AgentTasks
+    description: Agent 整理任务
+paths:
+  /query:
+    post:
+      tags: [Query]
+      operationId: query
+      summary: 统一查询入口（R3）
+      description: |
+        支持 structured、fulltext、semantic 和 hybrid。全文、向量召回和重排候选均先经过 Agent 权限、发布指针和出口策略硬过滤；hybrid 在向量或 reranker 不可用时返回 degraded=true。分页使用短期 search session cursor，不计算全局 total。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UnifiedQueryRequest" }
+      responses:
+        "200":
+          description: 统一查询结果
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UnifiedQueryResponse" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/InvalidRequest" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /assets:
+    post:
+      tags: [Assets]
+      operationId: createAsset
+      summary: 创建资产 internal 版本
+      description: |
+        创建主体从 API Key 解析，不接受 member_id、department_id 或 group_id 作为授权输入；数据范围由 AgentAccessPolicy 决定。
+        没有 publish 权限时只能创建 internal 版本。
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAssetRequest"
+      responses:
+        "201":
+          description: 草稿已创建
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Asset"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/InvalidRequest" }
+
+  /assets/{assetId}:
+    patch:
+      tags: [Assets]
+      operationId: updateAsset
+      summary: 更新资产工作版本
+      parameters:
+        - $ref: "#/components/parameters/AssetId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/IfMatch"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateAssetRequest"
+      responses:
+        "200":
+          description: 工作版本已更新
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Asset"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/InvalidRequest" }
+
+  /assets/{assetId}/publish:
+    post:
+      tags: [Assets]
+      operationId: publishAsset
+      summary: 发布 internal 版本
+      parameters:
+        - $ref: "#/components/parameters/AssetId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [version_id]
+              properties:
+                version_id: { $ref: "#/components/schemas/Uuid" }
+      responses:
+        "200":
+          description: 发布指针已原子切换
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Asset"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/InvalidRequest" }
+
+  /assets/{assetId}/archive:
+    post:
+      tags: [Assets]
+      operationId: archiveAsset
+      summary: 归档资产
+      description: 使用调用 Agent 用户自己的 archive 权限归档资产，并异步删除全文投影。
+      parameters:
+        - $ref: "#/components/parameters/AssetId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "200":
+          description: 资产已归档
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [asset_id, previous_published_version_id, publication_status]
+                properties:
+                  asset_id: { $ref: "#/components/schemas/Uuid" }
+                  previous_published_version_id: { $ref: "#/components/schemas/Uuid" }
+                  publication_status: { type: string, enum: [archived] }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /assets/{assetId}/references:
+    get:
+      tags: [References]
+      operationId: getAssetReferences
+      summary: 获取资产引用
+      description: 返回 Agent 用户权限范围内的已发布资产引用；前台用户点击链接时必须重新鉴权。
+      parameters:
+        - $ref: "#/components/parameters/AssetId"
+      responses:
+        "200":
+          description: 引用详情
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AssetReference"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /attachments/{attachmentId}/download:
+    get:
+      tags: [References]
+      operationId: downloadAttachment
+      summary: 受控下载附件
+      description: 每次请求重新检查主体、资产发布状态、模型出口策略和读取权限；服务端从阿里云 OSS 私有 Bucket 流式转发，不返回可长期复用的对象存储 URL。
+      parameters:
+        - name: attachmentId
+          in: path
+          required: true
+          schema: { $ref: "#/components/schemas/Uuid" }
+      responses:
+        "200":
+          description: 文件流
+          headers:
+            Content-Disposition:
+              schema: { type: string }
+          content:
+            application/octet-stream: {}
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /agent/tasks:
+    post:
+      tags: [AgentTasks]
+      operationId: createAgentTask
+      summary: 创建 Agent 整理任务
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAgentTaskRequest"
+      responses:
+        "202":
+          description: 任务已创建
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentTask"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/InvalidRequest" }
+
+  /agent/tasks/{taskId}:
+    get:
+      tags: [AgentTasks]
+      operationId: getAgentTask
+      summary: 查询 Agent 整理任务
+      parameters:
+        - name: taskId
+          in: path
+          required: true
+          schema: { $ref: "#/components/schemas/Uuid" }
+      responses:
+        "200":
+          description: 任务状态
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentTask"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/InvalidRequest" }
+
+components:
+  securitySchemes:
+    AgentApiKey:
+      type: http
+      scheme: Bearer
+      bearerFormat: API-Key
+      description: "暂定使用 Authorization: Bearer <agent-api-key>；服务端按哈希校验并解析绑定 Agent 用户。"
+  parameters:
+    AssetId:
+      name: assetId
+      in: path
+      required: true
+      schema: { $ref: "#/components/schemas/Uuid" }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: 同一调用主体、操作和请求摘要下的幂等键。
+      schema: { type: string, minLength: 16, maxLength: 200 }
+    IfMatch:
+      name: If-Match
+      in: header
+      required: true
+      description: 工作版本的乐观锁版本号或 ETag。
+      schema: { type: string, minLength: 1, maxLength: 200 }
+  responses:
+    Unauthorized:
+      description: API Key 缺失、无效、过期或已吊销
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Forbidden:
+      description: Agent 用户没有对应动作、资源模型或出口权限
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: 资源不存在或对当前主体不可见
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Conflict:
+      description: 幂等键冲突、乐观锁冲突、版本状态冲突或发布指针冲突
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    InvalidRequest:
+      description: 请求参数不符合模型版本或接口约束
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    RateLimited:
+      description: 调用频率超过 Agent 用户或应用限流
+      headers:
+        Retry-After:
+          schema: { type: integer }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+  schemas:
+    Uuid:
+      type: string
+      format: uuid
+    Asset:
+      type: object
+      required:
+        [id, resource_model_id, current_working_version_id, publication_status]
+      properties:
+        id: { $ref: "#/components/schemas/Uuid" }
+        resource_model_id: { $ref: "#/components/schemas/Uuid" }
+        current_working_version_id: { $ref: "#/components/schemas/Uuid" }
+        current_published_version_id:
+          oneOf:
+            - { $ref: "#/components/schemas/Uuid" }
+            - { type: "null" }
+        publication_status:
+          type: string
+          enum: [internal, published, archived]
+        title: { type: string }
+        updated_at: { type: string, format: date-time }
+    UnifiedQueryRequest:
+      type: object
+      additionalProperties: false
+      required: [query]
+      properties:
+        mode: { type: string, enum: [structured, fulltext, semantic, hybrid], default: hybrid }
+        query: { type: string, minLength: 0, maxLength: 500 }
+        model_ids:
+          type: array
+          maxItems: 100
+          items: { $ref: "#/components/schemas/Uuid" }
+        top_k: { type: integer, minimum: 1, maximum: 100, default: 10 }
+        cursor: { type: string }
+        filters:
+          type: object
+          additionalProperties: true
+    UnifiedQueryResponse:
+      type: object
+      required: [mode, degraded, items, has_more, ranking_method, policy_revision]
+      properties:
+        mode: { type: string, enum: [structured, fulltext, semantic, hybrid] }
+        degraded: { type: boolean }
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/SearchHit" }
+        has_more: { type: boolean }
+        next_cursor: { type: string }
+        session_id: { $ref: "#/components/schemas/Uuid" }
+        ranking_method: { type: string, enum: [lexical, vector, rrf, rerank] }
+        policy_revision: { type: integer, format: int64 }
+    SearchHit:
+      type: object
+      required: [asset_id, asset_version_id, chunk_id, projection_run_id, score, snippet, source, source_type, source_locator, char_start, char_end, source_checksum, chunk_checksum, canonicalizer_version, ranking_method]
+      properties:
+        asset_id: { $ref: "#/components/schemas/Uuid" }
+        asset_version_id: { $ref: "#/components/schemas/Uuid" }
+        chunk_id: { $ref: "#/components/schemas/Uuid" }
+        projection_run_id: { $ref: "#/components/schemas/Uuid" }
+        score: { type: number }
+        snippet: { type: string }
+        source: { type: string, enum: [asset] }
+        source_type: { type: string }
+        source_locator:
+          type: object
+          additionalProperties: true
+        char_start: { type: integer, minimum: 0 }
+        char_end: { type: integer, minimum: 0 }
+        source_checksum: { type: string }
+        chunk_checksum: { type: string }
+        canonicalizer_version: { type: string }
+        ranking_method: { type: string, enum: [lexical, vector, rrf, rerank] }
+    AssetReference:
+      type: object
+      required: [asset_id, asset_version_id, title, url]
+      properties:
+        asset_id: { $ref: "#/components/schemas/Uuid" }
+        asset_version_id: { $ref: "#/components/schemas/Uuid" }
+        title: { type: string }
+        url: { type: string, format: uri }
+        source_excerpt: { type: string }
+        updated_at: { type: string, format: date-time }
+    CreateAssetRequest:
+      type: object
+      required: [resource_model_id]
+      properties:
+        resource_model_id: { $ref: "#/components/schemas/Uuid" }
+        title: { type: string, maxLength: 500 }
+        markdown: { type: string, maxLength: 2000000 }
+        fields:
+          type: object
+          additionalProperties: true
+        source:
+          type: object
+          additionalProperties: true
+    UpdateAssetRequest:
+      type: object
+      minProperties: 1
+      properties:
+        title: { type: string, maxLength: 500 }
+        markdown: { type: string, maxLength: 2000000 }
+        fields:
+          type: object
+          additionalProperties: true
+    CreateAgentTaskRequest:
+      type: object
+      required: [agent_application_id, operation, input_asset_ids]
+      properties:
+        agent_application_id: { $ref: "#/components/schemas/Uuid" }
+        operation:
+          type: string
+          enum: [prepare_asset]
+        input_asset_ids:
+          type: array
+          minItems: 1
+          maxItems: 1
+          items: { $ref: "#/components/schemas/Uuid" }
+    AgentTask:
+      type: object
+      required: [id, status, operation]
+      properties:
+        id: { $ref: "#/components/schemas/Uuid" }
+        status:
+          type: string
+          enum: [queued, running, succeeded, failed, cancelled]
+        operation: { type: string }
+        candidate_version_id:
+          oneOf:
+            - { $ref: "#/components/schemas/Uuid" }
+            - { type: "null" }
+        error_code: { type: string }
+        attempt_count: { type: integer, minimum: 0 }
+        created_at: { type: string, format: date-time }
+        completed_at:
+          oneOf:
+            - { type: string, format: date-time }
+            - { type: "null" }
+    Error:
+      type: object
+      required: [code, message, request_id]
+      properties:
+        code: { type: string }
+        message: { type: string }
+        request_id: { type: string }
+        details:
+          type: object
+          additionalProperties: true
