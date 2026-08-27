@@ -3,6 +3,7 @@ package httpapi
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -12,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"agentchunzhi/internal/auth"
 	"agentchunzhi/internal/store"
@@ -19,7 +21,11 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-const maxIdempotentRequestBytes = 64 << 20
+const (
+	maxIdempotentRequestBytes = 64 << 20
+	minIdempotencyKeyLen      = 16
+	maxIdempotencyKeyLen      = 200
+)
 
 type idempotentHTTPResponse struct {
 	Status  int
@@ -66,9 +72,15 @@ func frontendIdempotency(deps Dependencies, next http.Handler) http.Handler {
 		}
 		// Authenticate before validating idempotency/body fields so anonymous
 		// requests consistently receive 401 for protected operations.
-		key, ok := requiredIdempotencyKey(r)
+		key, ok := optionalIdempotencyKey(r)
 		if !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
+			return
+		}
+		if key == "" {
+			// Idempotency is opt-in: without a client-supplied key the request
+			// executes directly instead of failing with idempotency paperwork.
+			next.ServeHTTP(w, r)
 			return
 		}
 		requestHash, cleanup, err := snapshotIdempotentRequest(r)
@@ -138,6 +150,50 @@ func requiresHTTPIdempotency(r *http.Request) bool {
 }
 
 var errIdempotentRequestTooLarge = errors.New("idempotent request is too large")
+
+// optionalIdempotencyKey returns the client-supplied Idempotency-Key header.
+// An absent header is valid and yields an empty key: replay/dedup is opt-in.
+// A present but malformed key (length outside [16,200] or containing NUL) is
+// rejected so callers get explicit feedback instead of silent no-dedup.
+func optionalIdempotencyKey(r *http.Request) (string, bool) {
+	value := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	if value == "" {
+		return "", true
+	}
+	if len(value) < minIdempotencyKeyLen || len(value) > maxIdempotencyKeyLen || strings.ContainsRune(value, '\x00') {
+		return "", false
+	}
+	return value, true
+}
+
+// requestIdempotencyKey resolves the effective idempotency key for a write
+// operation. Client-supplied keys keep their existing dedup semantics; absent
+// keys are replaced by a fresh server-side surrogate so downstream services,
+// which still require a well-formed key, execute without cross-request dedup.
+// A malformed supplied key answers 422 idempotency_key_invalid.
+func requestIdempotencyKey(w http.ResponseWriter, r *http.Request) (string, bool) {
+	value, ok := optionalIdempotencyKey(r)
+	if !ok {
+		writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
+		return "", false
+	}
+	if value == "" {
+		return newServerIdempotencyKey(), true
+	}
+	return value, true
+}
+
+// newServerIdempotencyKey mints a random RFC-4122 v4 UUID used as surrogate
+// idempotency key for requests that did not carry one.
+func newServerIdempotencyKey() string {
+	var raw [16]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return deterministicUUID(fmt.Sprintf("fallback:%s:%d", requestID(), time.Now().UnixNano()))
+	}
+	raw[6] = (raw[6] & 0x0f) | 0x40
+	raw[8] = (raw[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%x-%x-%x-%x-%x", raw[0:4], raw[4:6], raw[6:8], raw[8:10], raw[10:16])
+}
 
 func snapshotIdempotentRequest(r *http.Request) (string, func(), error) {
 	hasher := sha256.New()

@@ -106,18 +106,33 @@ func (p MigrationProcessor) process(ctx context.Context, migrationID string) err
 		return fmt.Errorf("list migration assets: %w", err)
 	}
 	defer rows.Close()
+	// Buffer candidates before writing: a pgx Tx is bound to one connection, so
+	// issuing INSERTs while this result set is still open fails with conn busy.
+	type migrationAsset struct {
+		assetID, oldVersionID, createdBy string
+		versionNo                        int
+		title, markdown                  *string
+		fields, tags, source             []byte
+		quality                          string
+	}
+	pending := []migrationAsset{}
 	for rows.Next() {
-		var assetID, oldVersionID, createdBy string
-		var versionNo int
-		var title, markdown *string
-		var fields, tags, source []byte
-		var quality string
-		if err := rows.Scan(&assetID, &oldVersionID, &versionNo, &title, &markdown, &fields, &quality, &tags, &source, &createdBy); err != nil {
+		var item migrationAsset
+		if err := rows.Scan(&item.assetID, &item.oldVersionID, &item.versionNo, &item.title, &item.markdown, &item.fields, &item.quality, &item.tags, &item.source, &item.createdBy); err != nil {
 			return fmt.Errorf("scan migration asset: %w", err)
 		}
+		pending = append(pending, item)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate migration assets: %w", err)
+	}
+	rows.Close()
+	for _, item := range pending {
+		assetID, oldVersionID, createdBy := item.assetID, item.oldVersionID, item.createdBy
+		versionNo := item.versionNo
 		var fieldMap map[string]any
-		if len(fields) > 0 && string(fields) != "null" {
-			if err := json.Unmarshal(fields, &fieldMap); err != nil {
+		if len(item.fields) > 0 && string(item.fields) != "null" {
+			if err := json.Unmarshal(item.fields, &fieldMap); err != nil {
 				return fmt.Errorf("decode migration fields: %w", err)
 			}
 		}
@@ -125,7 +140,7 @@ func (p MigrationProcessor) process(ctx context.Context, migrationID string) err
 		if err := validateMigrationFields(targetSchema, migrated); err != nil {
 			return fmt.Errorf("asset %s cannot migrate: %w", assetID, err)
 		}
-		checksum := checksumForMigration(title, markdown, migrated)
+		checksum := checksumForMigration(item.title, item.markdown, migrated)
 		var newVersionID string
 		if err := tx.QueryRow(ctx, `
 			INSERT INTO asset.asset_versions
@@ -137,7 +152,7 @@ func (p MigrationProcessor) process(ctx context.Context, migrationID string) err
 				$13::uuid, $14, $15::uuid, 'none')
 			RETURNING id::text
 		`, organizationID, workspaceID, assetID, modelID, targetVersionID, versionNo+1,
-			quality, title, markdown, mustJSON(migrated), jsonOrEmpty(tags), jsonOrEmpty(source), oldVersionID, checksum, createdBy).Scan(&newVersionID); err != nil {
+			item.quality, item.title, item.markdown, mustJSON(migrated), jsonOrEmpty(item.tags), jsonOrEmpty(item.source), oldVersionID, checksum, createdBy).Scan(&newVersionID); err != nil {
 			return fmt.Errorf("create migrated asset version: %w", err)
 		}
 		if _, err := tx.Exec(ctx, `UPDATE asset.assets SET current_working_version_id = $2::uuid, updated_at = now() WHERE id = $1::uuid`, assetID, newVersionID); err != nil {

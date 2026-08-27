@@ -9,10 +9,31 @@ import (
 	agentquery "agentchunzhi/internal/query"
 )
 
+// unionStrings merges ID lists from doc-style (data_models) and internal-style
+// params, preserving order and dropping duplicates.
+func unionStrings(lists ...[]string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0)
+	for _, list := range lists {
+		for _, value := range list {
+			if value == "" {
+				continue
+			}
+			if _, ok := seen[value]; ok {
+				continue
+			}
+			seen[value] = struct{}{}
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
 type memberQueryRequest struct {
 	Mode              string         `json:"mode"`
 	Query             string         `json:"query"`
 	ResourceModelIDs  []string       `json:"resource_model_ids"`
+	DataModels        []string       `json:"data_models"`
 	Visibility        []string       `json:"visibility"`
 	PublicationStatus []string       `json:"publication_status"`
 	Filters           map[string]any `json:"filters"`
@@ -42,7 +63,7 @@ func memberQuery(deps Dependencies) http.HandlerFunc {
 			WorkspaceID:       r.PathValue("workspaceId"),
 			Mode:              input.Mode,
 			Query:             input.Query,
-			ModelIDs:          input.ResourceModelIDs,
+			ModelIDs:          unionStrings(input.ResourceModelIDs, input.DataModels),
 			Visibility:        input.Visibility,
 			PublicationStatus: input.PublicationStatus,
 			Filters:           input.Filters,
@@ -58,6 +79,9 @@ func memberQuery(deps Dependencies) http.HandlerFunc {
 			_ = deps.Store.RecordQueryLog(r.Context(), principal.OrganizationID, principal.UserID, "/api/frontend/workspaces/{workspaceId}/query", queryHash, len(result.Items), int(time.Since(started).Milliseconds()), "succeeded")
 		}
 		switch {
+		case errors.Is(err, agentquery.ErrWorkspaceMissing):
+			writeError(w, http.StatusNotFound, "workspace_not_found")
+			return
 		case errors.Is(err, agentquery.ErrModelAccessDenied):
 			writeError(w, http.StatusForbidden, "workspace_or_model_access_denied")
 			return

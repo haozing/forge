@@ -20,6 +20,12 @@ var (
 	ErrForbidden    = errors.New("workspace access denied")
 	ErrNotFound     = errors.New("workspace not found")
 	ErrConflict     = errors.New("workspace conflict")
+	// ErrInvalidEmail marks an invitation email that fails the format check.
+	ErrInvalidEmail = errors.New("invalid invitation email")
+	// ErrAmbiguousMember is returned when a member reference matches several
+	// workspace memberships and the caller did not disambiguate via
+	// workspace_id.
+	ErrAmbiguousMember = errors.New("workspace member reference is ambiguous")
 )
 
 type Service struct {
@@ -348,6 +354,13 @@ func (s Service) UpdateSettings(ctx context.Context, principal auth.Principal, w
 	if err := tx.Commit(ctx); err != nil {
 		return Settings{}, fmt.Errorf("commit workspace settings update: %w", err)
 	}
+	s.writeAuditAsync(NewAuditEntry(AuditSettingsUpdate, "", principal.OrganizationID, principal.UserID,
+		AuditResourceWorkspace, workspaceID, map[string]any{
+			"workspace_id":              workspaceID,
+			"name":                      input.Name,
+			"default_visibility":        input.DefaultVisibility,
+			"default_resource_model_id": input.DefaultResourceModelID,
+		}))
 	return input, nil
 }
 

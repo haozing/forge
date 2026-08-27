@@ -150,17 +150,7 @@ func (s TransferService) StartImport(ctx context.Context, principal auth.Princip
 }
 
 func (s TransferService) GetImport(ctx context.Context, principal auth.Principal, jobID string) (ImportJob, error) {
-	if !validID(jobID) {
-		return ImportJob{}, ErrInvalidInput
-	}
-	var workspaceID string
-	if err := s.Store.Pool.QueryRow(ctx, `SELECT rm.workspace_id::text FROM asset.import_batches ib JOIN model.resource_models rm ON rm.id = ib.resource_model_id WHERE ib.organization_id = $1::uuid AND ib.id = $2::uuid`, principal.OrganizationID, jobID).Scan(&workspaceID); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return ImportJob{}, ErrNotFound
-		}
-		return ImportJob{}, err
-	}
-	if err := s.require(ctx, principal, workspaceID, "asset.read"); err != nil {
+	if err := s.authorizeImportRead(ctx, principal, jobID); err != nil {
 		return ImportJob{}, err
 	}
 	var item ImportJob
@@ -168,6 +158,154 @@ func (s TransferService) GetImport(ctx context.Context, principal auth.Principal
 	err := s.Store.Pool.QueryRow(ctx, `SELECT ib.id::text, rm.workspace_id::text, ib.resource_model_id::text, ib.resource_model_version_id::text, ib.status, ib.summary, ib.source_name, ib.created_at, ib.completed_at FROM asset.import_batches ib JOIN model.resource_models rm ON rm.id = ib.resource_model_id WHERE ib.organization_id = $1::uuid AND ib.id = $2::uuid`, principal.OrganizationID, jobID).Scan(&item.ID, &item.WorkspaceID, &item.ResourceModelID, &item.VersionID, &item.Status, &summary, &item.SourceName, &item.CreatedAt, &item.CompletedAt)
 	item.Summary = decodeJSONMap(summary)
 	return item, err
+}
+
+// authorizeImportRead applies the same checks as GetImport: organization
+// scoping plus asset.read on the owning workspace. Unknown IDs surface as
+// ErrNotFound so callers can keep their existing not-found semantics.
+func (s TransferService) authorizeImportRead(ctx context.Context, principal auth.Principal, jobID string) error {
+	if !validID(jobID) {
+		return ErrInvalidInput
+	}
+	var workspaceID string
+	if err := s.Store.Pool.QueryRow(ctx, `SELECT rm.workspace_id::text FROM asset.import_batches ib JOIN model.resource_models rm ON rm.id = ib.resource_model_id WHERE ib.organization_id = $1::uuid AND ib.id = $2::uuid`, principal.OrganizationID, jobID).Scan(&workspaceID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		}
+		return err
+	}
+	return s.require(ctx, principal, workspaceID, "asset.read")
+}
+
+const (
+	defaultImportRowsLimit = 50
+	maxImportRowsLimit     = 200
+)
+
+// ImportJobRow is one import_rows entry for the failed-row report listing.
+type ImportJobRow struct {
+	RowNumber int              `json:"row_number"`
+	Status    string           `json:"status"`
+	Errors    []map[string]any `json:"errors,omitempty"`
+	Data      map[string]any   `json:"data"`
+}
+
+// ImportJobRowsPage is the paginated response payload of the rows listing.
+type ImportJobRowsPage struct {
+	JobID         string         `json:"job_id"`
+	TotalRows     int            `json:"total_rows"`
+	TotalRejected int            `json:"total_rejected"`
+	Limit         int            `json:"limit"`
+	Offset        int            `json:"offset"`
+	HasMore       bool           `json:"has_more"`
+	Items         []ImportJobRow `json:"items"`
+}
+
+// ImportErrorRow carries the raw persisted text of a rejected row so the CSV
+// download can stream byte-identical source data.
+type ImportErrorRow struct {
+	RowNumber int    `json:"row_number"`
+	Status    string `json:"status"`
+	Errors    string `json:"errors"`    // errors jsonb rendered as text, e.g. [{"code":"invalid_fields"}]
+	DataJSON  string `json:"data_json"` // original source_row jsonb as text
+}
+
+const importRowsJoinClause = `
+	FROM asset.import_rows r
+	JOIN asset.import_batches b ON b.id = r.import_batch_id
+	JOIN model.resource_models rm ON rm.id = b.resource_model_id
+	WHERE b.organization_id = $1::uuid AND b.id = $2::uuid`
+
+// ListImportRows returns a page of import_rows entries for an import batch,
+// optionally restricted to rejected ("error") rows.
+func (s TransferService) ListImportRows(ctx context.Context, principal auth.Principal, jobID string, onlyErrors bool, limit, offset int) (ImportJobRowsPage, error) {
+	if limit <= 0 {
+		limit = defaultImportRowsLimit
+	}
+	if limit > maxImportRowsLimit {
+		limit = maxImportRowsLimit
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	page := ImportJobRowsPage{JobID: jobID, Limit: limit, Offset: offset, Items: make([]ImportJobRow, 0)}
+	if err := s.authorizeImportRead(ctx, principal, jobID); err != nil {
+		return ImportJobRowsPage{}, err
+	}
+	if err := s.Store.Pool.QueryRow(ctx,
+		`SELECT count(*), count(*) FILTER (WHERE r.status = 'rejected')`+importRowsJoinClause,
+		principal.OrganizationID, jobID).Scan(&page.TotalRows, &page.TotalRejected); err != nil {
+		return ImportJobRowsPage{}, fmt.Errorf("count import rows: %w", err)
+	}
+	filter := ""
+	if onlyErrors {
+		filter = " AND r.status = 'rejected'"
+	}
+	rows, err := s.Store.Pool.Query(ctx,
+		`SELECT r.row_number, r.status, r.errors::text, r.source_row::text`+importRowsJoinClause+filter+
+			` ORDER BY r.row_number LIMIT $3 OFFSET $4`,
+		principal.OrganizationID, jobID, limit, offset)
+	if err != nil {
+		return ImportJobRowsPage{}, fmt.Errorf("load import rows: %w", err)
+	}
+	defer rows.Close()
+	matched := 0
+	for rows.Next() {
+		matched++
+		var item ImportJobRow
+		var rawErrors, rawData []byte
+		if err := rows.Scan(&item.RowNumber, &item.Status, &rawErrors, &rawData); err != nil {
+			return ImportJobRowsPage{}, fmt.Errorf("scan import row: %w", err)
+		}
+		item.Errors = decodeImportRowErrors(rawErrors)
+		item.Data = decodeJSONMap(rawData)
+		page.Items = append(page.Items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return ImportJobRowsPage{}, err
+	}
+	total := page.TotalRows
+	if onlyErrors {
+		total = page.TotalRejected
+	}
+	page.HasMore = offset+len(page.Items) < total
+	return page, nil
+}
+
+// ImportErrorRows returns all rejected rows ordered by row number for the
+// failed-row CSV download.
+func (s TransferService) ImportErrorRows(ctx context.Context, principal auth.Principal, jobID string) ([]ImportErrorRow, error) {
+	if err := s.authorizeImportRead(ctx, principal, jobID); err != nil {
+		return nil, err
+	}
+	rows, err := s.Store.Pool.Query(ctx,
+		`SELECT r.row_number, r.status, r.errors::text, r.source_row::text`+importRowsJoinClause+
+			` AND r.status = 'rejected' ORDER BY r.row_number`,
+		principal.OrganizationID, jobID)
+	if err != nil {
+		return nil, fmt.Errorf("load import error rows: %w", err)
+	}
+	defer rows.Close()
+	items := make([]ImportErrorRow, 0)
+	for rows.Next() {
+		var item ImportErrorRow
+		if err := rows.Scan(&item.RowNumber, &item.Status, &item.Errors, &item.DataJSON); err != nil {
+			return nil, fmt.Errorf("scan import error row: %w", err)
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+func decodeImportRowErrors(raw []byte) []map[string]any {
+	result := make([]map[string]any, 0)
+	if len(raw) == 0 || json.Unmarshal(raw, &result) != nil {
+		return make([]map[string]any, 0)
+	}
+	return result
 }
 
 func (s TransferService) StartExport(ctx context.Context, principal auth.Principal, workspaceID, idempotencyKey string, input ExportInput) (ExportJob, error) {

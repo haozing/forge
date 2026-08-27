@@ -15,8 +15,8 @@ func presignedAttachmentDownloadFinal(deps Dependencies) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		if _, ok := requiredIdempotencyKey(r); !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+		if _, ok := requestIdempotencyKey(w, r); !ok {
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
 			return
 		}
 		id := r.PathValue("attachmentId")

@@ -44,9 +44,9 @@ func modelEndpointCollection(deps Dependencies) http.HandlerFunc {
 			}
 			writeJSON(w, http.StatusOK, map[string]any{"items": items})
 		case http.MethodPost:
-			key, ok := requiredIdempotencyKey(r)
+			key, ok := requestIdempotencyKey(w, r)
 			if !ok {
-				writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+				writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
 				return
 			}
 			var input modelEndpointRequest
@@ -85,9 +85,9 @@ func modelEndpointResource(deps Dependencies) http.HandlerFunc {
 			}
 			writeJSON(w, http.StatusOK, item)
 		case http.MethodPut:
-			key, ok := requiredIdempotencyKey(r)
+			key, ok := requestIdempotencyKey(w, r)
 			if !ok {
-				writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+				writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
 				return
 			}
 			var input modelEndpointRequest
@@ -120,12 +120,14 @@ func testModelEndpoint(deps Dependencies) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		item, err := deps.ModelEndpointService.Test(r.Context(), principal, r.PathValue("endpointId"))
+		result, err := deps.ModelEndpointService.Test(r.Context(), principal, r.PathValue("endpointId"))
 		if err != nil {
 			writeModelEndpointError(w, err, "model_endpoint_test_failed")
 			return
 		}
-		writeJSON(w, http.StatusOK, item)
+		// Pure probe: always 200 once the probe ran; outcome lives in ok/detail
+		// and endpoint.status is left untouched either way.
+		writeJSON(w, http.StatusOK, result)
 	}
 }
 
@@ -139,8 +141,8 @@ func setModelEndpointStatus(deps Dependencies, status string) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		if _, ok := requiredIdempotencyKey(r); !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+		if _, ok := requestIdempotencyKey(w, r); !ok {
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
 			return
 		}
 		item, err := deps.ModelEndpointService.SetStatus(r.Context(), principal, r.PathValue("endpointId"), status)

@@ -225,77 +225,128 @@ func (s Service) Get(ctx context.Context, principal auth.Principal, endpointID s
 	return item, err
 }
 
-func (s Service) SetStatus(ctx context.Context, principal auth.Principal, endpointID, status string) (Endpoint, error) {
+// StatusResult carries the updated endpoint plus an optional machine-readable
+// warning. The warning is set when a previously unverified or unhealthy
+// endpoint is enabled; enabling stays an explicit administrator decision, so a
+// missing external connectivity no longer blocks the flip.
+type StatusResult struct {
+	Endpoint
+	Warning string `json:"warning,omitempty"`
+}
+
+const WarningEnableUnverified = "model_endpoint_enabled_without_verified_health"
+
+func (s Service) SetStatus(ctx context.Context, principal auth.Principal, endpointID, status string) (StatusResult, error) {
 	status = strings.TrimSpace(status)
 	if principal.UserType != "member" || uuid.Validate(endpointID) != nil || (status != "active" && status != "disabled") || s.Store == nil || s.Store.Pool == nil {
-		return Endpoint{}, ErrInvalidInput
+		return StatusResult{}, ErrInvalidInput
 	}
+	warning := ""
 	if status == "active" {
 		var verified *time.Time
 		var healthError *string
 		if err := s.Store.Pool.QueryRow(ctx, `SELECT last_verified_at, last_health_error_code FROM integration.model_endpoints WHERE id = $1::uuid AND organization_id = $2::uuid`, endpointID, principal.OrganizationID).Scan(&verified, &healthError); errors.Is(err, pgx.ErrNoRows) {
-			return Endpoint{}, ErrNotFound
+			return StatusResult{}, ErrNotFound
 		} else if err != nil {
-			return Endpoint{}, fmt.Errorf("load model endpoint health: %w", err)
-		} else if verified == nil || healthError != nil {
-			return Endpoint{}, ErrUnavailable
+			return StatusResult{}, fmt.Errorf("load model endpoint health: %w", err)
 		}
+		// Enable is an intent operation, not a probe result: warn the caller
+		// when health telemetry is stale or failed instead of blocking.
+		warning = enableWarning(verified, stringValue(healthError))
 	}
 	result, err := s.Store.Pool.Exec(ctx, `UPDATE integration.model_endpoints SET status = $3, updated_at = now() WHERE id = $1::uuid AND organization_id = $2::uuid`, endpointID, principal.OrganizationID, status)
 	if err != nil {
-		return Endpoint{}, fmt.Errorf("update model endpoint status: %w", err)
+		return StatusResult{}, fmt.Errorf("update model endpoint status: %w", err)
 	}
 	if result.RowsAffected() == 0 {
-		return Endpoint{}, ErrNotFound
-	}
-	return s.Get(ctx, principal, endpointID)
-}
-
-func (s Service) Test(ctx context.Context, principal auth.Principal, endpointID string) (Endpoint, error) {
-	if principal.UserType != "member" || uuid.Validate(endpointID) != nil || s.Store == nil || s.Store.Pool == nil || s.Health == nil {
-		return Endpoint{}, ErrInvalidInput
+		return StatusResult{}, ErrNotFound
 	}
 	item, err := s.Get(ctx, principal, endpointID)
 	if err != nil {
-		return Endpoint{}, err
+		return StatusResult{}, err
+	}
+	return StatusResult{Endpoint: item, Warning: warning}, nil
+}
+
+// enableWarning maps current health telemetry to the warning code emitted on
+// enable. An empty result means the endpoint was verified and healthy.
+func enableWarning(verified *time.Time, healthErrorCode string) string {
+	if verified == nil || healthErrorCode != "" {
+		return WarningEnableUnverified
+	}
+	return ""
+}
+
+const HealthCheckFailedCode = "model_endpoint_check_failed"
+
+// ProbeResult reports a connectivity probe outcome. The endpoint status is
+// deliberately absent from the mutation: a failed probe must never flip
+// endpoint.status (it only refreshes health telemetry), so administrators keep
+// full control over enable/disable.
+type ProbeResult struct {
+	OK     bool   `json:"ok"`
+	Detail string `json:"detail,omitempty"`
+	Endpoint
+}
+
+// probeOutcome classifies one health-check attempt. It never decides the
+// endpoint status; the health error code is telemetry only.
+func probeOutcome(err error) (bool, string, string) {
+	if err == nil {
+		return true, "", ""
+	}
+	return false, err.Error(), HealthCheckFailedCode
+}
+
+func (s Service) Test(ctx context.Context, principal auth.Principal, endpointID string) (ProbeResult, error) {
+	if principal.UserType != "member" || uuid.Validate(endpointID) != nil || s.Store == nil || s.Store.Pool == nil || s.Health == nil {
+		return ProbeResult{}, ErrInvalidInput
+	}
+	item, err := s.Get(ctx, principal, endpointID)
+	if err != nil {
+		return ProbeResult{}, err
 	}
 	capabilities, checkErr := s.Health.Check(ctx, endpointID, item.CurrentRevision)
+	ok, detail, healthErrorCode := probeOutcome(checkErr)
 	capabilitiesJSON, _ := json.Marshal(capabilities)
 	if checkErr != nil {
-		_, updateErr := s.Store.Pool.Exec(ctx, `
+		// Failed probe: record telemetry only; endpoint.status stays as-is.
+		if _, updateErr := s.Store.Pool.Exec(ctx, `
 			UPDATE integration.model_endpoints
-			SET status = 'unavailable', last_verified_at = now(),
-			    last_health_error_code = 'model_endpoint_check_failed', updated_at = now()
+			SET last_verified_at = now(), last_health_error_code = $3, updated_at = now()
 			WHERE id = $1::uuid AND organization_id = $2::uuid
-		`, endpointID, principal.OrganizationID)
-		if updateErr != nil {
-			return Endpoint{}, fmt.Errorf("save failed endpoint health: %w", updateErr)
+		`, endpointID, principal.OrganizationID, healthErrorCode); updateErr != nil {
+			return ProbeResult{}, fmt.Errorf("save failed endpoint health: %w", updateErr)
 		}
-		return Endpoint{}, fmt.Errorf("%w: %v", ErrUnavailable, checkErr)
+	} else {
+		tx, err := s.Store.Pool.Begin(ctx)
+		if err != nil {
+			return ProbeResult{}, fmt.Errorf("begin endpoint health update: %w", err)
+		}
+		defer tx.Rollback(ctx)
+		if _, err := tx.Exec(ctx, `
+			UPDATE integration.model_endpoint_revisions
+			SET capabilities = $3::jsonb
+			WHERE model_endpoint_id = $1::uuid AND revision = $2
+		`, endpointID, item.CurrentRevision, string(capabilitiesJSON)); err != nil {
+			return ProbeResult{}, fmt.Errorf("save model capabilities: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `
+			UPDATE integration.model_endpoints
+			SET last_verified_at = now(), last_health_error_code = NULL, updated_at = now()
+			WHERE id = $1::uuid AND organization_id = $2::uuid
+		`, endpointID, principal.OrganizationID); err != nil {
+			return ProbeResult{}, fmt.Errorf("save endpoint health: %w", err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return ProbeResult{}, fmt.Errorf("commit endpoint health: %w", err)
+		}
 	}
-	tx, err := s.Store.Pool.Begin(ctx)
+	item, err = s.Get(ctx, principal, endpointID)
 	if err != nil {
-		return Endpoint{}, fmt.Errorf("begin endpoint health update: %w", err)
+		return ProbeResult{}, err
 	}
-	defer tx.Rollback(ctx)
-	if _, err := tx.Exec(ctx, `
-		UPDATE integration.model_endpoint_revisions
-		SET capabilities = $3::jsonb
-		WHERE model_endpoint_id = $1::uuid AND revision = $2
-	`, endpointID, item.CurrentRevision, string(capabilitiesJSON)); err != nil {
-		return Endpoint{}, fmt.Errorf("save model capabilities: %w", err)
-	}
-	if _, err := tx.Exec(ctx, `
-		UPDATE integration.model_endpoints
-		SET status = 'active', last_verified_at = now(), last_health_error_code = NULL, updated_at = now()
-		WHERE id = $1::uuid AND organization_id = $2::uuid
-	`, endpointID, principal.OrganizationID); err != nil {
-		return Endpoint{}, fmt.Errorf("save endpoint health: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return Endpoint{}, fmt.Errorf("commit endpoint health: %w", err)
-	}
-	return s.Get(ctx, principal, endpointID)
+	return ProbeResult{OK: ok, Detail: detail, Endpoint: item}, nil
 }
 
 func (s Service) encodeCredential(organizationID, endpointID, apiKey, secretRef string) (string, []byte, string, error) {

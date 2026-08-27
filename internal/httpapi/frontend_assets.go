@@ -98,9 +98,9 @@ func createMemberAsset(deps Dependencies) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		key, ok := requiredIdempotencyKey(r)
+		key, ok := requestIdempotencyKey(w, r)
 		if !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
 			return
 		}
 		var input assetservice.MemberAssetInput
@@ -108,6 +108,12 @@ func createMemberAsset(deps Dependencies) http.HandlerFunc {
 		decoder.DisallowUnknownFields()
 		if err := decoder.Decode(&input); err != nil {
 			writeError(w, http.StatusUnprocessableEntity, "validation_failed")
+			return
+		}
+		if !rejectBlankText(w, input.Title, input.Markdown) {
+			return
+		}
+		if !requirePathUUID(w, r.PathValue("workspaceId")) || !rejectUnknownWorkspace(w, r, deps, principal) {
 			return
 		}
 		result, err := deps.MemberAssetService.Create(r.Context(), principal, r.PathValue("workspaceId"), key, input)
@@ -162,9 +168,9 @@ func patchMemberAsset(deps Dependencies) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		key, ok := requiredIdempotencyKey(r)
+		key, ok := requestIdempotencyKey(w, r)
 		if !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
 			return
 		}
 		if strings.TrimSpace(r.Header.Get("If-Match")) == "" {
@@ -176,6 +182,12 @@ func patchMemberAsset(deps Dependencies) http.HandlerFunc {
 		decoder.DisallowUnknownFields()
 		if err := decoder.Decode(&input); err != nil {
 			writeError(w, http.StatusUnprocessableEntity, "validation_failed")
+			return
+		}
+		if !rejectBlankText(w, input.Title, input.Markdown) {
+			return
+		}
+		if !requirePathUUID(w, r.PathValue("assetId")) {
 			return
 		}
 		expected := strings.Trim(r.Header.Get("If-Match"), "\"")
@@ -216,9 +228,9 @@ func submitAssetReview(deps Dependencies) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		key, ok := requiredIdempotencyKey(r)
+		key, ok := requestIdempotencyKey(w, r)
 		if !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
 			return
 		}
 		var input submitReviewRequest
@@ -261,9 +273,9 @@ func publishMemberAsset(deps Dependencies) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		key, ok := requiredIdempotencyKey(r)
+		key, ok := requestIdempotencyKey(w, r)
 		if !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
 			return
 		}
 		var input memberPublishAssetRequest
@@ -303,9 +315,9 @@ func archiveMemberAsset(deps Dependencies) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		key, ok := requiredIdempotencyKey(r)
+		key, ok := requestIdempotencyKey(w, r)
 		if !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
 			return
 		}
 		result, err := deps.MemberAssetService.Archive(r.Context(), principal, r.PathValue("assetId"), key)

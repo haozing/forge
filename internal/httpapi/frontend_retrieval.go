@@ -23,7 +23,11 @@ func requireRetrievalScope(w http.ResponseWriter, r *http.Request, deps Dependen
 		return authz.Scope{}, false
 	}
 	scope, err := deps.WorkspacePolicy.Require(r.Context(), principal, workspaceID, "", action)
-	if errors.Is(err, authz.ErrWorkspaceForbidden) || errors.Is(err, authz.ErrWorkspaceNotFound) {
+	if errors.Is(err, authz.ErrWorkspaceNotFound) {
+		writeError(w, http.StatusNotFound, "workspace_not_found")
+		return authz.Scope{}, false
+	}
+	if errors.Is(err, authz.ErrWorkspaceForbidden) {
 		writeError(w, http.StatusForbidden, "workspace_access_denied")
 		return authz.Scope{}, false
 	}

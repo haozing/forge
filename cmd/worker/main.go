@@ -48,6 +48,12 @@ func main() {
 		startupCancel()
 		log.Fatalf("worker database migration failed: %v", err)
 	}
+
+	// 0043 is self-idempotent (ON CONFLICT DO NOTHING): replaying it on boot
+	// seeds organizations created after its checksum was first recorded.
+	if err := store.ReplayIdempotentSeed(startupCtx, db, cfg.MigrationPath, "0043_builtin_resource_model_seeds.sql"); err != nil {
+		log.Fatalf("replay builtin resource model seed: %v", err)
+	}
 	if err := eventing.Migrate(startupCtx, db.Pool); err != nil {
 		db.Close()
 		startupCancel()
@@ -170,6 +176,13 @@ func main() {
 	if err != nil {
 		log.Fatalf("worker River startup failed: %v", err)
 	}
+	// Built-in cron trigger loop (runs alongside the River workers): every 30s
+	// it evaluates enabled automation.jobs with trigger.type='cron' and
+	// enqueues due runs via Service.CreateScheduledRun. Window identity is a
+	// structured idempotency key checked against automation.runs, so ticks,
+	// restarts, or parallel worker processes cannot double-fire one minute.
+	cronScheduler := automation.NewScheduler(automation.NewServiceScheduleEnqueuer(db), log.Printf)
+	go cronScheduler.Run(ctx, automation.DefaultSchedulerInterval)
 	log.Printf("worker starting environment=%s queues=%s,%s", cfg.Environment, eventing.QueueEvents, eventing.QueueMaintenance)
 	if err := riverClient.Start(ctx); err != nil {
 		log.Fatalf("worker River start failed: %v", err)

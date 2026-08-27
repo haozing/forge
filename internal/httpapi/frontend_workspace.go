@@ -28,6 +28,10 @@ func writeWorkspaceError(w http.ResponseWriter, err error, fallback string) {
 	switch {
 	case errors.Is(err, workspace.ErrInvalidInput):
 		writeError(w, http.StatusUnprocessableEntity, "validation_failed")
+	case errors.Is(err, workspace.ErrInvalidEmail):
+		writeError(w, http.StatusUnprocessableEntity, "invalid_email")
+	case errors.Is(err, workspace.ErrAmbiguousMember):
+		writeError(w, http.StatusConflict, "workspace_member_ambiguous")
 	case errors.Is(err, workspace.ErrForbidden):
 		writeError(w, http.StatusForbidden, "workspace_access_denied")
 	case errors.Is(err, workspace.ErrNotFound):
@@ -89,6 +93,9 @@ func getWorkspaceMember(deps Dependencies) http.HandlerFunc {
 		if !ok {
 			return
 		}
+		if !requirePathUUID(w, r.PathValue("workspaceId")) || !rejectUnknownWorkspace(w, r, deps, principal) {
+			return
+		}
 		item, err := deps.WorkspaceService.Member(r.Context(), principal, r.PathValue("workspaceId"))
 		if err != nil {
 			writeWorkspaceError(w, err, "workspace_member_load_failed")
@@ -108,6 +115,9 @@ func listWorkspaceAgentApplications(deps Dependencies) http.HandlerFunc {
 		if !ok {
 			return
 		}
+		if !requirePathUUID(w, r.PathValue("workspaceId")) || !rejectUnknownWorkspace(w, r, deps, principal) {
+			return
+		}
 		items, err := deps.WorkspaceService.AgentApplications(r.Context(), principal, r.PathValue("workspaceId"))
 		if err != nil {
 			writeWorkspaceError(w, err, "workspace_agent_applications_failed")
@@ -125,6 +135,9 @@ func getWorkspaceCounts(deps Dependencies) http.HandlerFunc {
 		}
 		principal, ok := requireMemberSession(w, r, deps)
 		if !ok {
+			return
+		}
+		if !requirePathUUID(w, r.PathValue("workspaceId")) || !rejectUnknownWorkspace(w, r, deps, principal) {
 			return
 		}
 		counts, err := deps.WorkspaceService.Counts(r.Context(), principal, r.PathValue("workspaceId"))
@@ -153,6 +166,9 @@ func getWorkspaceSettings(deps Dependencies) http.HandlerFunc {
 		if !ok {
 			return
 		}
+		if !requirePathUUID(w, r.PathValue("workspaceId")) || !rejectUnknownWorkspace(w, r, deps, principal) {
+			return
+		}
 		settings, err := deps.WorkspaceService.Settings(r.Context(), principal, r.PathValue("workspaceId"))
 		if err != nil {
 			writeWorkspaceError(w, err, "workspace_settings_load_failed")
@@ -173,8 +189,8 @@ func updateWorkspaceSettings(deps Dependencies) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		if _, ok := requiredIdempotencyKey(r); !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+		if _, ok := requestIdempotencyKey(w, r); !ok {
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
 			return
 		}
 		var patch workspaceSettingsPatch
@@ -245,8 +261,8 @@ func updateMemberPreferences(deps Dependencies) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		if _, ok := requiredIdempotencyKey(r); !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+		if _, ok := requestIdempotencyKey(w, r); !ok {
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
 			return
 		}
 		var input map[string]any

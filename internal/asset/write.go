@@ -38,6 +38,12 @@ type CreateInput struct {
 	Markdown        *string
 	Fields          map[string]any
 	Source          map[string]any
+	// Tags is optional; channel integrations (import/webhook) seed the
+	// version-level tag list, plain API creates leave it empty.
+	Tags []string
+	// VersionSource is written to asset_versions.source when set. It records
+	// channel provenance such as webhook received_at or import row numbers.
+	VersionSource map[string]any
 }
 
 type UpdateInput struct {
@@ -122,13 +128,22 @@ func (s Service) Create(ctx context.Context, principal auth.Principal, allowedMo
 	`, principal.OrganizationID, workspaceID, input.ResourceModelID, principal.UserID).Scan(&assetID); err != nil {
 		return AssetResult{}, fmt.Errorf("create asset: %w", err)
 	}
+	tagsArg := "[]"
+	if len(input.Tags) > 0 {
+		tagsArg = string(mustJSON(input.Tags))
+	}
+	versionSourceArg := "{}"
+	if input.VersionSource != nil {
+		versionSourceArg = string(mustJSON(input.VersionSource))
+	}
 	if err := tx.QueryRow(ctx, `
 		INSERT INTO asset.asset_versions
 			(organization_id, workspace_id, asset_id, resource_model_id, resource_model_version_id, version_no,
-			 workflow_status, quality, title, markdown, fields, source_raw_input_id, content_checksum, created_by)
-		VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid, 1, 'draft', 'raw', $6, $7, $8::jsonb, $9::uuid, $10, $11::uuid)
+			 workflow_status, quality, title, markdown, fields, source_raw_input_id, content_checksum, created_by,
+			 tags, source)
+		VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid, 1, 'draft', 'raw', $6, $7, $8::jsonb, $9::uuid, $10, $11::uuid, $12::jsonb, $13::jsonb)
 		RETURNING id::text
-	`, principal.OrganizationID, workspaceID, assetID, input.ResourceModelID, modelVersionID, input.Title, input.Markdown, string(mustJSON(fields)), rawInputID, contentChecksum, principal.UserID).Scan(&versionID); err != nil {
+	`, principal.OrganizationID, workspaceID, assetID, input.ResourceModelID, modelVersionID, input.Title, input.Markdown, string(mustJSON(fields)), rawInputID, contentChecksum, principal.UserID, tagsArg, versionSourceArg).Scan(&versionID); err != nil {
 		return AssetResult{}, fmt.Errorf("create asset version: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `

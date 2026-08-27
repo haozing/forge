@@ -63,8 +63,8 @@ func createResourceModel(deps Dependencies) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		if _, ok := requiredIdempotencyKey(r); !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+		if _, ok := requestIdempotencyKey(w, r); !ok {
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
 			return
 		}
 		var input createResourceModelRequest
@@ -138,8 +138,8 @@ func patchResourceModel(deps Dependencies) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		if _, ok := requiredIdempotencyKey(r); !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+		if _, ok := requestIdempotencyKey(w, r); !ok {
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
 			return
 		}
 		var input patchResourceModelRequest
@@ -202,8 +202,8 @@ func createResourceModelVersion(deps Dependencies) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		if _, ok := requiredIdempotencyKey(r); !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+		if _, ok := requestIdempotencyKey(w, r); !ok {
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
 			return
 		}
 		var input resourcemodel.VersionInput
@@ -265,8 +265,8 @@ func patchResourceModelVersion(deps Dependencies) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		if _, ok := requiredIdempotencyKey(r); !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+		if _, ok := requestIdempotencyKey(w, r); !ok {
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
 			return
 		}
 		current, err := deps.ResourceModelService.GetVersion(r.Context(), principal, r.PathValue("versionId"))
@@ -355,9 +355,9 @@ func startResourceModelMigration(deps Dependencies) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		key, ok := requiredIdempotencyKey(r)
+		key, ok := requestIdempotencyKey(w, r)
 		if !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
 			return
 		}
 		var input migrationRequest
@@ -405,8 +405,8 @@ func cancelResourceModelMigration(deps Dependencies) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		if _, ok := requiredIdempotencyKey(r); !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+		if _, ok := requestIdempotencyKey(w, r); !ok {
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
 			return
 		}
 		result, err := deps.ResourceModelService.CancelMigration(r.Context(), principal, r.PathValue("migrationId"))
@@ -428,8 +428,8 @@ func validateResourceModelVersion(deps Dependencies) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		if _, ok := requiredIdempotencyKey(r); !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+		if _, ok := requestIdempotencyKey(w, r); !ok {
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
 			return
 		}
 		result, err := deps.ResourceModelService.ValidateVersion(r.Context(), principal, r.PathValue("versionId"))
@@ -452,8 +452,8 @@ func publishResourceModelVersion(deps Dependencies) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		if _, ok := requiredIdempotencyKey(r); !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+		if _, ok := requestIdempotencyKey(w, r); !ok {
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
 			return
 		}
 		result, err := deps.ResourceModelService.PublishVersion(r.Context(), principal, r.PathValue("versionId"))
@@ -476,8 +476,8 @@ func retireResourceModelVersion(deps Dependencies) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		if _, ok := requiredIdempotencyKey(r); !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+		if _, ok := requestIdempotencyKey(w, r); !ok {
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
 			return
 		}
 		result, err := deps.ResourceModelService.RetireVersion(r.Context(), principal, r.PathValue("versionId"))

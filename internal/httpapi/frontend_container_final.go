@@ -24,8 +24,11 @@ func moveContainerFinal(deps Dependencies) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		if _, ok := requiredIdempotencyKey(r); !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+		if _, ok := requestIdempotencyKey(w, r); !ok {
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
+			return
+		}
+		if !requirePathUUID(w, r.PathValue("containerId")) {
 			return
 		}
 		item, err := deps.ContainerService.Get(r.Context(), principal, r.PathValue("containerId"))
@@ -103,6 +106,9 @@ func containerChildrenFinal(deps Dependencies) http.HandlerFunc {
 		if !ok {
 			return
 		}
+		if !requirePathUUID(w, r.PathValue("containerId")) {
+			return
+		}
 		item, err := deps.ContainerService.Get(r.Context(), principal, r.PathValue("containerId"))
 		if err != nil {
 			writeContainerError(w, err, "container_load_failed")
@@ -143,9 +149,9 @@ func assetContainersFinal(deps Dependencies) http.HandlerFunc {
 			return
 		}
 		if r.Method == http.MethodPost {
-			key, ok := requiredIdempotencyKey(r)
+			key, ok := requestIdempotencyKey(w, r)
 			if !ok {
-				writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+				writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
 				return
 			}
 			var input moveAssetRequest

@@ -6,6 +6,77 @@ import (
 	"fmt"
 )
 
+// AuditEntry is a single audit_log row awaiting persistence. Result must be
+// one of the values allowed by the audit_log check constraint
+// (allowed / denied / error); an empty result defaults to "allowed".
+type AuditEntry struct {
+	OrganizationID  string
+	ActorUserID     string
+	InitiatorUserID string
+	Action          string
+	ResourceType    string
+	ResourceID      string
+	RequestID       string
+	Result          string
+	Metadata        map[string]any
+}
+
+// validAuditResults mirrors the audit_log_result_check constraint.
+var validAuditResults = map[string]bool{
+	"allowed": true,
+	"denied":  true,
+	"error":   true,
+}
+
+// NewAuditEntry assembles one audit record with the default result "allowed".
+// Result is validated again by RecordAudit.
+func NewAuditEntry(action, organizationID, actorUserID, resourceType, resourceID string, metadata map[string]any) AuditEntry {
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
+	return AuditEntry{
+		OrganizationID:  organizationID,
+		ActorUserID:     actorUserID,
+		InitiatorUserID: actorUserID,
+		Action:          action,
+		ResourceType:    resourceType,
+		ResourceID:      resourceID,
+		Result:          "allowed",
+		Metadata:        metadata,
+	}
+}
+
+// RecordAudit persists one generic audit entry. It is the shared write path
+// for workspace, session and transfer audit events; callers are expected to
+// invoke it best-effort (fire-and-forget) and only log on failure.
+func (s *Store) RecordAudit(ctx context.Context, entry AuditEntry) error {
+	if s == nil || s.Pool == nil {
+		return fmt.Errorf("database store is not initialized")
+	}
+	if entry.Action == "" {
+		return fmt.Errorf("audit entry requires an action")
+	}
+	result := entry.Result
+	if result == "" {
+		result = "allowed"
+	}
+	if !validAuditResults[result] {
+		return fmt.Errorf("invalid audit result %q", result)
+	}
+	metadataJSON, err := json.Marshal(entry.Metadata)
+	if err != nil {
+		return fmt.Errorf("encode audit metadata: %w", err)
+	}
+	_, err = s.Pool.Exec(ctx, `
+		INSERT INTO audit.audit_log
+			(organization_id, actor_user_id, initiator_user_id, action, resource_type, resource_id, request_id, result, metadata)
+		VALUES (NULLIF($1,'')::uuid, NULLIF($2,'')::uuid, NULLIF($3,'')::uuid, $4,
+			NULLIF($5,''), NULLIF($6,'')::uuid, NULLIF($7,''), $8, $9::jsonb)
+	`, entry.OrganizationID, entry.ActorUserID, entry.InitiatorUserID, entry.Action,
+		entry.ResourceType, entry.ResourceID, entry.RequestID, result, string(metadataJSON))
+	return err
+}
+
 func (s *Store) RecordQueryLog(ctx context.Context, organizationID, actorUserID, endpoint, queryHash string, resultCount, latencyMS int, outcome string) error {
 	if s == nil || s.Pool == nil {
 		return fmt.Errorf("database store is not initialized")

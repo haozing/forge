@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"agentchunzhi/internal/objectstore"
+	"agentchunzhi/internal/store"
 )
 
 func taskRunEventsFinal(deps Dependencies) http.HandlerFunc {
@@ -23,6 +24,9 @@ func taskRunEventsFinal(deps Dependencies) http.HandlerFunc {
 			return
 		}
 		runID := r.PathValue("runId")
+		if !requirePathUUID(w, runID) {
+			return
+		}
 		var workspaceID string
 		if err := deps.Store.Pool.QueryRow(r.Context(), `SELECT workspace_id::text FROM automation.runs WHERE organization_id = $1::uuid AND id = $2::uuid`, principal.OrganizationID, runID).Scan(&workspaceID); err != nil {
 			writeError(w, http.StatusNotFound, "task_run_not_found")
@@ -115,6 +119,9 @@ func exportDownloadFinal(deps Dependencies) http.HandlerFunc {
 		if !ok {
 			return
 		}
+		if !requirePathUUID(w, r.PathValue("jobId")) {
+			return
+		}
 		var workspaceID, status, objectKey, contentType string
 		var size *int64
 		err := deps.Store.Pool.QueryRow(r.Context(), `SELECT rm.workspace_id::text, e.status, COALESCE(e.output_object_key, ''), COALESCE(e.output_content_type, 'application/octet-stream'), e.output_size FROM asset.export_jobs e JOIN model.resource_models rm ON rm.id = e.resource_model_id AND rm.organization_id = e.organization_id WHERE e.organization_id = $1::uuid AND e.id = $2::uuid`, principal.OrganizationID, r.PathValue("jobId")).Scan(&workspaceID, &status, &objectKey, &contentType, &size)
@@ -161,6 +168,10 @@ func exportDownloadFinal(deps Dependencies) http.HandlerFunc {
 			w.Header().Set("Content-Length", strconv.FormatInt(*size, 10))
 		}
 		_, _ = io.Copy(w, object.Body)
+		recordAuditAsync(deps, store.NewAuditEntry("asset.export.download", principal.OrganizationID, principal.UserID,
+			"export_job", r.PathValue("jobId"), map[string]any{
+				"workspace_id": workspaceID,
+			}))
 	}
 }
 

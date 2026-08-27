@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"agentchunzhi/internal/agentruntime"
 	"agentchunzhi/internal/auth"
@@ -22,6 +23,41 @@ type resumeAgentRunRequest struct {
 	Reason        string `json:"reason,omitempty"`
 }
 
+// agentRunPayload maps agentruntime.Run onto the site-wide snake_case JSON
+// contract; the coordinator struct itself has no json tags and would otherwise
+// serialize PascalCase field names.
+type agentRunPayload struct {
+	ID                   string    `json:"id"`
+	OrganizationID       string    `json:"organization_id"`
+	WorkspaceID          string    `json:"workspace_id"`
+	AgentApplicationID   string    `json:"agent_application_id"`
+	SessionID            string    `json:"session_id"`
+	ModelEndpointID      string    `json:"model_endpoint_id"`
+	ModelRevision        int64     `json:"model_revision"`
+	RuntimeMode          string    `json:"runtime_mode"`
+	WorkflowKey          string    `json:"workflow_key,omitempty"`
+	WorkflowCodeVersion  int64     `json:"workflow_code_version"`
+	Status               string    `json:"status"`
+	CurrentNode          string    `json:"current_node,omitempty"`
+	CheckpointID         string    `json:"checkpoint_id,omitempty"`
+	CheckpointSequence   int64     `json:"checkpoint_sequence"`
+	WaitingInteractionID string    `json:"waiting_interaction_id,omitempty"`
+	CreatedAt            time.Time `json:"created_at"`
+}
+
+func agentRunJSON(run agentruntime.Run) agentRunPayload {
+	return agentRunPayload{
+		ID: run.ID, OrganizationID: run.OrganizationID, WorkspaceID: run.WorkspaceID,
+		AgentApplicationID: run.AgentApplicationID, SessionID: run.SessionID,
+		ModelEndpointID: run.ModelEndpointID, ModelRevision: run.ModelRevision,
+		RuntimeMode: run.RuntimeMode, WorkflowKey: run.WorkflowKey,
+		WorkflowCodeVersion: run.WorkflowCodeVersion, Status: run.Status,
+		CurrentNode: run.CurrentNode, CheckpointID: run.CheckpointID,
+		CheckpointSequence: run.CheckpointSequence, WaitingInteractionID: run.WaitingInteractionID,
+		CreatedAt: run.CreatedAt,
+	}
+}
+
 func agentSessionRuns(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -32,9 +68,12 @@ func agentSessionRuns(deps Dependencies) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		idempotencyKey, ok := requiredIdempotencyKey(r)
+		idempotencyKey, ok := requestIdempotencyKey(w, r)
 		if !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
+			return
+		}
+		if !requirePathUUID(w, r.PathValue("sessionId")) {
 			return
 		}
 		var input createAgentRunRequest
@@ -87,7 +126,7 @@ func agentSessionRuns(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusInternalServerError, "agent_run_create_failed")
 			return
 		}
-		writeJSON(w, http.StatusAccepted, run)
+		writeJSON(w, http.StatusAccepted, agentRunJSON(run))
 	}
 }
 
@@ -98,10 +137,14 @@ func agentRunResource(deps Dependencies) http.HandlerFunc {
 			return
 		}
 		principal, ok := requireMemberSession(w, r, deps)
-		if !ok || !authorizeAgentRun(r, deps, principal, r.PathValue("runId")) {
-			if ok {
-				writeError(w, http.StatusNotFound, "agent_run_not_found")
-			}
+		if !ok {
+			return
+		}
+		if !requirePathUUID(w, r.PathValue("runId")) {
+			return
+		}
+		if !authorizeAgentRun(r, deps, principal, r.PathValue("runId")) {
+			writeError(w, http.StatusNotFound, "agent_run_not_found")
 			return
 		}
 		run, err := (agentruntime.Coordinator{Store: deps.Store}).Get(r.Context(), principal.OrganizationID, r.PathValue("runId"))
@@ -113,7 +156,7 @@ func agentRunResource(deps Dependencies) http.HandlerFunc {
 		_ = deps.Store.Pool.QueryRow(r.Context(), `SELECT output_snapshot FROM automation.runs WHERE id = $1::uuid`, run.ID).Scan(&output)
 		var outputSnapshot map[string]any
 		_ = json.Unmarshal(output, &outputSnapshot)
-		writeJSON(w, http.StatusOK, map[string]any{"run": run, "output": outputSnapshot})
+		writeJSON(w, http.StatusOK, map[string]any{"run": agentRunJSON(run), "output": outputSnapshot})
 	}
 }
 
@@ -124,10 +167,14 @@ func resumeAgentRun(deps Dependencies) http.HandlerFunc {
 			return
 		}
 		principal, ok := requireMemberSession(w, r, deps)
-		if !ok || !authorizeAgentRun(r, deps, principal, r.PathValue("runId")) {
-			if ok {
-				writeError(w, http.StatusNotFound, "agent_run_not_found")
-			}
+		if !ok {
+			return
+		}
+		if !requirePathUUID(w, r.PathValue("runId")) {
+			return
+		}
+		if !authorizeAgentRun(r, deps, principal, r.PathValue("runId")) {
+			writeError(w, http.StatusNotFound, "agent_run_not_found")
 			return
 		}
 		var input resumeAgentRunRequest
@@ -151,7 +198,7 @@ func resumeAgentRun(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusInternalServerError, "agent_run_resume_failed")
 			return
 		}
-		writeJSON(w, http.StatusAccepted, run)
+		writeJSON(w, http.StatusAccepted, agentRunJSON(run))
 	}
 }
 
@@ -162,10 +209,14 @@ func cancelAgentRun(deps Dependencies) http.HandlerFunc {
 			return
 		}
 		principal, ok := requireMemberSession(w, r, deps)
-		if !ok || !authorizeAgentRun(r, deps, principal, r.PathValue("runId")) {
-			if ok {
-				writeError(w, http.StatusNotFound, "agent_run_not_found")
-			}
+		if !ok {
+			return
+		}
+		if !requirePathUUID(w, r.PathValue("runId")) {
+			return
+		}
+		if !authorizeAgentRun(r, deps, principal, r.PathValue("runId")) {
+			writeError(w, http.StatusNotFound, "agent_run_not_found")
 			return
 		}
 		if err := (agentruntime.Coordinator{Store: deps.Store}).RequestCancel(r.Context(), principal.OrganizationID, r.PathValue("runId"), "cancelled by user"); err != nil {
@@ -179,10 +230,14 @@ func cancelAgentRun(deps Dependencies) http.HandlerFunc {
 func agentRunEvents(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		principal, ok := requireMemberSession(w, r, deps)
-		if !ok || !authorizeAgentRun(r, deps, principal, r.PathValue("runId")) {
-			if ok {
-				writeError(w, http.StatusNotFound, "agent_run_not_found")
-			}
+		if !ok {
+			return
+		}
+		if !requirePathUUID(w, r.PathValue("runId")) {
+			return
+		}
+		if !authorizeAgentRun(r, deps, principal, r.PathValue("runId")) {
+			writeError(w, http.StatusNotFound, "agent_run_not_found")
 			return
 		}
 		taskRunEventsAuthorized(deps, principal.OrganizationID, w, r)

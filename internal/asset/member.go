@@ -697,6 +697,11 @@ func (s MemberService) Publish(ctx context.Context, principal auth.Principal, as
 	if _, err := tx.Exec(ctx, `UPDATE asset.asset_versions SET quality = 'human_confirmed' WHERE id = $1::uuid`, versionID); err != nil {
 		return MemberAsset{}, fmt.Errorf("mark member asset quality: %w", err)
 	}
+	// Publishing finalizes the version's workflow lifecycle so downstream
+	// prepare/automation pipelines stop treating it as a draft candidate.
+	if _, err := tx.Exec(ctx, `UPDATE asset.asset_versions SET workflow_status = 'published' WHERE id = $1::uuid AND workflow_status <> 'published'`, versionID); err != nil {
+		return MemberAsset{}, fmt.Errorf("mark member asset workflow status: %w", err)
+	}
 	if previousPublishedID != nil && *previousPublishedID != versionID {
 		if err := retrieval.EnqueueProjectionTx(ctx, tx, s.Events, principal.OrganizationID, *previousPublishedID, retrieval.ProjectionDelete); err != nil {
 			return MemberAsset{}, fmt.Errorf("enqueue previous member asset projection deletion: %w", err)

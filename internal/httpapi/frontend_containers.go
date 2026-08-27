@@ -33,6 +33,9 @@ func containerTree(deps Dependencies) http.HandlerFunc {
 		if !ok {
 			return
 		}
+		if !requirePathUUID(w, r.PathValue("workspaceId")) || !rejectUnknownWorkspace(w, r, deps, principal) {
+			return
+		}
 		items, err := deps.ContainerService.Tree(r.Context(), principal, r.PathValue("workspaceId"))
 		if err != nil {
 			writeContainerError(w, err, "container_tree_failed")
@@ -52,9 +55,12 @@ func createContainer(deps Dependencies) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		key, ok := requiredIdempotencyKey(r)
+		key, ok := requestIdempotencyKey(w, r)
 		if !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
+			return
+		}
+		if !requirePathUUID(w, r.PathValue("workspaceId")) || !rejectUnknownWorkspace(w, r, deps, principal) {
 			return
 		}
 		var input container.CreateInput
@@ -96,6 +102,9 @@ func getContainer(deps Dependencies) http.HandlerFunc {
 		if !ok {
 			return
 		}
+		if !requirePathUUID(w, r.PathValue("containerId")) {
+			return
+		}
 		item, err := deps.ContainerService.Get(r.Context(), principal, r.PathValue("containerId"))
 		if err != nil {
 			writeContainerError(w, err, "container_load_failed")
@@ -115,8 +124,11 @@ func patchContainer(deps Dependencies) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		if _, ok := requiredIdempotencyKey(r); !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+		if _, ok := requestIdempotencyKey(w, r); !ok {
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
+			return
+		}
+		if !requirePathUUID(w, r.PathValue("containerId")) {
 			return
 		}
 		var input container.PatchInput
@@ -162,8 +174,11 @@ func deleteContainer(deps Dependencies) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		if _, ok := requiredIdempotencyKey(r); !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+		if _, ok := requestIdempotencyKey(w, r); !ok {
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
+			return
+		}
+		if !requirePathUUID(w, r.PathValue("containerId")) {
 			return
 		}
 		if err := deps.ContainerService.Delete(r.Context(), principal, r.PathValue("containerId")); err != nil {
@@ -182,6 +197,9 @@ func listContainerAssets(deps Dependencies) http.HandlerFunc {
 		}
 		principal, ok := requireMemberSession(w, r, deps)
 		if !ok {
+			return
+		}
+		if !requirePathUUID(w, r.PathValue("containerId")) {
 			return
 		}
 		items, err := deps.ContainerService.Assets(r.Context(), principal, r.PathValue("containerId"))
@@ -208,9 +226,9 @@ func moveAssetToContainer(deps Dependencies) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		key, ok := requiredIdempotencyKey(r)
+		key, ok := requestIdempotencyKey(w, r)
 		if !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
 			return
 		}
 		var input moveAssetRequest
@@ -251,9 +269,9 @@ func setDocumentParent(deps Dependencies) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		key, ok := requiredIdempotencyKey(r)
+		key, ok := requestIdempotencyKey(w, r)
 		if !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
 			return
 		}
 		var input documentParentRequest
@@ -289,9 +307,9 @@ func deleteDocumentParent(deps Dependencies) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		key, ok := requiredIdempotencyKey(r)
+		key, ok := requestIdempotencyKey(w, r)
 		if !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
 			return
 		}
 		workspaceID := r.PathValue("workspaceId")

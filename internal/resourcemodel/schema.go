@@ -357,8 +357,8 @@ func validatePolicy(policy map[string]any, issues *[]ValidationIssue) {
 		}
 		sort.Strings(keys)
 		for _, key := range keys {
-			if key != "workspace" && key != "agent_tool" && key != "fulltext" && key != "semantic" {
-				*issues = append(*issues, issue("policy.outlets."+key, "invalid_outlet", "outlet must be workspace, agent_tool, fulltext, or semantic"))
+			if key != "workspace" && key != "agent_tool" && key != "fulltext" && key != "semantic" && key != "frontend" {
+				*issues = append(*issues, issue("policy.outlets."+key, "invalid_outlet", "outlet must be workspace, agent_tool, fulltext, semantic, or frontend"))
 				continue
 			}
 			value, ok := outletMap[key].(map[string]any)

@@ -49,6 +49,12 @@ func main() {
 		startupCancel()
 		log.Fatalf("database migration failed: %v", err)
 	}
+
+	// 0043 is self-idempotent (ON CONFLICT DO NOTHING): replaying it on boot
+	// seeds organizations created after its checksum was first recorded.
+	if err := store.ReplayIdempotentSeed(startupCtx, db, cfg.MigrationPath, "0043_builtin_resource_model_seeds.sql"); err != nil {
+		log.Fatalf("replay builtin resource model seed: %v", err)
+	}
 	if err := eventing.Migrate(startupCtx, db.Pool); err != nil {
 		db.Close()
 		startupCancel()

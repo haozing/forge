@@ -15,7 +15,10 @@ import (
 	"agentchunzhi/internal/vectorvalue"
 )
 
-var ErrModelAccessDenied = errors.New("model access denied")
+var (
+	ErrModelAccessDenied = errors.New("model access denied")
+	ErrWorkspaceMissing  = errors.New("workspace not found")
+)
 var ErrCursorInvalid = errors.New("invalid search cursor")
 var ErrVectorUnavailable = errors.New("vector retrieval unavailable")
 
@@ -93,6 +96,15 @@ func (s Service) Query(ctx context.Context, principal auth.Principal, req QueryR
 	mode := strings.ToLower(strings.TrimSpace(req.Mode))
 	if mode == "" {
 		mode = "hybrid"
+	}
+	if mode == "" {
+		mode = "hybrid"
+	}
+	// Align with the product-doc vocabulary on every channel: fulltext is the
+	// documented alias of the internal lexical ranking; member and open APIs
+	// must accept the same set of mode names.
+	if mode == "lexical" {
+		mode = "fulltext"
 	}
 	if mode != "structured" && mode != "fulltext" && mode != "semantic" && mode != "hybrid" {
 		return QueryResponse{}, fmt.Errorf("%w: unsupported query mode", ErrInvalidQuery)

@@ -12,19 +12,19 @@ import (
 const maxDepth = 32
 
 var (
-	ErrInvalidTree   = errors.New("invalid content tree")
+	ErrInvalidTree     = errors.New("invalid content tree")
 	ErrVersionConflict = errors.New("version conflict")
 )
 
 type Block struct {
-	ID         string
-	Type       string
-	Content    string
-	Format     string
-	Props      map[string]any
-	ParentID   string
-	Position   int
-	Role       string
+	ID       string
+	Type     string
+	Content  string
+	Format   string
+	Props    map[string]any
+	ParentID string
+	Position int
+	Role     string
 }
 
 type Version struct {

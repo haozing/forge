@@ -36,8 +36,12 @@ func unifiedQueryR3(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusInternalServerError, "authorization_scope_failed")
 			return
 		}
-		modelIDs := append([]string(nil), input.ModelIDs...)
+		modelIDs := unionStrings(input.ModelIDs, input.ResourceModelIDs, input.DataModels)
 		result, err := deps.QueryService.Query(r.Context(), principal, agentquery.QueryRequest{Mode: input.Mode, Query: queryText, ModelIDs: modelIDs, TopK: input.TopK, Cursor: input.Cursor, Filters: input.Filters}, allowed)
+		if errors.Is(err, agentquery.ErrWorkspaceMissing) {
+			writeError(w, http.StatusNotFound, "workspace_not_found")
+			return
+		}
 		if errors.Is(err, agentquery.ErrModelAccessDenied) {
 			writeError(w, http.StatusForbidden, "model_access_denied")
 			return

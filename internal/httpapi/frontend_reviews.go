@@ -36,6 +36,9 @@ func listReviews(deps Dependencies) http.HandlerFunc {
 		if !ok {
 			return
 		}
+		if !requirePathUUID(w, r.PathValue("workspaceId")) || !rejectUnknownWorkspace(w, r, deps, principal) {
+			return
+		}
 		query := r.URL.Query()
 		limit := 0
 		if rawLimit := query.Get("limit"); rawLimit != "" {
@@ -68,6 +71,9 @@ func getReview(deps Dependencies) http.HandlerFunc {
 		if !ok {
 			return
 		}
+		if !requirePathUUID(w, r.PathValue("reviewId")) {
+			return
+		}
 		item, err := deps.ReviewService.Get(r.Context(), principal, r.PathValue("reviewId"))
 		if err != nil {
 			writeReviewError(w, err, "review_load_failed")
@@ -88,9 +94,12 @@ func decideReview(deps Dependencies, decision string) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		key, ok := requiredIdempotencyKey(r)
+		if !requirePathUUID(w, r.PathValue("reviewId")) {
+			return
+		}
+		key, ok := requestIdempotencyKey(w, r)
 		if !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
 			return
 		}
 		var input review.DecisionInput
@@ -125,9 +134,9 @@ func batchReviews(deps Dependencies) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		key, ok := requiredIdempotencyKey(r)
+		key, ok := requestIdempotencyKey(w, r)
 		if !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
 			return
 		}
 		var input reviewBatchRequest
@@ -136,6 +145,11 @@ func batchReviews(deps Dependencies) http.HandlerFunc {
 		if err := decoder.Decode(&input); err != nil || len(input.Items) == 0 || len(input.Items) > 100 {
 			writeError(w, http.StatusUnprocessableEntity, "validation_failed")
 			return
+		}
+		for _, item := range input.Items {
+			if !requirePathUUID(w, item.ReviewID) {
+				return
+			}
 		}
 		writeJSON(w, http.StatusMultiStatus, map[string]any{"items": deps.ReviewService.Batch(r.Context(), principal, key, input.Items)})
 	}

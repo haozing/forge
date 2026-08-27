@@ -27,6 +27,9 @@ func reviewComments(deps Dependencies) http.HandlerFunc {
 		if !ok {
 			return
 		}
+		if !requirePathUUID(w, r.PathValue("reviewId")) {
+			return
+		}
 		if deps.Store == nil || deps.Store.Pool == nil {
 			writeError(w, http.StatusInternalServerError, "database_unconfigured")
 			return
@@ -67,9 +70,9 @@ func reviewComments(deps Dependencies) http.HandlerFunc {
 			}
 			writeJSON(w, http.StatusOK, map[string]any{"items": items, "has_more": false})
 		case http.MethodPost:
-			key, ok := requiredIdempotencyKey(r)
+			key, ok := requestIdempotencyKey(w, r)
 			if !ok {
-				writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+				writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
 				return
 			}
 			var input reviewCommentRequest
@@ -217,8 +220,8 @@ func conversationResourceFinal(deps Dependencies) http.HandlerFunc {
 			}
 			return
 		}
-		if _, ok := requiredIdempotencyKey(r); !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+		if _, ok := requestIdempotencyKey(w, r); !ok {
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
 			return
 		}
 		var input conversationPatchRequest
@@ -261,8 +264,8 @@ func archiveConversationFinal(deps Dependencies) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		if _, ok := requiredIdempotencyKey(r); !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+		if _, ok := requestIdempotencyKey(w, r); !ok {
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
 			return
 		}
 		if deps.Store == nil || deps.Store.Pool == nil {
@@ -425,8 +428,11 @@ func deleteAutomationJobFinal(deps Dependencies) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		if _, ok := requiredIdempotencyKey(r); !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+		if _, ok := requestIdempotencyKey(w, r); !ok {
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
+			return
+		}
+		if !requirePathUUID(w, r.PathValue("jobId")) {
 			return
 		}
 		if deps.Store == nil || deps.Store.Pool == nil {

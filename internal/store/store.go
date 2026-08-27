@@ -42,6 +42,27 @@ func (s *Store) Close() {
 	}
 }
 
+// ReplayIdempotentSeed re-executes a self-idempotent seed migration file
+// (e.g. 0043 builtin resource models) after schema migrations have run.
+// Schema migrations are tracked by checksum and therefore skip already-applied
+// files; a data seed embedded in one would never reach organizations created
+// after registration. Replay relies on the file's ON CONFLICT guards instead,
+// so boot-time invocation keeps every existing organization covered.
+func ReplayIdempotentSeed(ctx context.Context, s *Store, path, filename string) error {
+	if s == nil || s.Pool == nil {
+		return errors.New("database store is not initialized")
+	}
+	target := filepath.Join(filepath.Clean(path), filename)
+	body, err := os.ReadFile(target)
+	if err != nil {
+		return fmt.Errorf("read idempotent seed %s: %w", filename, err)
+	}
+	if _, err := s.Pool.Exec(ctx, string(body)); err != nil {
+		return fmt.Errorf("replay idempotent seed %s: %w", filename, err)
+	}
+	return nil
+}
+
 func ApplyMigration(ctx context.Context, s *Store, path string) error {
 	if s == nil || s.Pool == nil {
 		return errors.New("database store is not initialized")

@@ -23,8 +23,8 @@ func workspaceCollectionFinal(deps Dependencies) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		if _, ok := requiredIdempotencyKey(r); !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+		if _, ok := requestIdempotencyKey(w, r); !ok {
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
 			return
 		}
 		var input workspace.CreateInput
@@ -63,9 +63,9 @@ func workspaceResourceFinal(deps Dependencies) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		key, ok := requiredIdempotencyKey(r)
+		key, ok := requestIdempotencyKey(w, r)
 		if !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
 			return
 		}
 		workspaceID := r.PathValue("workspaceId")
@@ -192,8 +192,8 @@ func workspaceInvitationsFinal(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
 			return
 		}
-		if _, ok := requiredIdempotencyKey(r); !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+		if _, ok := requestIdempotencyKey(w, r); !ok {
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
 			return
 		}
 		var input workspace.InviteInput
@@ -222,8 +222,8 @@ func acceptWorkspaceInvitationFinal(deps Dependencies) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		if _, ok := requiredIdempotencyKey(r); !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+		if _, ok := requestIdempotencyKey(w, r); !ok {
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
 			return
 		}
 		item, err := deps.WorkspaceService.AcceptInvitation(r.Context(), principal, r.PathValue("invitationId"))
@@ -245,8 +245,8 @@ func revokeWorkspaceInvitationFinal(deps Dependencies) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		if _, ok := requiredIdempotencyKey(r); !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+		if _, ok := requestIdempotencyKey(w, r); !ok {
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
 			return
 		}
 		if err := deps.WorkspaceService.RevokeInvitation(r.Context(), principal, r.PathValue("invitationId")); err != nil {
@@ -267,8 +267,8 @@ func workspaceMemberResourceFinal(deps Dependencies) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		if _, ok := requiredIdempotencyKey(r); !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+		if _, ok := requestIdempotencyKey(w, r); !ok {
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
 			return
 		}
 		switch r.Method {
@@ -280,14 +280,17 @@ func workspaceMemberResourceFinal(deps Dependencies) http.HandlerFunc {
 				writeError(w, http.StatusUnprocessableEntity, "validation_failed")
 				return
 			}
-			item, err := deps.WorkspaceService.UpdateMember(r.Context(), principal, r.PathValue("memberId"), input.Role)
+			// {memberId} accepts both the workspace_members row id and the
+			// user id exposed by list endpoints; workspace_id disambiguates a
+			// user that belongs to several workspaces.
+			item, err := deps.WorkspaceService.UpdateMember(r.Context(), principal, r.PathValue("memberId"), input.Role, r.URL.Query().Get("workspace_id"))
 			if err != nil {
 				writeWorkspaceError(w, err, "workspace_member_update_failed")
 				return
 			}
 			writeJSON(w, http.StatusOK, item)
 		case http.MethodDelete:
-			if err := deps.WorkspaceService.RemoveMember(r.Context(), principal, r.PathValue("memberId")); err != nil {
+			if err := deps.WorkspaceService.RemoveMember(r.Context(), principal, r.PathValue("memberId"), r.URL.Query().Get("workspace_id")); err != nil {
 				writeWorkspaceError(w, err, "workspace_member_remove_failed")
 				return
 			}
@@ -308,8 +311,8 @@ func currentUserProfileFinal(deps Dependencies) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		if _, ok := requiredIdempotencyKey(r); !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+		if _, ok := requestIdempotencyKey(w, r); !ok {
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
 			return
 		}
 		var input struct {

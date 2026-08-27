@@ -129,7 +129,16 @@ func (p TransferProcessor) processImport(ctx context.Context, batchID string) er
 		rowID, rowNumber, raw := row.id, row.number, row.sourceRow
 		var sourceRow map[string]any
 		if err := json.Unmarshal(raw, &sourceRow); err != nil {
-			if err := rejectImportRow(ctx, tx, rowID, "invalid_json"); err != nil {
+			if err := rejectImportRows(ctx, tx, rowID, []ImportRowError{{Code: "invalid_json"}}); err != nil {
+				return err
+			}
+			rejected++
+			continue
+		}
+		// Structurally broken CSV rows arrive with handler-recorded findings under
+		// a reserved key; they fail here so physical parse issues stay per-row.
+		if preErrors := importPreRowErrors(sourceRow); len(preErrors) > 0 {
+			if err := rejectImportRows(ctx, tx, rowID, preErrors); err != nil {
 				return err
 			}
 			rejected++
@@ -139,14 +148,14 @@ func (p TransferProcessor) processImport(ctx context.Context, batchID string) er
 		markdown := stringPointer(sourceRow["markdown"])
 		fields := importFields(sourceRow)
 		if err := ValidateContent(title, markdown, &fields); err != nil {
-			if err := rejectImportRow(ctx, tx, rowID, "invalid_content"); err != nil {
+			if err := rejectImportRows(ctx, tx, rowID, []ImportRowError{{Code: "invalid_content"}}); err != nil {
 				return err
 			}
 			rejected++
 			continue
 		}
 		if err := ValidateFields(fieldSchema, fields); err != nil {
-			if err := rejectImportRow(ctx, tx, rowID, "invalid_fields"); err != nil {
+			if err := rejectImportRows(ctx, tx, rowID, []ImportRowError{{Code: "invalid_fields"}}); err != nil {
 				return err
 			}
 			rejected++
@@ -458,10 +467,70 @@ func (p TransferProcessor) failExport(ctx context.Context, id string, cause erro
 	return err
 }
 
-func rejectImportRow(ctx context.Context, tx pgx.Tx, id, code string) error {
-	_, err := tx.Exec(ctx, `UPDATE asset.import_rows SET status = 'rejected', errors = jsonb_build_array(jsonb_build_object('code', $2)) WHERE id = $1::uuid`, id, code)
-	return err
+// ImportRowError is one per-row rejection finding persisted to
+// asset.import_rows.errors for the failed-row report endpoints.
+type ImportRowError struct {
+	Code    string `json:"code"`
+	Message string `json:"message,omitempty"`
 }
+
+// rejectImportRowsSQL persists a rejected row. The errors payload is JSON built
+// in Go and passed with an explicit ::jsonb cast on purpose: building it via
+// jsonb_build_object('code', $2) makes $2 an argument of the variadic "any"
+// function whose type PostgreSQL cannot infer at PREPARE time, so the first
+// bad row failed the whole batch with SQLSTATE 42P18 "could not determine data
+// type of parameter $2" instead of landing in import_rows.errors.
+const rejectImportRowsSQL = `UPDATE asset.import_rows SET status = 'rejected', errors = $2::jsonb WHERE id = $1::uuid`
+
+func rejectImportRows(ctx context.Context, tx pgx.Tx, id string, entries []ImportRowError) error {
+	if len(entries) == 0 {
+		entries = []ImportRowError{{Code: "invalid_row"}}
+	}
+	payload := mustJSON(entries)
+	if len(payload) == 0 {
+		payload = []byte("[]")
+	}
+	if _, err := tx.Exec(ctx, rejectImportRowsSQL, id, string(payload)); err != nil {
+		return fmt.Errorf("reject import row: %w", err)
+	}
+	return nil
+}
+
+// ImportPreRowErrorsKey is the reserved source-row key under which the imports
+// endpoint records structural CSV findings (see frontend_transfer.go). Rows
+// carrying it are rejected by the worker before field validation so physical
+// parse issues never fail a whole batch.
+const ImportPreRowErrorsKey = "__import_errors"
+
+// importPreRowErrors extracts findings recorded by the imports endpoint when a
+// physical CSV row could not be mapped cleanly (e.g. ragged field count). The
+// reserved key is stripped before field extraction so it never leaks into the
+// asset fields document.
+func importPreRowErrors(sourceRow map[string]any) []ImportRowError {
+	raw, ok := sourceRow[ImportPreRowErrorsKey]
+	if !ok || raw == nil {
+		return nil
+	}
+	list, ok := raw.([]any)
+	if !ok || len(list) == 0 {
+		return []ImportRowError{{Code: "invalid_row", Message: "malformed row error marker"}}
+	}
+	entries := make([]ImportRowError, 0, len(list))
+	for _, item := range list {
+		entry, _ := item.(map[string]any)
+		code, _ := entry["code"].(string)
+		if code == "" {
+			code = "invalid_row"
+		}
+		message, _ := entry["message"].(string)
+		entries = append(entries, ImportRowError{Code: code, Message: message})
+	}
+	if len(entries) == 0 {
+		return []ImportRowError{{Code: "invalid_row"}}
+	}
+	return entries
+}
+
 func importFields(row map[string]any) map[string]any {
 	result := map[string]any{}
 	if fields, ok := row["fields"].(map[string]any); ok {
@@ -471,7 +540,7 @@ func importFields(row map[string]any) map[string]any {
 		return result
 	}
 	for key, value := range row {
-		if key != "title" && key != "markdown" && key != "source" {
+		if key != "title" && key != "markdown" && key != "source" && key != ImportPreRowErrorsKey {
 			result[key] = value
 		}
 	}

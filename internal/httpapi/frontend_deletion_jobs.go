@@ -17,6 +17,9 @@ func getDeletionJob(deps Dependencies) http.HandlerFunc {
 		if !ok {
 			return
 		}
+		if !requirePathUUID(w, r.PathValue("jobId")) {
+			return
+		}
 		job, err := (deletion.Service{Store: deps.Store}).Get(r.Context(), principal, r.PathValue("jobId"))
 		if errors.Is(err, deletion.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "deletion_job_not_found")

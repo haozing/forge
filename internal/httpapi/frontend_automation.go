@@ -18,6 +18,18 @@ func writeAutomationError(w http.ResponseWriter, err error, fallback string) {
 		writeError(w, http.StatusNotFound, "automation_not_found")
 	case errors.Is(err, automation.ErrConflict):
 		writeError(w, http.StatusConflict, "automation_conflict")
+	// P1-11: precise reasons for the composite job-creation constraints,
+	// replacing the bare workspace_access_denied they used to collapse into.
+	case errors.Is(err, automation.ErrAppNotBound):
+		writeError(w, http.StatusForbidden, "application_not_bound_to_workspace")
+	case errors.Is(err, automation.ErrAppDisabled):
+		writeError(w, http.StatusForbidden, "agent_application_disabled")
+	case errors.Is(err, automation.ErrWorkflowMismatch):
+		writeError(w, http.StatusUnprocessableEntity, "workflow_mismatch")
+	case errors.Is(err, automation.ErrEndpointUnavailable):
+		writeError(w, http.StatusForbidden, "model_endpoint_unavailable")
+	case errors.Is(err, automation.ErrRevokedRevision):
+		writeError(w, http.StatusForbidden, "model_endpoint_revision_revoked")
 	default:
 		writeError(w, http.StatusInternalServerError, fallback)
 	}
@@ -51,9 +63,9 @@ func createAutomationJob(deps Dependencies) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		key, ok := requiredIdempotencyKey(r)
+		key, ok := requestIdempotencyKey(w, r)
 		if !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
 			return
 		}
 		var input automation.CreateJobInput
@@ -92,9 +104,9 @@ func patchAutomationJob(deps Dependencies) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		key, ok := requiredIdempotencyKey(r)
+		key, ok := requestIdempotencyKey(w, r)
 		if !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
 			return
 		}
 		_ = key
@@ -103,6 +115,9 @@ func patchAutomationJob(deps Dependencies) http.HandlerFunc {
 		decoder.DisallowUnknownFields()
 		if err := decoder.Decode(&input); err != nil {
 			writeError(w, http.StatusUnprocessableEntity, "validation_failed")
+			return
+		}
+		if !requirePathUUID(w, r.PathValue("jobId")) {
 			return
 		}
 		item, err := deps.AutomationService.PatchJob(r.Context(), principal, r.PathValue("jobId"), input)
@@ -121,6 +136,9 @@ func getAutomationJob(deps Dependencies) http.HandlerFunc {
 		}
 		principal, ok := requireMemberSession(w, r, deps)
 		if !ok {
+			return
+		}
+		if !requirePathUUID(w, r.PathValue("jobId")) {
 			return
 		}
 		item, err := deps.AutomationService.GetJob(r.Context(), principal, r.PathValue("jobId"))
@@ -152,12 +170,15 @@ func pauseAutomationJob(deps Dependencies, enabled bool) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		key, ok := requiredIdempotencyKey(r)
+		key, ok := requestIdempotencyKey(w, r)
 		if !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
 			return
 		}
 		_ = key
+		if !requirePathUUID(w, r.PathValue("jobId")) {
+			return
+		}
 		item, err := deps.AutomationService.PatchJob(r.Context(), principal, r.PathValue("jobId"), automation.PatchJobInput{Enabled: &enabled})
 		if err != nil {
 			writeAutomationError(w, err, "automation_job_state_failed")
@@ -180,6 +201,9 @@ func listAutomationRuns(deps Dependencies) http.HandlerFunc {
 		if !ok {
 			return
 		}
+		if !requirePathUUID(w, r.PathValue("jobId")) {
+			return
+		}
 		items, err := deps.AutomationService.ListRuns(r.Context(), principal, r.PathValue("jobId"))
 		if err != nil {
 			writeAutomationError(w, err, "automation_run_list_failed")
@@ -199,14 +223,17 @@ func createAutomationRun(deps Dependencies) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		key, ok := requiredIdempotencyKey(r)
+		key, ok := requestIdempotencyKey(w, r)
 		if !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
 			return
 		}
 		source := "manual"
 		if raw := r.URL.Query().Get("source"); raw != "" {
 			source = raw
+		}
+		if !requirePathUUID(w, r.PathValue("jobId")) {
+			return
 		}
 		item, err := deps.AutomationService.CreateRun(r.Context(), principal, r.PathValue("jobId"), key, source)
 		if err != nil {
@@ -224,6 +251,9 @@ func getAutomationRun(deps Dependencies) http.HandlerFunc {
 		}
 		principal, ok := requireMemberSession(w, r, deps)
 		if !ok {
+			return
+		}
+		if !requirePathUUID(w, r.PathValue("runId")) {
 			return
 		}
 		item, err := deps.AutomationService.GetRun(r.Context(), principal, r.PathValue("runId"))
@@ -245,6 +275,9 @@ func listAutomationAttempts(deps Dependencies) http.HandlerFunc {
 		if !ok {
 			return
 		}
+		if !requirePathUUID(w, r.PathValue("runId")) {
+			return
+		}
 		items, err := deps.AutomationService.ListAttempts(r.Context(), principal, r.PathValue("runId"))
 		if err != nil {
 			writeAutomationError(w, err, "automation_attempt_list_failed")
@@ -263,12 +296,15 @@ func cancelAutomationRun(deps Dependencies) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		key, ok := requiredIdempotencyKey(r)
+		key, ok := requestIdempotencyKey(w, r)
 		if !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
 			return
 		}
 		_ = key
+		if !requirePathUUID(w, r.PathValue("runId")) {
+			return
+		}
 		item, err := deps.AutomationService.CancelRun(r.Context(), principal, r.PathValue("runId"))
 		if err != nil {
 			writeAutomationError(w, err, "automation_run_cancel_failed")
@@ -287,9 +323,12 @@ func retryAutomationRun(deps Dependencies) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		key, ok := requiredIdempotencyKey(r)
+		key, ok := requestIdempotencyKey(w, r)
 		if !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
+			return
+		}
+		if !requirePathUUID(w, r.PathValue("runId")) {
 			return
 		}
 		item, err := deps.AutomationService.RetryRun(r.Context(), principal, r.PathValue("runId"), key)

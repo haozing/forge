@@ -68,9 +68,9 @@ func workspaceAgentApplicationsFinal(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusForbidden, "workspace_access_denied")
 			return
 		}
-		key, ok := requiredIdempotencyKey(r)
+		key, ok := requestIdempotencyKey(w, r)
 		if !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
 			return
 		}
 		var input registerAgentRequest
@@ -161,9 +161,9 @@ func frontendAgentApplicationResource(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
 			return
 		}
-		key, ok := requiredIdempotencyKey(r)
+		key, ok := requestIdempotencyKey(w, r)
 		if !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
 			return
 		}
 		var patch struct {
@@ -206,9 +206,9 @@ func frontendAgentApplicationStatus(deps Dependencies, status string) http.Handl
 		if !ok {
 			return
 		}
-		key, ok := requiredIdempotencyKey(r)
+		key, ok := requestIdempotencyKey(w, r)
 		if !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
 			return
 		}
 		result, err := deps.AdminService.SetAgentApplicationStatus(r.Context(), principal, adminservice.SetApplicationStatusInput{ApplicationID: r.PathValue("applicationId"), Status: status, IdempotencyKey: key})
@@ -282,8 +282,8 @@ func cancelAgentSessionFinal(deps Dependencies) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		if _, ok := requiredIdempotencyKey(r); !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+		if _, ok := requestIdempotencyKey(w, r); !ok {
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
 			return
 		}
 		if !agentquery.ValidUUID(r.PathValue("sessionId")) {

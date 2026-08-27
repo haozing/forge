@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	agentquery "agentchunzhi/internal/query"
 
@@ -84,8 +85,33 @@ func automationRunCallback(deps Dependencies) http.HandlerFunc {
 			return
 		}
 		if currentStatus == "succeeded" || currentStatus == "failed" || currentStatus == "canceled" {
+			// Terminal-state idempotency must never answer 500 (P1-12). When
+			// the late callback claims a DIFFERENT terminal state, record the
+			// external claim inside runs.output_snapshot._late_callbacks so the
+			// disagreement is auditable, then still answer 200 with the
+			// authoritative server-side status plus a conflict_recorded flag.
+			conflictRecorded := false
+			if input.Status != currentStatus {
+				entry := map[string]any{
+					"claimed_status": input.Status,
+					"output":         input.Output,
+					"error_code":     input.ErrorCode,
+					"error_summary":  input.ErrorSummary,
+					"recorded_at":    time.Now().UTC().Format(time.RFC3339Nano),
+				}
+				payload, marshalErr := json.Marshal([]any{entry})
+				if marshalErr == nil {
+					if _, execErr := tx.Exec(r.Context(), `
+						UPDATE automation.runs SET output_snapshot =
+							jsonb_set(COALESCE(output_snapshot, '{}'::jsonb), '{_late_callbacks}',
+								COALESCE(output_snapshot->'_late_callbacks', '[]'::jsonb) || $2::jsonb, true)
+						WHERE id = $1::uuid`, runID, string(payload)); execErr == nil {
+						conflictRecorded = true
+					}
+				}
+			}
 			_ = tx.Commit(r.Context())
-			writeJSON(w, http.StatusOK, map[string]any{"status": currentStatus, "idempotent": true, "credential_expires_at": callbackExpiry})
+			writeJSON(w, http.StatusOK, map[string]any{"status": currentStatus, "idempotent": true, "conflict_recorded": conflictRecorded, "credential_expires_at": callbackExpiry})
 			return
 		}
 		status := input.Status

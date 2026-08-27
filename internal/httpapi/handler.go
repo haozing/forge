@@ -68,7 +68,7 @@ func NewHandler() http.Handler {
 }
 
 func NewHandlerWithDeps(deps Dependencies) http.Handler {
-	return withJSONDefaults(frontendIdempotency(deps, newRouter(deps)))
+	return withJSONDefaults(rateLimitMiddleware(frontendIdempotency(deps, newRouter(deps))))
 }
 
 type createAssetRequest struct {
@@ -189,12 +189,14 @@ type registerMediaRequest struct {
 }
 
 type unifiedQueryRequest struct {
-	Mode     string         `json:"mode"`
-	Query    string         `json:"query"`
-	ModelIDs []string       `json:"model_ids"`
-	TopK     int            `json:"top_k"`
-	Cursor   string         `json:"cursor"`
-	Filters  map[string]any `json:"filters"`
+	Mode             string         `json:"mode"`
+	Query            string         `json:"query"`
+	ModelIDs         []string       `json:"model_ids"`
+	ResourceModelIDs []string       `json:"resource_model_ids"`
+	DataModels       []string       `json:"data_models"`
+	TopK             int            `json:"top_k"`
+	Cursor           string         `json:"cursor"`
+	Filters          map[string]any `json:"filters"`
 }
 
 func createConversation(deps Dependencies) http.HandlerFunc {
@@ -212,9 +214,9 @@ func createConversation(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusForbidden, "member_required")
 			return
 		}
-		idempotencyKey, ok := requiredIdempotencyKey(r)
+		idempotencyKey, ok := requestIdempotencyKey(w, r)
 		if !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
 			return
 		}
 		var input createConversationRequest
@@ -326,9 +328,9 @@ func appendMessage(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusForbidden, "member_required")
 			return
 		}
-		idempotencyKey, ok := requiredIdempotencyKey(r)
+		idempotencyKey, ok := requestIdempotencyKey(w, r)
 		if !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
 			return
 		}
 		var input appendMessageRequest
@@ -338,8 +340,21 @@ func appendMessage(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusUnprocessableEntity, "invalid_message_request")
 			return
 		}
+		if strings.TrimSpace(input.Content) == "" {
+			writeError(w, http.StatusUnprocessableEntity, "blank_content")
+			return
+		}
+		conversationID := r.PathValue("conversationId")
+		if deps.Store != nil && deps.Store.Pool != nil && agentquery.ValidUUID(conversationID) {
+			var conversationStatus string
+			statusErr := deps.Store.Pool.QueryRow(r.Context(), `SELECT status FROM content.conversations WHERE organization_id = $1::uuid AND id = $2::uuid`, principal.OrganizationID, conversationID).Scan(&conversationStatus)
+			if statusErr == nil && conversationStatus == "archived" {
+				writeError(w, http.StatusConflict, "conversation_archived")
+				return
+			}
+		}
 		result, err := deps.ConversationService.AppendMessage(r.Context(), principal, idempotencyKey, contentservice.AppendMessageInput{
-			ConversationID: r.PathValue("conversationId"), Role: input.Role, Content: input.Content,
+			ConversationID: conversationID, Role: input.Role, Content: input.Content,
 			ContentFormat: input.ContentFormat, ProviderConversationID: input.ProviderConversationID,
 			ProviderMessageID: input.ProviderMessageID, Status: input.Status, ReplyToBlockID: input.ReplyToBlockID,
 		})
@@ -378,9 +393,9 @@ func syncConversationNote(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusForbidden, "member_required")
 			return
 		}
-		idempotencyKey, ok := requiredIdempotencyKey(r)
+		idempotencyKey, ok := requestIdempotencyKey(w, r)
 		if !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
 			return
 		}
 		result, err := deps.ConversationService.SyncNote(r.Context(), principal, idempotencyKey, r.PathValue("conversationId"))
@@ -419,9 +434,9 @@ func publishConversationNote(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusForbidden, "member_required")
 			return
 		}
-		idempotencyKey, ok := requiredIdempotencyKey(r)
+		idempotencyKey, ok := requestIdempotencyKey(w, r)
 		if !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
 			return
 		}
 		var input publishNoteRequest
@@ -467,9 +482,9 @@ func createDerivation(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusForbidden, "member_required")
 			return
 		}
-		idempotencyKey, ok := requiredIdempotencyKey(r)
+		idempotencyKey, ok := requestIdempotencyKey(w, r)
 		if !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
 			return
 		}
 		var input createDerivationRequest
@@ -550,9 +565,9 @@ func finalizeDerivation(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusForbidden, "member_required")
 			return
 		}
-		idempotencyKey, ok := requiredIdempotencyKey(r)
+		idempotencyKey, ok := requestIdempotencyKey(w, r)
 		if !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
 			return
 		}
 		var input finalizeDerivationRequest
@@ -602,9 +617,9 @@ func registerConversationMedia(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusForbidden, "member_required")
 			return
 		}
-		idempotencyKey, ok := requiredIdempotencyKey(r)
+		idempotencyKey, ok := requestIdempotencyKey(w, r)
 		if !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
 			return
 		}
 		var input registerMediaRequest
@@ -685,9 +700,9 @@ func transcribeConversationMedia(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusForbidden, "member_required")
 			return
 		}
-		idempotencyKey, ok := requiredIdempotencyKey(r)
+		idempotencyKey, ok := requestIdempotencyKey(w, r)
 		if !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
 			return
 		}
 		result, err := deps.ConversationService.RequestTranscription(r.Context(), principal, idempotencyKey, r.PathValue("mediaId"))
@@ -735,9 +750,9 @@ func registerAgent(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusForbidden, "permission_denied")
 			return
 		}
-		idempotencyKey, ok := requiredIdempotencyKey(r)
+		idempotencyKey, ok := requestIdempotencyKey(w, r)
 		if !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
 			return
 		}
 		var input registerAgentRequest
@@ -809,9 +824,9 @@ func replaceAgentModelPolicy(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusUnprocessableEntity, "invalid_agent_user_id")
 			return
 		}
-		idempotencyKey, ok := requiredIdempotencyKey(r)
+		idempotencyKey, ok := requestIdempotencyKey(w, r)
 		if !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
 			return
 		}
 		var input replaceAgentModelPolicyRequest
@@ -876,9 +891,9 @@ func rotateAgentAPIKey(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusUnprocessableEntity, "invalid_agent_user_id")
 			return
 		}
-		idempotencyKey, ok := requiredIdempotencyKey(r)
+		idempotencyKey, ok := requestIdempotencyKey(w, r)
 		if !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
 			return
 		}
 		var input rotateAgentAPIKeyRequest
@@ -999,9 +1014,9 @@ func updateAgentApplicationStatus(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusUnprocessableEntity, "invalid_agent_application_id")
 			return
 		}
-		idempotencyKey, ok := requiredIdempotencyKey(r)
+		idempotencyKey, ok := requestIdempotencyKey(w, r)
 		if !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
 			return
 		}
 		var input updateAgentApplicationStatusRequest
@@ -1088,9 +1103,9 @@ func startAgentApplicationSession(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusForbidden, "member_required")
 			return
 		}
-		idempotencyKey, ok := requiredIdempotencyKey(r)
+		idempotencyKey, ok := requestIdempotencyKey(w, r)
 		if !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
 			return
 		}
 		applicationID := r.PathValue("applicationId")
@@ -1640,9 +1655,9 @@ func createAsset(deps Dependencies) http.HandlerFunc {
 		if !requireAgentCapability(w, principal, "asset.create") {
 			return
 		}
-		idempotencyKey, ok := requiredIdempotencyKey(r)
+		idempotencyKey, ok := requestIdempotencyKey(w, r)
 		if !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
 			return
 		}
 		var input createAssetRequest
@@ -1650,6 +1665,9 @@ func createAsset(deps Dependencies) http.HandlerFunc {
 		decoder.DisallowUnknownFields()
 		if err := decoder.Decode(&input); err != nil {
 			writeError(w, http.StatusUnprocessableEntity, "invalid_asset_request")
+			return
+		}
+		if !rejectBlankText(w, input.Title, input.Markdown) {
 			return
 		}
 		allowedModels, err := deps.ScopeResolver.AllowedModelIDs(r.Context(), principal, "asset.create")
@@ -1686,9 +1704,9 @@ func updateAsset(deps Dependencies) http.HandlerFunc {
 		if !requireAgentCapability(w, principal, "asset.edit") {
 			return
 		}
-		idempotencyKey, ok := requiredIdempotencyKey(r)
+		idempotencyKey, ok := requestIdempotencyKey(w, r)
 		if !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
 			return
 		}
 		expectedVersionID := strings.Trim(strings.TrimSpace(r.Header.Get("If-Match")), "\"")
@@ -1708,6 +1726,9 @@ func updateAsset(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusUnprocessableEntity, "invalid_asset_request")
 			return
 		}
+		if !rejectBlankText(w, input.Title, input.Markdown) {
+			return
+		}
 		allowedModels, err := deps.ScopeResolver.AllowedModelIDs(r.Context(), principal, "asset.edit")
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "authorization_scope_failed")
@@ -1724,11 +1745,6 @@ func updateAsset(deps Dependencies) http.HandlerFunc {
 		}
 		writeJSON(w, http.StatusOK, result)
 	}
-}
-
-func requiredIdempotencyKey(r *http.Request) (string, bool) {
-	value := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
-	return value, len(value) >= 16 && len(value) <= 200
 }
 
 func writeAssetMutationError(w http.ResponseWriter, err error, fallback string) {
@@ -1898,9 +1914,9 @@ func createAgentTask(deps Dependencies) http.HandlerFunc {
 		if !requireAgentCapability(w, principal, "agent.run") {
 			return
 		}
-		idempotencyKey, ok := requiredIdempotencyKey(r)
+		idempotencyKey, ok := requestIdempotencyKey(w, r)
 		if !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
 			return
 		}
 		var input createAgentTaskRequest

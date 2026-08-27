@@ -93,3 +93,14 @@ scripts\external-acceptance.ps1 -RequireOSS -RequireASR -ASRSampleFile .\accepta
 ```
 
 外部供应商验收需要在部署环境注入真实凭证；没有凭证时不要将对应供应商验收报告为通过。
+
+## 附录：内置资源模型种子
+
+每个组织的四个内置资源模型由 `db/migrations/0043_builtin_resource_model_seeds.sql` 播种（幂等，可重复执行）。该文件除随迁移框架执行一次外，**还会在 API 与 worker 每次启动时被自动重放**（`store.ReplayIdempotentSeed`），以此覆盖"先记录迁移、后创建组织"的时间差；`builtin_document` 通用文档、`builtin_note` 通用笔记、`builtin_faq` 常见问题 FAQ、`builtin_shot` 经典镜头库（CMS 动态表单示例）。模型 `status='active'` 并附带一条 `published` 初版且回填 `current_version_id`，默认可见性 `workspace`、workspace/agent_tool/fulltext/semantic 出口启用；模型不绑定 workspace（`workspace_id IS NULL`）。验证（任一方式生效后）：API/worker 启动日志无 seed 报错即已重放；如需立即确认也可手工执行该文件，然后查询：
+
+```sql
+SELECT model_key, status FROM model.resource_models
+WHERE organization_id = '<新组织ID>' ORDER BY model_key;
+-- 应返回 builtin_document/builtin_faq/builtin_note/builtin_shot 四行 active 记录
+```
+

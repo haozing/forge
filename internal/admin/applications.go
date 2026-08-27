@@ -18,24 +18,24 @@ var (
 )
 
 type AgentApplicationSummary struct {
-	ID               string    `json:"id"`
-	AgentUserID      string    `json:"agent_user_id"`
-	AgentDisplayName string    `json:"agent_display_name"`
-	AgentStatus      string    `json:"agent_status"`
-	ModelEndpointID  string    `json:"model_endpoint_id"`
-	ModelEndpointName string   `json:"model_endpoint_name"`
-	ModelRevision    int64     `json:"model_endpoint_revision"`
-	ProviderType     string    `json:"provider_type"`
-	ModelName        string    `json:"model_name"`
-	RuntimeMode      string    `json:"runtime_mode"`
-	WorkflowKey      string    `json:"workflow_key,omitempty"`
-	Name             string    `json:"name"`
-	Status           string    `json:"status"`
-	Capabilities     []string  `json:"capabilities"`
-	APIKeyActive     bool      `json:"api_key_active"`
-	Ready            bool      `json:"ready"`
-	CreatedAt        time.Time `json:"created_at"`
-	UpdatedAt        time.Time `json:"updated_at"`
+	ID                string    `json:"id"`
+	AgentUserID       string    `json:"agent_user_id"`
+	AgentDisplayName  string    `json:"agent_display_name"`
+	AgentStatus       string    `json:"agent_status"`
+	ModelEndpointID   string    `json:"model_endpoint_id"`
+	ModelEndpointName string    `json:"model_endpoint_name"`
+	ModelRevision     int64     `json:"model_endpoint_revision"`
+	ProviderType      string    `json:"provider_type"`
+	ModelName         string    `json:"model_name"`
+	RuntimeMode       string    `json:"runtime_mode"`
+	WorkflowKey       string    `json:"workflow_key,omitempty"`
+	Name              string    `json:"name"`
+	Status            string    `json:"status"`
+	Capabilities      []string  `json:"capabilities"`
+	APIKeyActive      bool      `json:"api_key_active"`
+	Ready             bool      `json:"ready"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
 }
 
 type AgentApplicationList struct {

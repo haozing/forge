@@ -23,6 +23,20 @@ var (
 	ErrNotFound     = errors.New("automation job or run not found")
 	ErrConflict     = errors.New("automation conflict")
 	ErrNoPendingRun = errors.New("no pending automation run")
+
+	// Precise failure reasons for the composite job-creation constraints that
+	// used to collapse into a bare 403 workspace_access_denied (P1-11). Each
+	// sentinel maps to its own HTTP status/code in httpapi.writeAutomationError:
+	// ErrAppNotBound -> 403 application_not_bound_to_workspace,
+	// ErrAppDisabled -> 403 agent_application_disabled,
+	// ErrEndpointUnavailable -> 403 model_endpoint_unavailable,
+	// ErrWorkflowMismatch -> 422 workflow_mismatch,
+	// ErrRevokedRevision -> 403 model_endpoint_revision_revoked.
+	ErrAppNotBound         = errors.New("application_not_bound_to_workspace")
+	ErrAppDisabled         = errors.New("agent_application_disabled")
+	ErrEndpointUnavailable = errors.New("model_endpoint_unavailable")
+	ErrWorkflowMismatch    = errors.New("workflow_mismatch")
+	ErrRevokedRevision     = errors.New("model_endpoint_revision_revoked")
 )
 
 var supportedOperations = map[string]struct{}{
@@ -66,6 +80,7 @@ type Job struct {
 	Enabled            bool              `json:"enabled"`
 	CreatedAt          time.Time         `json:"created_at"`
 	UpdatedAt          time.Time         `json:"updated_at"`
+	LastScheduledRunAt *time.Time        `json:"last_scheduled_run_at,omitempty"`
 	ExternalTask       *ExternalTaskSpec `json:"external_task,omitempty"`
 }
 
@@ -142,7 +157,10 @@ func (s Service) require(ctx context.Context, principal auth.Principal, workspac
 		return ErrForbidden
 	}
 	_, err := s.Policy.Require(ctx, principal, workspaceID, "", action)
-	if errors.Is(err, authz.ErrWorkspaceForbidden) || errors.Is(err, authz.ErrWorkspaceNotFound) {
+	if errors.Is(err, authz.ErrWorkspaceNotFound) {
+		return ErrNotFound
+	}
+	if errors.Is(err, authz.ErrWorkspaceForbidden) {
 		return ErrForbidden
 	}
 	return err
@@ -152,7 +170,16 @@ func (s Service) ListJobs(ctx context.Context, principal auth.Principal, workspa
 	if err := s.require(ctx, principal, workspaceID, "automation.read"); err != nil {
 		return nil, err
 	}
-	rows, err := s.Store.Pool.Query(ctx, `SELECT id::text, workspace_id::text, name, operation, agent_application_id::text, trigger, timezone, concurrency_policy, input_scope, max_attempts, retry_backoff, enabled, created_at, updated_at FROM automation.jobs WHERE organization_id = $1::uuid AND workspace_id = $2::uuid ORDER BY updated_at DESC, id`, principal.OrganizationID, workspaceID)
+	rows, err := s.Store.Pool.Query(ctx, `
+		SELECT j.id::text, j.workspace_id::text, j.name, j.operation, j.agent_application_id::text,
+		       j.trigger, j.timezone, j.concurrency_policy, j.input_scope, j.max_attempts,
+		       j.retry_backoff, j.enabled, j.created_at, j.updated_at,
+		       (SELECT MAX(r.created_at) FROM automation.runs r
+		        WHERE r.automation_job_id = j.id AND r.source = 'automation'
+		          AND r.idempotency_key LIKE 'scheduled:%') AS last_scheduled_run_at
+		FROM automation.jobs j
+		WHERE j.organization_id = $1::uuid AND j.workspace_id = $2::uuid
+		ORDER BY j.updated_at DESC, j.id`, principal.OrganizationID, workspaceID)
 	if err != nil {
 		return nil, fmt.Errorf("list automation jobs: %w", err)
 	}
@@ -182,6 +209,9 @@ func (s Service) CreateJob(ctx context.Context, principal auth.Principal, worksp
 		return Job{}, ErrInvalidInput
 	}
 	if _, ok := supportedOperations[input.Operation]; !ok {
+		return Job{}, ErrInvalidInput
+	}
+	if !validID(input.AgentApplicationID) {
 		return Job{}, ErrInvalidInput
 	}
 	if input.ConcurrencyPolicy == "" {
@@ -238,29 +268,15 @@ func (s Service) CreateJob(ctx context.Context, principal auth.Principal, worksp
 		return Job{}, err
 	}
 	workflowKey := operationWorkflows[input.Operation]
-	var appEnabled bool
-	if err := s.Store.Pool.QueryRow(ctx, `
-		SELECT waa.enabled
-		FROM content.workspace_agent_applications waa
-		JOIN integration.agent_applications aa ON aa.id = waa.agent_application_id
-		JOIN integration.model_endpoints me ON me.id = aa.model_endpoint_id AND me.organization_id = aa.organization_id
-		JOIN integration.model_endpoint_revisions mer
-		  ON mer.model_endpoint_id = me.id AND mer.revision = me.current_revision
-		WHERE waa.organization_id = $1::uuid AND waa.workspace_id = $2::uuid
-		  AND waa.agent_application_id = $3::uuid
-		  AND aa.status = 'active' AND me.status = 'active' AND mer.revoked_at IS NULL
-		  AND ($4 = '' OR (aa.runtime_mode = 'workflow' AND aa.workflow_key = $4))
-	`, principal.OrganizationID, workspaceID, input.AgentApplicationID, workflowKey).Scan(&appEnabled); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return Job{}, ErrForbidden
-		}
+	facts, err := s.inspectApplicationBinding(ctx, principal.OrganizationID, workspaceID, input.AgentApplicationID)
+	if err != nil {
 		return Job{}, err
 	}
-	if !appEnabled {
-		return Job{}, ErrForbidden
+	if classErr := classifyAppBinding(facts, workflowKey); classErr != nil {
+		return Job{}, classErr
 	}
 	var id string
-	err := s.Store.Pool.QueryRow(ctx, `INSERT INTO automation.jobs (organization_id, workspace_id, name, operation, agent_application_id, trigger, timezone, concurrency_policy, input_scope, max_attempts, retry_backoff, enabled, created_by, idempotency_key, request_hash) VALUES ($1::uuid, $2::uuid, $3, $4, $5::uuid, $6::jsonb, $7, $8, $9::jsonb, $10, $11::jsonb, $12, $13::uuid, $14, $15) ON CONFLICT (organization_id, workspace_id, created_by, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING RETURNING id::text`, principal.OrganizationID, workspaceID, input.Name, input.Operation, input.AgentApplicationID, mustJSON(input.Trigger), input.Timezone, input.ConcurrencyPolicy, mustJSON(input.InputScope), input.MaxAttempts, mustJSON(input.RetryBackoff), input.Enabled, principal.UserID, idempotencyKey, requestHash).Scan(&id)
+	err = s.Store.Pool.QueryRow(ctx, `INSERT INTO automation.jobs (organization_id, workspace_id, name, operation, agent_application_id, trigger, timezone, concurrency_policy, input_scope, max_attempts, retry_backoff, enabled, created_by, idempotency_key, request_hash) VALUES ($1::uuid, $2::uuid, $3, $4, $5::uuid, $6::jsonb, $7, $8, $9::jsonb, $10, $11::jsonb, $12, $13::uuid, $14, $15) ON CONFLICT (organization_id, workspace_id, created_by, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING RETURNING id::text`, principal.OrganizationID, workspaceID, input.Name, input.Operation, input.AgentApplicationID, mustJSON(input.Trigger), input.Timezone, input.ConcurrencyPolicy, mustJSON(input.InputScope), input.MaxAttempts, mustJSON(input.RetryBackoff), input.Enabled, principal.UserID, idempotencyKey, requestHash).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		if lookupErr := s.Store.Pool.QueryRow(ctx, `SELECT id::text, COALESCE(request_hash, '') FROM automation.jobs WHERE organization_id = $1::uuid AND workspace_id = $2::uuid AND created_by = $3::uuid AND idempotency_key = $4`, principal.OrganizationID, workspaceID, principal.UserID, idempotencyKey).Scan(&existingID, &existingHash); lookupErr != nil {
 			return Job{}, lookupErr
@@ -274,6 +290,107 @@ func (s Service) CreateJob(ctx context.Context, principal auth.Principal, worksp
 		return Job{}, fmt.Errorf("create automation job: %w", err)
 	}
 	return s.GetJob(ctx, principal, id)
+}
+
+// appBindingFacts carries every state that used to live inside one wide JOIN
+// in CreateJob. inspectApplicationBinding observes each constraint in
+// isolation; classifyAppBinding then reports exactly which condition failed
+// (P1-11). The accept/reject outcome is identical to the old single-predicate
+// query; only the reported reason differs.
+type appBindingFacts struct {
+	Bound           bool
+	BindingEnabled  bool
+	AppExists       bool
+	AppStatus       string
+	RuntimeMode     string
+	ApplicationKey  string
+	EndpointExists  bool
+	EndpointStatus  string
+	RevisionPresent bool
+	RevokedAt       *time.Time
+}
+
+// classifyAppBinding evaluates the CreateJob prerequisites in a fixed order,
+// returning the first precise sentinel failure or nil when the application is
+// usable for the operation.
+func classifyAppBinding(facts appBindingFacts, workflowKey string) error {
+	if !facts.Bound || !facts.BindingEnabled {
+		return fmt.Errorf("%w: agent application must be bound and enabled on this workspace", ErrAppNotBound)
+	}
+	if !facts.AppExists {
+		return fmt.Errorf("%w: agent application does not exist in this organization", ErrAppNotBound)
+	}
+	if facts.AppStatus != "active" {
+		return fmt.Errorf("%w: application status %q", ErrAppDisabled, facts.AppStatus)
+	}
+	if workflowKey != "" && (facts.RuntimeMode != "workflow" || facts.ApplicationKey != workflowKey) {
+		return fmt.Errorf("%w: operation requires runtime_mode=workflow with workflow_key=%q but application reports runtime_mode=%q workflow_key=%q", ErrWorkflowMismatch, workflowKey, facts.RuntimeMode, facts.ApplicationKey)
+	}
+	if !facts.EndpointExists || facts.EndpointStatus != "active" {
+		return fmt.Errorf("%w: model endpoint status %q", ErrEndpointUnavailable, facts.EndpointStatus)
+	}
+	if !facts.RevisionPresent {
+		return fmt.Errorf("%w: endpoint has no row for its current revision", ErrEndpointUnavailable)
+	}
+	if facts.RevokedAt != nil {
+		return fmt.Errorf("%w: revision was revoked at %s", ErrRevokedRevision, facts.RevokedAt.UTC().Format(time.RFC3339))
+	}
+	return nil
+}
+
+// inspectApplicationBinding resolves each binding prerequisite with one point
+// lookup so failures stay diagnosable. A missing fact short-circuits the later
+// lookups: classification fails on the earlier rule anyway.
+func (s Service) inspectApplicationBinding(ctx context.Context, organizationID, workspaceID, applicationID string) (appBindingFacts, error) {
+	var facts appBindingFacts
+	var bindingEnabled bool
+	err := s.Store.Pool.QueryRow(ctx, `
+		SELECT enabled FROM content.workspace_agent_applications
+		WHERE organization_id = $1::uuid AND workspace_id = $2::uuid AND agent_application_id = $3::uuid
+	`, organizationID, workspaceID, applicationID).Scan(&bindingEnabled)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return facts, nil // not bound to this workspace
+	case err != nil:
+		return facts, err
+	}
+	facts.Bound = true
+	facts.BindingEnabled = bindingEnabled
+
+	var appStatus, runtimeMode, applicationKey, endpointID string
+	err = s.Store.Pool.QueryRow(ctx, `
+		SELECT status, COALESCE(runtime_mode, ''), COALESCE(workflow_key, ''), COALESCE(model_endpoint_id::text, '')
+		FROM integration.agent_applications WHERE id = $1::uuid AND organization_id = $2::uuid
+	`, applicationID, organizationID).Scan(&appStatus, &runtimeMode, &applicationKey, &endpointID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return facts, nil // application row missing despite the workspace binding
+	}
+	if err != nil {
+		return facts, err
+	}
+	facts.AppExists = true
+	facts.AppStatus = appStatus
+	facts.RuntimeMode = runtimeMode
+	facts.ApplicationKey = applicationKey
+	if endpointID == "" {
+		return facts, nil // no endpoint attached at all -> unavailable per classifier
+	}
+	facts.EndpointExists = true
+	err = s.Store.Pool.QueryRow(ctx, `
+		SELECT me.status, mer.model_endpoint_id IS NOT NULL, mer.revoked_at
+		FROM integration.model_endpoints me
+		LEFT JOIN integration.model_endpoint_revisions mer
+		  ON mer.model_endpoint_id = me.id AND mer.revision = me.current_revision
+		WHERE me.id = $1::uuid AND me.organization_id = $2::uuid
+	`, endpointID, organizationID).Scan(&facts.EndpointStatus, &facts.RevisionPresent, &facts.RevokedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		facts.EndpointExists = false
+		return facts, nil
+	}
+	if err != nil {
+		return facts, err
+	}
+	return facts, nil
 }
 
 func (s Service) GetJob(ctx context.Context, principal auth.Principal, jobID string) (Job, error) {
@@ -290,7 +407,15 @@ func (s Service) GetJob(ctx context.Context, principal auth.Principal, jobID str
 	if err := s.require(ctx, principal, workspaceID, "automation.read"); err != nil {
 		return Job{}, err
 	}
-	row := s.Store.Pool.QueryRow(ctx, `SELECT id::text, workspace_id::text, name, operation, agent_application_id::text, trigger, timezone, concurrency_policy, input_scope, max_attempts, retry_backoff, enabled, created_at, updated_at FROM automation.jobs WHERE organization_id = $1::uuid AND id = $2::uuid`, principal.OrganizationID, jobID)
+	row := s.Store.Pool.QueryRow(ctx, `
+		SELECT j.id::text, j.workspace_id::text, j.name, j.operation, j.agent_application_id::text,
+		       j.trigger, j.timezone, j.concurrency_policy, j.input_scope, j.max_attempts,
+		       j.retry_backoff, j.enabled, j.created_at, j.updated_at,
+		       (SELECT MAX(r.created_at) FROM automation.runs r
+		        WHERE r.automation_job_id = j.id AND r.source = 'automation'
+		          AND r.idempotency_key LIKE 'scheduled:%') AS last_scheduled_run_at
+		FROM automation.jobs j
+		WHERE j.organization_id = $1::uuid AND j.id = $2::uuid`, principal.OrganizationID, jobID)
 	return scanJob(row)
 }
 
@@ -323,6 +448,17 @@ func (s Service) PatchJob(ctx context.Context, principal auth.Principal, jobID s
 	return s.GetJob(ctx, principal, jobID)
 }
 
+// insertRunRequest carries the already-authorized facts needed to enqueue one
+// automation run. Member-facing CreateRun derives it from the session
+// principal; the scheduler passes the job's own creator identity.
+type insertRunRequest struct {
+	Job            Job
+	OrganizationID string
+	CreatedBy      string
+	Source         string
+	IdempotencyKey string
+}
+
 func (s Service) CreateRun(ctx context.Context, principal auth.Principal, jobID, idempotencyKey, source string) (Run, error) {
 	if len(strings.TrimSpace(idempotencyKey)) < 16 {
 		return Run{}, ErrInvalidInput
@@ -343,47 +479,224 @@ func (s Service) CreateRun(ctx context.Context, principal auth.Principal, jobID,
 	if source != "automation" && source != "manual" && source != "agent" {
 		return Run{}, ErrInvalidInput
 	}
-	tx, err := s.Store.Pool.Begin(ctx)
+	runID, reused, credential, credentialExpiry, err := s.insertQueuedRun(ctx, insertRunRequest{
+		Job: job, OrganizationID: principal.OrganizationID, CreatedBy: principal.UserID,
+		Source: source, IdempotencyKey: idempotencyKey,
+	})
 	if err != nil {
 		return Run{}, err
 	}
-	defer tx.Rollback(ctx)
-	var existingID string
-	if err := tx.QueryRow(ctx, `SELECT id::text FROM automation.runs WHERE organization_id = $1::uuid AND workspace_id = $2::uuid AND created_by = $3::uuid AND idempotency_key = $4`, principal.OrganizationID, job.WorkspaceID, principal.UserID, idempotencyKey).Scan(&existingID); err == nil {
-		if err := tx.Commit(ctx); err != nil {
-			return Run{}, err
-		}
-		return s.GetRun(ctx, principal, existingID)
-	} else if !errors.Is(err, pgx.ErrNoRows) {
+	result, err := s.getRunByID(ctx, principal.OrganizationID, runID)
+	if err != nil {
 		return Run{}, err
 	}
-	runScope := cloneScope(job.InputScope)
-	credential, _, credentialExpiry := issueRunCredential(runScope)
+	if !reused && credential != "" {
+		result.Credential = credential
+		result.CredentialExpiresAt = &credentialExpiry
+	}
+	return result, nil
+}
+
+// scheduledRunSource is the runs.source value recorded for scheduler-created
+// runs. The live CHECK constraint only allows ('automation','manual','agent',
+// 'chat') and migrations are frozen for this batch, so the scheduler marks its
+// runs with the structured "scheduled:<job>:<unix-minute>" idempotency key
+// instead of a dedicated source literal. If a distinct source is wanted later,
+// extending runs_source_check is a one-line integrator migration.
+const scheduledRunSource = "automation"
+
+// ScheduledRunKeyPrefix identifies idempotency keys minted by the built-in
+// cron scheduler; ListJobs/GetJob use it to compute last_scheduled_run_at.
+const ScheduledRunKeyPrefix = "scheduled:"
+
+// CreateScheduledRun enqueues a run for an enabled job on behalf of the
+// built-in cron scheduler. Member authorization is intentionally skipped: the
+// actor is the worker's scheduler goroutine running under the job creator's
+// stored identity, not a user session. It returns created=false when this run
+// already existed (idempotent replay of the same window key).
+func (s Service) CreateScheduledRun(ctx context.Context, jobID, idempotencyKey string) (bool, error) {
+	if len(strings.TrimSpace(idempotencyKey)) < 16 {
+		return false, ErrInvalidInput
+	}
+	job, organizationID, createdBy, err := s.loadJobWithActor(ctx, jobID)
+	if err != nil {
+		return false, err
+	}
+	if !job.Enabled {
+		return false, ErrConflict
+	}
+	runID, reused, _, _, err := s.insertQueuedRun(ctx, insertRunRequest{
+		Job: job, OrganizationID: organizationID, CreatedBy: createdBy,
+		Source: scheduledRunSource, IdempotencyKey: idempotencyKey,
+	})
+	if err != nil {
+		return false, err
+	}
+	if _, err := s.getRunByID(ctx, organizationID, runID); err != nil {
+		return false, err
+	}
+	return !reused, nil
+}
+
+// loadJobWithActor loads one job plus its owning organization/user without any
+// member authorization (scheduler-only path).
+func (s Service) loadJobWithActor(ctx context.Context, jobID string) (Job, string, string, error) {
+	if !validID(jobID) {
+		return Job{}, "", "", ErrInvalidInput
+	}
+	var item Job
+	var organizationID, createdBy string
+	var trigger, scope, backoff []byte
+	err := s.Store.Pool.QueryRow(ctx, `
+		SELECT organization_id::text, created_by::text, workspace_id::text, name, operation,
+		       agent_application_id::text, trigger, timezone, concurrency_policy, input_scope,
+		       max_attempts, retry_backoff, enabled, created_at, updated_at
+		FROM automation.jobs WHERE id = $1::uuid`, jobID).Scan(
+		&organizationID, &createdBy, &item.WorkspaceID, &item.Name, &item.Operation,
+		&item.AgentApplicationID, &trigger, &item.Timezone, &item.ConcurrencyPolicy, &scope,
+		&item.MaxAttempts, &backoff, &item.Enabled, &item.CreatedAt, &item.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Job{}, "", "", ErrNotFound
+	}
+	if err != nil {
+		return Job{}, "", "", err
+	}
+	item.Trigger = decodeMap(trigger)
+	item.InputScope = decodeMap(scope)
+	item.ExternalTask = externalTaskFromScope(item.InputScope)
+	item.RetryBackoff = decodeMap(backoff)
+	return item, organizationID, createdBy, nil
+}
+
+// CronJobRef is the minimal view Scheduler.Tick needs per enabled cron job.
+type CronJobRef struct {
+	ID       string         `json:"id"`
+	Trigger  map[string]any `json:"trigger"`
+	Timezone string         `json:"timezone"`
+}
+
+// EnabledCronJobs returns up to limit enabled jobs whose trigger type is cron,
+// newest first so recently edited jobs win under the per-tick budget.
+func (s Service) EnabledCronJobs(ctx context.Context, limit int) ([]CronJobRef, error) {
+	if s.Store == nil || s.Store.Pool == nil {
+		return nil, ErrInvalidInput
+	}
+	if limit <= 0 || limit > 500 {
+		limit = 200
+	}
+	rows, err := s.Store.Pool.Query(ctx, `SELECT id::text, trigger, timezone FROM automation.jobs WHERE enabled AND trigger->>'type' = 'cron' ORDER BY updated_at DESC LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []CronJobRef{}
+	for rows.Next() {
+		var item CronJobRef
+		var trigger []byte
+		if scanErr := rows.Scan(&item.ID, &trigger, &item.Timezone); scanErr != nil {
+			return nil, scanErr
+		}
+		item.Trigger = decodeMap(trigger)
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+// ScheduledRunWindowHandled reports whether a run (successful enqueue or the
+// failure record below) already exists for this scheduling window key. It is
+// the database-side half of the double dedup insurance.
+func (s Service) ScheduledRunWindowHandled(ctx context.Context, jobID, windowKey string) (bool, error) {
+	var exists bool
+	err := s.Store.Pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM automation.runs WHERE automation_job_id = $1::uuid AND idempotency_key = $2)`, jobID, windowKey).Scan(&exists)
+	return exists, err
+}
+
+// RecordScheduleFailure persists an observable failed run when the real run
+// cannot be created (e.g. application disabled since creation, concurrency
+// conflict), so the window counts as handled and operators can see why. The
+// marker row reuses the same structured idempotency key as a real run would.
+func (s Service) RecordScheduleFailure(ctx context.Context, jobID, windowKey, errorCode, summary string) error {
+	if errorCode == "" {
+		errorCode = "schedule_failed"
+	}
+	if summary == "" {
+		summary = "scheduler could not create run"
+	}
+	row := s.Store.Pool.QueryRow(ctx, `
+		WITH inserted AS (
+			INSERT INTO automation.runs
+				(organization_id, workspace_id, automation_job_id, source, operation, status,
+				 progress, error_code, error_summary, completed_at, created_by, idempotency_key)
+			SELECT j.organization_id, j.workspace_id, j.id, 'automation', j.operation, 'failed',
+			       100, $2, left($3, 2000), now(), j.created_by, $4
+			FROM automation.jobs j WHERE j.id = $1::uuid
+			ON CONFLICT (organization_id, workspace_id, created_by, idempotency_key)
+			WHERE idempotency_key IS NOT NULL DO NOTHING
+			RETURNING organization_id, id
+		)
+		SELECT organization_id::text, id::text FROM inserted`, jobID, errorCode, summary, windowKey)
+	var organizationID, runID string
+	if err := row.Scan(&organizationID, &runID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil // another actor recorded this window first
+		}
+		return err
+	}
+	_, err := s.Store.Pool.Exec(ctx, `INSERT INTO automation.run_events (organization_id, run_id, event_type, payload) VALUES ($1::uuid, $2::uuid, 'run.failed', $3::jsonb)`,
+		organizationID, runID, mustJSON(map[string]any{"error_code": errorCode, "error_summary": summary, "source": "scheduler"}))
+	return err
+}
+
+// insertQueuedRun holds the transactional core shared by member-triggered and
+// scheduler-triggered run creation: idempotency replay lookup, concurrency
+// policy enforcement, binding snapshot, row insert, queue event and commit.
+func (s Service) insertQueuedRun(ctx context.Context, req insertRunRequest) (runID string, reused bool, credential string, credentialExpiry time.Time, err error) {
+	tx, err := s.Store.Pool.Begin(ctx)
+	if err != nil {
+		return "", false, "", time.Time{}, err
+	}
+	defer tx.Rollback(ctx)
+	var existingID string
+	if scanErr := tx.QueryRow(ctx, `SELECT id::text FROM automation.runs WHERE organization_id = $1::uuid AND workspace_id = $2::uuid AND created_by = $3::uuid AND idempotency_key = $4`, req.OrganizationID, req.Job.WorkspaceID, req.CreatedBy, req.IdempotencyKey).Scan(&existingID); scanErr == nil {
+		if commitErr := tx.Commit(ctx); commitErr != nil {
+			return "", false, "", time.Time{}, commitErr
+		}
+		return existingID, true, "", time.Time{}, nil
+	} else if !errors.Is(scanErr, pgx.ErrNoRows) {
+		return "", false, "", time.Time{}, scanErr
+	}
+	runScope := cloneScope(req.Job.InputScope)
+	credential, _, credentialExpiry = issueRunCredential(runScope)
+	job := req.Job
 	if job.ConcurrencyPolicy == "forbid" || job.ConcurrencyPolicy == "replace" {
-		rows, queryErr := tx.Query(ctx, `SELECT id::text FROM automation.runs WHERE organization_id = $1::uuid AND automation_job_id = $2::uuid AND status IN ('queued', 'running', 'cancel_requested') FOR UPDATE`, principal.OrganizationID, jobID)
+		rows, queryErr := tx.Query(ctx, `SELECT id::text FROM automation.runs WHERE organization_id = $1::uuid AND automation_job_id = $2::uuid AND status IN ('queued', 'running', 'cancel_requested') FOR UPDATE`, req.OrganizationID, job.ID)
 		if queryErr != nil {
-			return Run{}, queryErr
+			return "", false, "", time.Time{}, queryErr
 		}
 		var active []string
 		for rows.Next() {
 			var id string
 			if scanErr := rows.Scan(&id); scanErr != nil {
 				rows.Close()
-				return Run{}, scanErr
+				return "", false, "", time.Time{}, scanErr
 			}
 			active = append(active, id)
 		}
+		if rowsErr := rows.Err(); rowsErr != nil {
+			rows.Close()
+			return "", false, "", time.Time{}, rowsErr
+		}
 		rows.Close()
 		if job.ConcurrencyPolicy == "forbid" && len(active) > 0 {
-			return Run{}, ErrConflict
+			return "", false, "", time.Time{}, ErrConflict
 		}
 		if job.ConcurrencyPolicy == "replace" {
 			for _, id := range active {
 				if _, updateErr := tx.Exec(ctx, `UPDATE automation.runs SET status = 'cancel_requested', cancel_requested = true, error_code = 'replaced', error_summary = 'replaced by a newer run' WHERE id = $1::uuid`, id); updateErr != nil {
-					return Run{}, updateErr
+					return "", false, "", time.Time{}, updateErr
 				}
-				if err := insertRunEvent(ctx, tx, principal.OrganizationID, id, "run.cancel_requested", map[string]any{"reason": "replaced"}); err != nil {
-					return Run{}, err
+				if eventErr := insertRunEvent(ctx, tx, req.OrganizationID, id, "run.cancel_requested", map[string]any{"reason": "replaced"}); eventErr != nil {
+					return "", false, "", time.Time{}, eventErr
 				}
 			}
 		}
@@ -406,13 +719,12 @@ func (s Service) CreateRun(ctx context.Context, principal auth.Principal, jobID,
 		WHERE aa.id = $1::uuid AND aa.organization_id = $2::uuid
 		  AND aa.status = 'active' AND me.status = 'active' AND mer.revoked_at IS NULL
 		  AND ($3 = '' OR (aa.runtime_mode = 'workflow' AND aa.workflow_key = $3))
-	`, job.AgentApplicationID, principal.OrganizationID, workflowKey).Scan(&agentUserID, &modelEndpointID, &modelRevision); err != nil {
+	`, job.AgentApplicationID, req.OrganizationID, workflowKey).Scan(&agentUserID, &modelEndpointID, &modelRevision); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return Run{}, ErrConflict
+			return "", false, "", time.Time{}, ErrConflict
 		}
-		return Run{}, err
+		return "", false, "", time.Time{}, err
 	}
-	var runID string
 	if err := tx.QueryRow(ctx, `
 		INSERT INTO automation.runs
 			(organization_id, workspace_id, automation_job_id, source, operation, input_scope,
@@ -426,32 +738,27 @@ func (s Service) CreateRun(ctx context.Context, principal auth.Principal, jobID,
 		ON CONFLICT (organization_id, workspace_id, created_by, idempotency_key)
 		WHERE idempotency_key IS NOT NULL DO NOTHING
 		RETURNING id::text
-		`, principal.OrganizationID, job.WorkspaceID, jobID, source, job.Operation, mustJSON(runScope),
-		principal.UserID, idempotencyKey, agentUserID, job.AgentApplicationID, modelEndpointID,
+		`, req.OrganizationID, job.WorkspaceID, job.ID, req.Source, job.Operation, mustJSON(runScope),
+		req.CreatedBy, req.IdempotencyKey, agentUserID, job.AgentApplicationID, modelEndpointID,
 		modelRevision, runtimeMode, workflowKey, workflowCodeVersion, hashRequest(runScope)).Scan(&runID); err != nil {
 		if !errors.Is(err, pgx.ErrNoRows) {
-			return Run{}, err
+			return "", false, "", time.Time{}, err
 		}
-		if err := tx.QueryRow(ctx, `SELECT id::text FROM automation.runs WHERE organization_id = $1::uuid AND workspace_id = $2::uuid AND created_by = $3::uuid AND idempotency_key = $4`, principal.OrganizationID, job.WorkspaceID, principal.UserID, idempotencyKey).Scan(&runID); err != nil {
-			return Run{}, err
+		if lookupErr := tx.QueryRow(ctx, `SELECT id::text FROM automation.runs WHERE organization_id = $1::uuid AND workspace_id = $2::uuid AND created_by = $3::uuid AND idempotency_key = $4`, req.OrganizationID, job.WorkspaceID, req.CreatedBy, req.IdempotencyKey).Scan(&runID); lookupErr != nil {
+			return "", false, "", time.Time{}, lookupErr
 		}
-		if err := tx.Commit(ctx); err != nil {
-			return Run{}, err
+		if commitErr := tx.Commit(ctx); commitErr != nil {
+			return "", false, "", time.Time{}, commitErr
 		}
-		return s.GetRun(ctx, principal, runID)
+		return runID, true, "", time.Time{}, nil
 	}
-	if err := insertRunEvent(ctx, tx, principal.OrganizationID, runID, "run.queued", map[string]any{"source": source, "operation": job.Operation}); err != nil {
-		return Run{}, err
+	if err := insertRunEvent(ctx, tx, req.OrganizationID, runID, "run.queued", map[string]any{"source": req.Source, "operation": job.Operation}); err != nil {
+		return "", false, "", time.Time{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return Run{}, err
+		return "", false, "", time.Time{}, err
 	}
-	result, err := s.GetRun(ctx, principal, runID)
-	if err == nil && credential != "" {
-		result.Credential = credential
-		result.CredentialExpiresAt = &credentialExpiry
-	}
-	return result, err
+	return runID, false, credential, credentialExpiry, nil
 }
 
 func (s Service) ListRuns(ctx context.Context, principal auth.Principal, jobID string) ([]Run, error) {
@@ -546,6 +853,11 @@ func (s Service) RetryRun(ctx context.Context, principal auth.Principal, runID, 
 	return s.CreateRun(ctx, principal, *run.AutomationJobID, idempotencyKey, "manual")
 }
 
+// callbackCredentialGraceWindow delays the first worker claim of runs that
+// carry an external callback credential, so the run-now response (credential +
+// callback URL) reliably reaches the external executor first.
+const callbackCredentialGraceWindow = 5 * time.Second
+
 // ClaimNextRun atomically leases one queued run for a worker.
 func (s Service) ClaimNextRun(ctx context.Context, workerID string, lease time.Duration) (ClaimedRun, error) {
 	workerID = strings.TrimSpace(workerID)
@@ -590,7 +902,20 @@ func (s Service) ClaimNextRun(ctx context.Context, workerID string, lease time.D
 	var run Run
 	var maxAttempts int
 	var retryBackoff []byte
-	row := tx.QueryRow(ctx, `SELECT r.id::text, r.workspace_id::text, r.automation_job_id::text, r.source, r.operation, r.status, r.progress, r.attempt_count, r.error_code, r.error_summary, r.created_at, r.started_at, r.completed_at, r.next_attempt_at, r.cancel_requested, r.input_scope, COALESCE(j.max_attempts, 3), COALESCE(j.retry_backoff, '{}'::jsonb) FROM automation.runs r LEFT JOIN automation.jobs j ON j.id = r.automation_job_id WHERE r.status = 'queued' AND (r.next_attempt_at IS NULL OR r.next_attempt_at <= now()) ORDER BY r.created_at, r.id FOR UPDATE OF r SKIP LOCKED LIMIT 1`)
+	// Runs that carry a short-lived callback credential only exist so an
+	// external executor can write results back (P1-12). Give the issuer a
+	// small grace window before the worker may claim them; otherwise the
+	// worker would race the HTTP response and terminate the run within
+	// milliseconds, leaving the executor no callback chance at all (observed
+	// as sub-second failures in report_C #9). Trade-off: such runs start at
+	// worst ~grace + one poll interval later than internal runs. A DB-side
+	// filter was chosen over a sleep-before-poll or lower queue priority
+	// because it needs no attempt lease churn and touches exactly this query.
+	queuedFilter := fmt.Sprintf(` AND (
+			NULLIF(r.input_scope->>'_run_credential_hash', '') IS NULL
+			OR r.created_at <= now() - interval '%d seconds'
+		)`, int(callbackCredentialGraceWindow/time.Second))
+	row := tx.QueryRow(ctx, `SELECT r.id::text, r.workspace_id::text, r.automation_job_id::text, r.source, r.operation, r.status, r.progress, r.attempt_count, r.error_code, r.error_summary, r.created_at, r.started_at, r.completed_at, r.next_attempt_at, r.cancel_requested, r.input_scope, COALESCE(j.max_attempts, 3), COALESCE(j.retry_backoff, '{}'::jsonb) FROM automation.runs r LEFT JOIN automation.jobs j ON j.id = r.automation_job_id WHERE r.status = 'queued' AND (r.next_attempt_at IS NULL OR r.next_attempt_at <= now())`+queuedFilter+` ORDER BY r.created_at, r.id FOR UPDATE OF r SKIP LOCKED LIMIT 1`)
 	if err := scanRunWithJob(row, &run, &maxAttempts, &retryBackoff); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ClaimedRun{}, ErrNoPendingRun
@@ -872,7 +1197,9 @@ func (s Service) ListAttempts(ctx context.Context, principal auth.Principal, run
 func scanJob(row interface{ Scan(...any) error }) (Job, error) {
 	var item Job
 	var trigger, scope, backoff []byte
-	err := row.Scan(&item.ID, &item.WorkspaceID, &item.Name, &item.Operation, &item.AgentApplicationID, &trigger, &item.Timezone, &item.ConcurrencyPolicy, &scope, &item.MaxAttempts, &backoff, &item.Enabled, &item.CreatedAt, &item.UpdatedAt)
+	// last_scheduled_run_at is computed live from the runs table (no migration)
+	// so operators can observe scheduler activity per job.
+	err := row.Scan(&item.ID, &item.WorkspaceID, &item.Name, &item.Operation, &item.AgentApplicationID, &trigger, &item.Timezone, &item.ConcurrencyPolicy, &scope, &item.MaxAttempts, &backoff, &item.Enabled, &item.CreatedAt, &item.UpdatedAt, &item.LastScheduledRunAt)
 	item.Trigger = decodeMap(trigger)
 	item.InputScope = decodeMap(scope)
 	item.ExternalTask = externalTaskFromScope(item.InputScope)

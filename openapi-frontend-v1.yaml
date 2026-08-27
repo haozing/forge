@@ -384,7 +384,12 @@ components:
     IdempotencyKey:
       name: Idempotency-Key
       in: header
-      required: true
+      required: false
+      description: >-
+        Optional. When supplied (16-200 chars), the same caller + operation +
+        request hash replays the stored response with Idempotency-Replayed:
+        true; a malformed header answers 422 idempotency_key_invalid. Omitted
+        keys execute normally without dedup.
       schema: { type: string, minLength: 16, maxLength: 200 }
   securitySchemes:
     MemberSession:

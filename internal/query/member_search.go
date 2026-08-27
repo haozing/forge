@@ -37,11 +37,25 @@ func (s Service) QueryMember(ctx context.Context, principal auth.Principal, req 
 	if mode == "" {
 		mode = "hybrid"
 	}
-	if mode != "lexical" && mode != "semantic" && mode != "hybrid" {
+	// fulltext is a product-doc alias of lexical; structured allows an empty query.
+	switch mode {
+	case "lexical", "fulltext":
+		mode = "lexical"
+	case "structured", "semantic", "hybrid":
+	default:
 		return QueryResponse{}, fmt.Errorf("%w: unsupported member query mode", ErrInvalidQuery)
 	}
-	if q == "" || len([]rune(q)) > 500 || strings.ContainsRune(q, '\x00') {
-		return QueryResponse{}, fmt.Errorf("%w: query must be 1-500 characters", ErrInvalidQuery)
+	req.Mode = mode
+	if (mode != "structured" && q == "") || len([]rune(q)) > 500 || strings.ContainsRune(q, '\x00') {
+		return QueryResponse{}, fmt.Errorf("%w: query must be 1-500 characters unless mode is structured", ErrInvalidQuery)
+	}
+	// pgx binds nil slices as SQL NULL; downstream SQL relies on cardinality()+ANY
+	// array semantics and would filter out every row on NULL parameters.
+	if req.Visibility == nil {
+		req.Visibility = []string{}
+	}
+	if req.PublicationStatus == nil {
+		req.PublicationStatus = []string{}
 	}
 	topK := req.TopK
 	if topK == 0 {
@@ -89,7 +103,7 @@ func (s Service) QueryMember(ctx context.Context, principal auth.Principal, req 
 	}
 
 	var lexical, vector []candidate
-	if mode == "lexical" || mode == "hybrid" {
+	if mode == "lexical" || mode == "structured" || mode == "hybrid" {
 		lexical, err = s.memberLexicalCandidates(ctx, principal, req, role, q, models, filters)
 		if err != nil {
 			return QueryResponse{}, err
@@ -115,8 +129,10 @@ func (s Service) QueryMember(ctx context.Context, principal auth.Principal, req 
 		method = "vector"
 	} else if mode == "hybrid" && !degraded {
 		method = "rrf"
+	} else if mode == "structured" {
+		method = "structured"
 	}
-	if len(merged) > 0 && s.Reranker != nil {
+	if len(merged) > 0 && s.Reranker != nil && mode != "structured" {
 		input := make([]RerankCandidate, min(50, len(merged)))
 		for i := range input {
 			input[i] = RerankCandidate{ID: merged[i].ChunkID, Text: merged[i].Snippet}
@@ -170,6 +186,15 @@ func (s Service) memberQueryScope(ctx context.Context, principal auth.Principal,
 		  AND wm.user_id = $3::uuid AND w.status = 'active'
 	`, principal.OrganizationID, workspaceID, principal.UserID).Scan(&role)
 	if errors.Is(err, pgx.ErrNoRows) {
+		var exists bool
+		if probeErr := s.Store.Pool.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM content.workspaces
+				WHERE organization_id = $1::uuid AND id = $2::uuid AND status = 'active'
+			)
+		`, principal.OrganizationID, workspaceID).Scan(&exists); probeErr == nil && !exists {
+			return "", nil, ErrWorkspaceMissing
+		}
 		return "", nil, ErrModelAccessDenied
 	}
 	if err != nil {
@@ -228,7 +253,8 @@ func (s Service) memberLexicalCandidates(ctx context.Context, principal auth.Pri
 		JOIN model.resource_model_versions mv ON mv.id = rm.current_version_id AND mv.status = 'published'
 		WHERE c.organization_id = $1::uuid AND c.status = 'ready'
 		  AND a.workspace_id = $2::uuid AND a.deleted_at IS NULL
-		  AND a.resource_model_id = ANY($3::uuid[]) AND c.search_text &@~ $4
+		  AND a.publication_status = 'published'
+		  AND a.resource_model_id = ANY($3::uuid[]) AND ($4 = '' OR c.search_text &@~ $4)
 		  AND retrieval.matches_field_filters(v.fields, $5::jsonb)
 		  AND retrieval.matches_field_filters(jsonb_build_object('tags', v.tags), $6::jsonb)
 		  AND ($7::text IN ('owner','admin') OR a.visibility <> 'private' OR a.created_by = $8::uuid)
@@ -300,6 +326,7 @@ func (s Service) memberVectorCandidates(ctx context.Context, principal auth.Prin
 		JOIN model.resource_model_versions mv ON mv.id=rm.current_version_id AND mv.status='published'
 		WHERE e.organization_id=$1::uuid AND e.status='ready'
 		  AND a.workspace_id=$2::uuid AND a.deleted_at IS NULL
+		  AND a.publication_status='published'
 		  AND a.resource_model_id=ANY($3::uuid[])
 		  AND e.model_name=$5 AND e.model_version=$6
 		  AND retrieval.matches_field_filters(v.fields,$7::jsonb)
@@ -410,6 +437,7 @@ func (s Service) pageMemberSession(ctx context.Context, principal auth.Principal
 			JOIN model.resource_model_versions mv ON mv.id=rm.current_version_id AND mv.status='published'
 			WHERE i.session_id=$1::uuid AND i.ordinal >= $2
 			  AND a.organization_id=$3::uuid AND a.workspace_id=$4::uuid AND a.deleted_at IS NULL
+			  AND a.publication_status='published'
 			  AND a.resource_model_id=ANY($5::uuid[])
 			  AND retrieval.matches_field_filters(v.fields,$6::jsonb)
 			  AND retrieval.matches_field_filters(jsonb_build_object('tags', v.tags),$7::jsonb)

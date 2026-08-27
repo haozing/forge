@@ -11,12 +11,18 @@ import (
 	"time"
 
 	"agentchunzhi/internal/store"
+
+	"github.com/jackc/pgx/v5"
 )
 
 const sessionCookieName = "agent_session"
 
 type SessionService struct {
 	Store *store.Store
+	// AuditHook, when set, receives session lifecycle audit events instead of
+	// the default fire-and-forget database writer. It exists so tests can
+	// capture events without a database.
+	AuditHook func(SessionAuditEvent)
 }
 
 type Session struct {
@@ -38,7 +44,16 @@ func (s SessionService) Login(ctx context.Context, loginName, password string) (
 		  AND u.user_type = 'member'
 		  AND u.status = 'active'
 	`, loginName).Scan(&principal.UserID, &principal.OrganizationID, &principal.UserType, &passwordHash)
-	if err != nil || !VerifyPassword(password, passwordHash) {
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		// Unknown login name: no user details are available for the record.
+		s.reportSessionEvent(SessionAuditEvent{Action: SessionLogin, Result: "denied", LoginName: loginName, Reason: ReasonUnknownLoginName})
+		return Session{}, errors.New("invalid credentials")
+	case err != nil:
+		return Session{}, errors.New("invalid credentials")
+	}
+	if !VerifyPassword(password, passwordHash) {
+		s.reportSessionEvent(SessionAuditEvent{Action: SessionLogin, Result: "denied", OrganizationID: principal.OrganizationID, UserID: principal.UserID, LoginName: loginName, Reason: ReasonInvalidCredentials})
 		return Session{}, errors.New("invalid credentials")
 	}
 	tokenBytes := make([]byte, 32)
@@ -52,8 +67,10 @@ func (s SessionService) Login(ctx context.Context, loginName, password string) (
 		VALUES ($1::uuid, $2, $3)
 	`, principal.UserID, hashSessionToken(token), expiresAt)
 	if err != nil {
+		s.reportSessionEvent(SessionAuditEvent{Action: SessionLogin, Result: "error", OrganizationID: principal.OrganizationID, UserID: principal.UserID, LoginName: loginName, Reason: ReasonSessionCreateFailed})
 		return Session{}, fmt.Errorf("create session: %w", err)
 	}
+	s.reportSessionEvent(SessionAuditEvent{Action: SessionLogin, Result: "allowed", OrganizationID: principal.OrganizationID, UserID: principal.UserID, LoginName: loginName})
 	return Session{Principal: principal, Token: token, ExpiresAt: expiresAt}, nil
 }
 
@@ -91,11 +108,20 @@ func (s SessionService) Logout(ctx context.Context, r *http.Request) error {
 	if err != nil || cookie.Value == "" {
 		return nil
 	}
-	_, err = s.Store.Pool.Exec(ctx, `
-		UPDATE identity.sessions
-		SET revoked_at = COALESCE(revoked_at, now())
-		WHERE session_hash = $1
-	`, hashSessionToken(cookie.Value))
+	var userID, organizationID string
+	err = s.Store.Pool.QueryRow(ctx, `
+		UPDATE identity.sessions s
+		SET revoked_at = COALESCE(s.revoked_at, now())
+		FROM identity.users u
+		WHERE u.id = s.user_id AND s.session_hash = $1
+		RETURNING u.id::text, u.organization_id::text
+	`, hashSessionToken(cookie.Value)).Scan(&userID, &organizationID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err == nil {
+		s.reportSessionEvent(SessionAuditEvent{Action: SessionLogout, Result: "allowed", OrganizationID: organizationID, UserID: userID})
+	}
 	return err
 }
 

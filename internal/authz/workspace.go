@@ -55,6 +55,18 @@ func (p WorkspacePolicyService) Require(ctx context.Context, principal auth.Prin
 			  AND w.status = 'active'
 		`, principal.OrganizationID, workspaceID, principal.UserID).Scan(&role)
 		if errors.Is(err, pgx.ErrNoRows) {
+			// Distinguish "workspace does not exist in this organization" (safe
+			// to surface as 404 upstream) from "exists but caller is not a
+			// member" (403 without leaking existence).
+			var exists bool
+			if probeErr := p.Store.Pool.QueryRow(ctx, `
+				SELECT EXISTS (
+					SELECT 1 FROM content.workspaces
+					WHERE organization_id = $1::uuid AND id = $2::uuid AND status = 'active'
+				)
+			`, principal.OrganizationID, workspaceID).Scan(&exists); probeErr == nil && !exists {
+				return Scope{}, ErrWorkspaceNotFound
+			}
 			return Scope{}, ErrWorkspaceForbidden
 		}
 		if err != nil {

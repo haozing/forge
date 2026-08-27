@@ -34,6 +34,9 @@ func listNotificationsFinal(deps Dependencies) http.HandlerFunc {
 			return
 		}
 		workspaceID := r.PathValue("workspaceId")
+		if !requirePathUUID(w, workspaceID) || !rejectUnknownWorkspace(w, r, deps, principal) {
+			return
+		}
 		if _, err := deps.WorkspacePolicy.Require(r.Context(), principal, workspaceID, "", "workspace.read"); err != nil {
 			writeError(w, http.StatusForbidden, "workspace_access_denied")
 			return
@@ -84,6 +87,9 @@ func unreadNotificationCountFinal(deps Dependencies) http.HandlerFunc {
 			return
 		}
 		workspaceID := r.PathValue("workspaceId")
+		if !requirePathUUID(w, workspaceID) || !rejectUnknownWorkspace(w, r, deps, principal) {
+			return
+		}
 		if _, err := deps.WorkspacePolicy.Require(r.Context(), principal, workspaceID, "", "workspace.read"); err != nil {
 			writeError(w, http.StatusForbidden, "workspace_access_denied")
 			return
@@ -107,8 +113,11 @@ func markNotificationReadFinal(deps Dependencies) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		if _, ok := requiredIdempotencyKey(r); !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+		if _, ok := requestIdempotencyKey(w, r); !ok {
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
+			return
+		}
+		if !requirePathUUID(w, r.PathValue("notificationId")) {
 			return
 		}
 		result, err := deps.Store.Pool.Exec(r.Context(), `UPDATE content.notifications SET read_at = COALESCE(read_at, now()) WHERE organization_id = $1::uuid AND recipient_user_id = $2::uuid AND id = $3::uuid`, principal.OrganizationID, principal.UserID, r.PathValue("notificationId"))
@@ -134,8 +143,11 @@ func markAllNotificationsReadFinal(deps Dependencies) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		if _, ok := requiredIdempotencyKey(r); !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+		if _, ok := requestIdempotencyKey(w, r); !ok {
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
+			return
+		}
+		if !requirePathUUID(w, r.PathValue("workspaceId")) || !rejectUnknownWorkspace(w, r, deps, principal) {
 			return
 		}
 		if _, err := deps.Store.Pool.Exec(r.Context(), `UPDATE content.notifications SET read_at = COALESCE(read_at, now()) WHERE organization_id = $1::uuid AND workspace_id = $2::uuid AND recipient_user_id = $3::uuid AND read_at IS NULL`, principal.OrganizationID, r.PathValue("workspaceId"), principal.UserID); err != nil {
@@ -157,6 +169,9 @@ func notificationStreamFinal(deps Dependencies) http.HandlerFunc {
 			return
 		}
 		workspaceID := r.PathValue("workspaceId")
+		if !requirePathUUID(w, workspaceID) || !rejectUnknownWorkspace(w, r, deps, principal) {
+			return
+		}
 		if _, err := deps.WorkspacePolicy.Require(r.Context(), principal, workspaceID, "", "workspace.read"); err != nil {
 			writeError(w, http.StatusForbidden, "workspace_access_denied")
 			return

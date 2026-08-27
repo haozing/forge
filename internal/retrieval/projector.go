@@ -103,8 +103,26 @@ func UpsertProjectionTx(ctx context.Context, tx pgx.Tx, assetVersionID string) e
 
 func (p Projector) upsertProjectionTx(ctx context.Context, tx pgx.Tx, assetVersionID string) error {
 	var orgID, assetID, modelID, sourceChecksum, title, markdown, fields string
-	if err := tx.QueryRow(ctx, `SELECT av.organization_id::text, av.asset_id::text, av.resource_model_id::text, av.content_checksum, COALESCE(av.title,''), COALESCE(av.markdown,''), av.fields::text FROM asset.asset_versions av WHERE av.id = $1::uuid`, assetVersionID).Scan(&orgID, &assetID, &modelID, &sourceChecksum, &title, &markdown, &fields); err != nil {
+	var published bool
+	if err := tx.QueryRow(ctx, `
+		SELECT av.organization_id::text, av.asset_id::text, av.resource_model_id::text,
+		       av.content_checksum, COALESCE(av.title,''), COALESCE(av.markdown,''),
+		       av.fields::text,
+		       (a.current_published_version_id = av.id AND a.publication_status = 'published') AS published
+		FROM asset.asset_versions av
+		JOIN asset.assets a ON a.id = av.asset_id
+		WHERE av.id = $1::uuid
+	`, assetVersionID).Scan(&orgID, &assetID, &modelID, &sourceChecksum, &title, &markdown, &fields, &published); err != nil {
 		return fmt.Errorf("load asset version for retrieval projection: %w", err)
+	}
+	if !published {
+		// Only currently-published versions may enter the retrieval index
+		// (doc §6.11.2). Draft/archive working versions retract anything that
+		// may have leaked into projections instead of building new chunks.
+		if _, err := tx.Exec(ctx, `UPDATE retrieval.chunks SET status = 'deleted', search_text = '', content = '', updated_at = now() WHERE asset_version_id = $1::uuid AND status <> 'deleted'`, assetVersionID); err != nil {
+			return fmt.Errorf("retract unpublished retrieval projection: %w", err)
+		}
+		return nil
 	}
 	canonical := strings.TrimSpace(strings.Join([]string{title, markdown, fields}, "\n"))
 	if canonical == "" {

@@ -29,9 +29,9 @@ func assetResourceFinal(deps Dependencies) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		key, ok := requiredIdempotencyKey(r)
+		key, ok := requestIdempotencyKey(w, r)
 		if !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
 			return
 		}
 		item, err := deps.MemberAssetService.Get(r.Context(), principal, r.PathValue("assetId"))
@@ -68,9 +68,9 @@ func assetVersionCollectionFinal(deps Dependencies) http.HandlerFunc {
 			}
 			writeJSON(w, http.StatusOK, map[string]any{"items": items, "has_more": false})
 		case http.MethodPost:
-			key, ok := requiredIdempotencyKey(r)
+			key, ok := requestIdempotencyKey(w, r)
 			if !ok {
-				writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+				writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
 				return
 			}
 			var input assetservice.MemberAssetVersionInput
@@ -114,9 +114,9 @@ func assetVersionResourceFinal(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
 			return
 		}
-		key, ok := requiredIdempotencyKey(r)
+		key, ok := requestIdempotencyKey(w, r)
 		if !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
 			return
 		}
 		if strings.TrimSpace(r.Header.Get("If-Match")) == "" {
@@ -150,8 +150,8 @@ func restoreAssetFinal(deps Dependencies) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		if _, ok := requiredIdempotencyKey(r); !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+		if _, ok := requestIdempotencyKey(w, r); !ok {
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
 			return
 		}
 		item, err := deps.MemberAssetService.Get(r.Context(), principal, r.PathValue("assetId"))
@@ -187,9 +187,9 @@ func duplicateAssetFinal(deps Dependencies) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		key, ok := requiredIdempotencyKey(r)
+		key, ok := requestIdempotencyKey(w, r)
 		if !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_required")
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
 			return
 		}
 		original, err := deps.MemberAssetService.Get(r.Context(), principal, r.PathValue("assetId"))
