@@ -43,27 +43,14 @@ func searchSuggestions(deps Dependencies) http.HandlerFunc {
 			return
 		}
 		rows, err := deps.Store.Pool.Query(r.Context(), `
-			WITH source AS (
-				SELECT v.title AS value, 'title'::text AS kind, count(*)::bigint AS item_count
-				FROM asset.assets a
-				JOIN asset.asset_versions v ON v.id = a.current_working_version_id
-				WHERE a.organization_id = $1::uuid AND a.workspace_id = $2::uuid
-                                  AND ($3 = '' OR a.resource_model_id = NULLIF($3, '')::uuid)
-				  AND v.title IS NOT NULL AND v.title ILIKE '%' || $4 || '%'
-				GROUP BY v.title
-				UNION ALL
-				SELECT tag.value, 'tag'::text, count(*)::bigint
-				FROM asset.assets a
-				JOIN asset.asset_versions v ON v.id = a.current_working_version_id
-				CROSS JOIN LATERAL jsonb_array_elements_text(
-					CASE WHEN jsonb_typeof(v.tags) = 'array' THEN v.tags ELSE '[]'::jsonb END
-				) tag(value)
-				WHERE a.organization_id = $1::uuid AND a.workspace_id = $2::uuid
-                                  AND ($3 = '' OR a.resource_model_id = NULLIF($3, '')::uuid)
-				  AND tag.value ILIKE '%' || $4 || '%'
-				GROUP BY tag.value
-			)
-			SELECT value, kind, item_count FROM source ORDER BY item_count DESC, kind, value LIMIT 20`,
+			SELECT v.title AS value, 'title'::text AS kind, count(*)::bigint AS item_count
+			FROM asset.assets a
+			JOIN asset.asset_versions v ON v.id = a.current_working_version_id
+			WHERE a.organization_id = $1::uuid AND a.workspace_id = $2::uuid
+                          AND ($3 = '' OR a.resource_model_id = NULLIF($3, '')::uuid)
+			  AND v.title IS NOT NULL AND v.title ILIKE '%' || $4 || '%'
+			GROUP BY v.title
+			ORDER BY item_count DESC, kind, value LIMIT 20`,
 			principal.OrganizationID, workspaceID, modelID, q)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "search_suggestions_failed")

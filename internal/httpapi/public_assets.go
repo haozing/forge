@@ -14,6 +14,8 @@ import (
 
 // PublicAsset is deliberately a read-only projection. It never exposes
 // workspace membership, source credentials, audit metadata, or draft fields.
+// Tag facts left the version jsonb in phase 2; the public site content contract
+// arrives with /api/public/v2/sites in phase 5.
 type PublicAsset struct {
 	ID                   string         `json:"id"`
 	WorkspaceID          string         `json:"workspace_id"`
@@ -23,7 +25,6 @@ type PublicAsset struct {
 	Title                *string        `json:"title"`
 	Markdown             *string        `json:"markdown,omitempty"`
 	Fields               map[string]any `json:"fields"`
-	Tags                 []string       `json:"tags"`
 	Visibility           string         `json:"visibility"`
 	PublicationStatus    string         `json:"publication_status"`
 	UpdatedAt            string         `json:"updated_at"`
@@ -57,7 +58,7 @@ func publicAssets(deps Dependencies) http.HandlerFunc {
 		rows, err := deps.Store.Pool.Query(r.Context(), `
 			SELECT a.id::text, a.workspace_id::text, a.resource_model_id::text,
 			       rm.content_kind, v.resource_model_version_id::text, v.title,
-			       v.markdown, v.fields, v.tags, a.visibility,
+			       v.markdown, v.fields, a.visibility,
 			       a.publication_status, a.updated_at::text
 			FROM asset.assets a
 			JOIN asset.asset_versions v ON v.id = a.current_published_version_id
@@ -108,7 +109,7 @@ func publicAsset(deps Dependencies) http.HandlerFunc {
 		row := deps.Store.Pool.QueryRow(r.Context(), `
 			SELECT a.id::text, a.workspace_id::text, a.resource_model_id::text,
 			       rm.content_kind, v.resource_model_version_id::text, v.title,
-			       v.markdown, v.fields, v.tags, a.visibility,
+			       v.markdown, v.fields, a.visibility,
 			       a.publication_status, a.updated_at::text
 			FROM asset.assets a
 			JOIN asset.asset_versions v ON v.id = a.current_published_version_id
@@ -131,27 +132,18 @@ func publicAsset(deps Dependencies) http.HandlerFunc {
 
 func scanPublicAsset(row interface{ Scan(...any) error }) (PublicAsset, error) {
 	var item PublicAsset
-	var fields, tags []byte
+	var fields []byte
 	if err := row.Scan(&item.ID, &item.WorkspaceID, &item.ResourceModelID,
 		&item.ContentKind, &item.ResourceModelVersion, &item.Title, &item.Markdown,
-		&fields, &tags, &item.Visibility, &item.PublicationStatus, &item.UpdatedAt); err != nil {
+		&fields, &item.Visibility, &item.PublicationStatus, &item.UpdatedAt); err != nil {
 		return PublicAsset{}, err
 	}
 	item.Fields = decodePublicMap(fields)
-	item.Tags = decodePublicStrings(tags)
 	return item, nil
 }
 
 func decodePublicMap(raw []byte) map[string]any {
 	result := map[string]any{}
-	if len(raw) > 0 {
-		_ = json.Unmarshal(raw, &result)
-	}
-	return result
-}
-
-func decodePublicStrings(raw []byte) []string {
-	result := []string{}
 	if len(raw) > 0 {
 		_ = json.Unmarshal(raw, &result)
 	}

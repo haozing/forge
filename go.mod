@@ -6,12 +6,15 @@ require (
 	github.com/aliyun/alibabacloud-oss-go-sdk-v2 v1.5.3
 	github.com/cloudwego/eino v0.9.15
 	github.com/cloudwego/eino-ext/components/model/openai v0.1.13
+	github.com/eino-contrib/jsonschema v1.0.3
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.7.2
 	github.com/riverqueue/river v0.18.0
 	github.com/riverqueue/river/riverdriver/riverpgxv5 v0.18.0
 	github.com/riverqueue/river/rivertype v0.18.0
+	github.com/yuin/goldmark v1.7.8
 	golang.org/x/crypto v0.31.0
+	golang.org/x/text v0.22.0
 )
 
 require (
@@ -24,7 +27,6 @@ require (
 	github.com/cloudwego/eino-ext/libs/acl/openai v0.1.17 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
-	github.com/eino-contrib/jsonschema v1.0.3 // indirect
 	github.com/evanphx/json-patch v0.5.2 // indirect
 	github.com/goph/emperror v0.17.2 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
@@ -57,7 +59,6 @@ require (
 	golang.org/x/exp v0.0.0-20230713183714-613f0c0eb8a1 // indirect
 	golang.org/x/sync v0.11.0 // indirect
 	golang.org/x/sys v0.29.0 // indirect
-	golang.org/x/text v0.22.0 // indirect
 	golang.org/x/time v0.4.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

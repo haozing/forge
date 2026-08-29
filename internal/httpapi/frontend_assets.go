@@ -11,6 +11,7 @@ import (
 
 	assetservice "agentchunzhi/internal/asset"
 	"agentchunzhi/internal/resourcemodel"
+	"agentchunzhi/internal/tag"
 )
 
 func writeMemberAssetError(w http.ResponseWriter, err error, fallback string) {
@@ -18,6 +19,14 @@ func writeMemberAssetError(w http.ResponseWriter, err error, fallback string) {
 	switch {
 	case errors.Is(err, assetservice.ErrInvalidInput):
 		writeError(w, http.StatusUnprocessableEntity, "validation_failed")
+	case errors.Is(err, assetservice.ErrUnknownTagKey), errors.Is(err, tag.ErrUnknownTag):
+		writeError(w, http.StatusUnprocessableEntity, "unknown_tag")
+	case errors.Is(err, tag.ErrContradictoryFilter):
+		writeError(w, http.StatusUnprocessableEntity, "contradictory_tag_filter")
+	case errors.Is(err, assetservice.ErrTooManyTags), errors.Is(err, tag.ErrTooManyTags):
+		writeError(w, http.StatusUnprocessableEntity, "too_many_tags")
+	case errors.Is(err, assetservice.ErrTagArchived), errors.Is(err, tag.ErrArchived):
+		writeError(w, http.StatusConflict, "tag_archived")
 	case errors.As(err, &schemaErr):
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"code": "model_schema_invalid", "message": "resource model schema is invalid", "request_id": requestID(), "details": schemaErr})
 	case errors.Is(err, assetservice.ErrForbidden):
@@ -57,11 +66,23 @@ func listMemberAssets(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusUnprocessableEntity, "validation_failed")
 			return
 		}
+		// Phase 2 tag semantics: tags_any/tags_all/tags_none replace the
+		// retired top-level tags parameter and the retired tag jsonb bypass in
+		// the filters document. Neither is honored, not even with a shim.
+		if _, legacy := query["tags"]; legacy {
+			writeError(w, http.StatusUnprocessableEntity, "legacy_tags_field_not_supported")
+			return
+		}
+		if _, legacy := filters["tags"]; legacy {
+			writeError(w, http.StatusUnprocessableEntity, "legacy_tags_field_not_supported")
+			return
+		}
 		page, err := deps.MemberAssetService.ListPage(r.Context(), principal, r.PathValue("workspaceId"), assetservice.MemberAssetListInput{
 			Query: query.Get("q"), ResourceModelID: query.Get("resource_model_id"), ContentKind: query.Get("content_kind"),
 			Visibility: query.Get("visibility"), PublicationStatus: query.Get("publication_status"),
 			CreatedBy: query.Get("created_by"), ContainerID: query.Get("container_id"), ParentAssetID: query.Get("parent_asset_id"),
-			Tags: query["tags"], Sort: query.Get("sort"), Filters: filters, Limit: limit, Cursor: query.Get("cursor"),
+			TagsAny: query["tags_any"], TagsAll: query["tags_all"], TagsNone: query["tags_none"],
+			Sort: query.Get("sort"), Filters: filters, Limit: limit, Cursor: query.Get("cursor"),
 		})
 		if err != nil {
 			writeMemberAssetError(w, err, "asset_list_failed")
@@ -212,8 +233,6 @@ func memberAssetResource(deps Dependencies) http.HandlerFunc {
 		patch(w, r)
 	}
 }
-
-
 
 type memberPublishAssetRequest struct {
 	DraftRevision string `json:"draft_revision"`

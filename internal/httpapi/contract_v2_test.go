@@ -48,7 +48,7 @@ func TestRequestIDMiddlewareEchoesAndPropagates(t *testing.T) {
 // TestV2HandlersNeverTouchStore is the architecture guard: the v2 handler
 // files must depend on domain services only, never on the raw store.
 func TestV2HandlersNeverTouchStore(t *testing.T) {
-	files := []string{"v2_handlers.go", "router_groups.go", "v2_identity.go", "v2_organization.go"}
+	files := []string{"v2_handlers.go", "router_groups.go", "v2_identity.go", "v2_organization.go", "v2_tag.go"}
 	for _, name := range files {
 		raw, err := os.ReadFile(filepath.Join(".", name))
 		if err != nil {

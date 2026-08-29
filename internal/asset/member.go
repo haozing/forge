@@ -14,6 +14,7 @@ import (
 	"agentchunzhi/internal/authz"
 	"agentchunzhi/internal/eventing"
 	"agentchunzhi/internal/store"
+	"agentchunzhi/internal/tag"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -35,10 +36,15 @@ type MemberAssetListInput struct {
 	CreatedBy         string
 	ContainerID       string
 	ParentAssetID     string
-	Tags              []string
-	Sort              string
-	Limit             int
-	Cursor            string
+	// TagsAny/TagsAll/TagsNone are normalized tag key groups; they resolve to
+	// workspace tag IDs before the list SQL is built. Legacy top-level "tags"
+	// input is rejected by the handler, never silently applied.
+	TagsAny  []string
+	TagsAll  []string
+	TagsNone []string
+	Sort     string
+	Limit    int
+	Cursor   string
 }
 
 type MemberAssetPage struct {
@@ -294,6 +300,24 @@ func (s MemberService) ListPage(ctx context.Context, principal auth.Principal, w
 		where = append(where, `EXISTS (SELECT 1 FROM content.document_parents dp
 			WHERE dp.organization_id = a.organization_id AND dp.child_asset_id = a.id
 			  AND dp.parent_asset_id = `+arg(input.ParentAssetID)+"::uuid)")
+	}
+	// Relational tag filters: EXISTS/NOT EXISTS over the working version, the
+	// same fixed shape the tag facet counts use.
+	tagFilter, err := s.resolveTagFilterKeys(ctx, principal, workspaceID, input)
+	if err != nil {
+		return MemberAssetPage{}, err
+	}
+	if len(tagFilter.Any) > 0 {
+		where = append(where, fmt.Sprintf(
+			"EXISTS (SELECT 1 FROM asset.asset_version_tags fx WHERE fx.asset_version_id = a.current_working_version_id AND fx.tag_id = ANY(%s::uuid[]))", arg(tagFilter.Any)))
+	}
+	for _, id := range tagFilter.All {
+		where = append(where, fmt.Sprintf(
+			"EXISTS (SELECT 1 FROM asset.asset_version_tags fa%s WHERE fa%s.asset_version_id = a.current_working_version_id AND fa%s.tag_id = ANY(%s::uuid[]))", id, id, id, arg([]string{id})))
+	}
+	if len(tagFilter.None) > 0 {
+		where = append(where, fmt.Sprintf(
+			"NOT EXISTS (SELECT 1 FROM asset.asset_version_tags fn WHERE fn.asset_version_id = a.current_working_version_id AND fn.tag_id = ANY(%s::uuid[]))", arg(tagFilter.None)))
 	}
 	if cursor.ID != "" {
 		comparison := "<"
@@ -587,6 +611,10 @@ func (s MemberService) Create(ctx context.Context, principal auth.Principal, wor
 		WHERE organization_id = $1::uuid AND id = $2::uuid
 	`, principal.OrganizationID, assetID, versionID, draftID); err != nil {
 		return MemberAsset{}, fmt.Errorf("link asset pointers: %w", err)
+	}
+	// The fresh draft inherits version provenance for tags (empty at create).
+	if err := initializeDraftTagsFromVersionTx(ctx, tx, principal.OrganizationID, draftID, versionID); err != nil {
+		return MemberAsset{}, err
 	}
 	row, err := LoadLifecycleTx(ctx, tx, principal.OrganizationID, assetID)
 	if err != nil {
@@ -991,6 +1019,14 @@ func (s MemberService) ConfirmVersion(ctx context.Context, principal auth.Princi
 	`, organizationID, assetID, newVersionID, principal.UserID); err != nil {
 		return MemberAssetVersion{}, fmt.Errorf("rebase draft after confirm: %w", err)
 	}
+	// The rebased draft starts unconfirmed and inherits the new snapshot's tags.
+	if err := initializeDraftTagsFromVersionTx(ctx, tx, organizationID, func() string {
+		var draftID string
+		_ = tx.QueryRow(ctx, `SELECT id::text FROM asset.asset_drafts WHERE organization_id = $1::uuid AND asset_id = $2::uuid`, organizationID, assetID).Scan(&draftID)
+		return draftID
+	}(), newVersionID); err != nil {
+		return MemberAssetVersion{}, err
+	}
 	RecordAssetAuditTx(ctx, tx, organizationID, workspaceID, principal, "asset.version.confirmed", assetID, map[string]any{
 		"workspace_id":      workspaceID,
 		"source_version_id": versionID,
@@ -1066,4 +1102,59 @@ func normalizeAssetPredicate(field string, rawOperations any) ([]map[string]any,
 var (
 	ErrApprovalRequired     = errors.New("publication requires approval")
 	ErrConfirmationRequired = errors.New("version requires human confirmation")
+	// ErrUnknownTagKey reports a tag filter key that resolves to no tag in the
+	// workspace: misspellings fail loudly instead of silently matching nothing.
+	ErrUnknownTagKey = errors.New("unknown tag key")
 )
+
+// resolveTagFilterKeys normalizes the any/all/none key groups (dedupe, size
+// and contradiction rules from the tag domain) and resolves every key to a
+// workspace tag ID with one inline query per non-empty group. Archived tags
+// resolve too so historical versions stay filterable.
+func (s MemberService) resolveTagFilterKeys(ctx context.Context, principal auth.Principal, workspaceID string, input MemberAssetListInput) (tag.ResolvedFilter, error) {
+	normalized, err := tag.NormalizeFilter(tag.KeyFilter{Any: input.TagsAny, All: input.TagsAll, None: input.TagsNone})
+	if err != nil {
+		return tag.ResolvedFilter{}, err
+	}
+	resolve := func(keys []string) ([]string, error) {
+		if len(keys) == 0 {
+			return nil, nil
+		}
+		rows, err := s.Store.Pool.Query(ctx, `
+			SELECT id::text FROM asset.tags
+			WHERE organization_id = $1::uuid AND workspace_id = $2::uuid AND normalized_key = ANY($3::text[])
+		`, principal.OrganizationID, workspaceID, keys)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+		ids := []string{}
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				return nil, err
+			}
+			ids = append(ids, id)
+		}
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		if len(ids) != len(keys) {
+			return nil, ErrUnknownTagKey
+		}
+		return ids, nil
+	}
+	anyIDs, err := resolve(normalized.Any)
+	if err != nil {
+		return tag.ResolvedFilter{}, err
+	}
+	allIDs, err := resolve(normalized.All)
+	if err != nil {
+		return tag.ResolvedFilter{}, err
+	}
+	noneIDs, err := resolve(normalized.None)
+	if err != nil {
+		return tag.ResolvedFilter{}, err
+	}
+	return tag.ResolvedFilter{Any: anyIDs, All: allIDs, None: noneIDs}, nil
+}

@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: AgentChunzhi v2 API
-  version: 2.0.0-phase1
+  version: 2.0.0-phase2
   description: |
     唯一 v2 契约。入口族：
     - /api/v2/... 成员会话和工作区管理 API
@@ -9,6 +9,7 @@ info:
     - /api/public/v2/... 匿名或站点访问 API
     阶段 0 冻结全局组件与核心资源名；未实现的领域只冻结资源命名，不注册假 handler。
     阶段 1 增补 sessions、me、preferences、password-resets、organization 与 workspace 治理/成员/邀请路径。
+    阶段 2 增补 tags、tag-facets 与 /api/open/v2/hooks/assets（tag_keys）；AssetDraft 支持 tag_ids。
 servers:
   - url: /
 tags:
@@ -244,7 +245,7 @@ paths:
     patch:
       tags: [assets]
       operationId: autosaveAssetDraft
-      description: AssetDraft 自动保存；If-Match 携带 draft revision
+      description: AssetDraft 自动保存；If-Match 携带 draft revision；tag_ids 省略表示保留，传数组（可空）表示整组替换
       parameters:
         - $ref: '#/components/parameters/AssetId'
         - $ref: '#/components/parameters/IfMatch'
@@ -256,7 +257,7 @@ paths:
               $ref: '#/components/schemas/AssetDraftPatch'
       responses:
         '200':
-          description: 已保存
+          description: 已保存（返回 draft 与当前标签 summaries）
           content:
             application/json:
               schema:
@@ -1282,6 +1283,279 @@ paths:
       responses:
         '204': { description: 已撤销 }
         '409': { $ref: '#/components/responses/Error' }
+  /api/v2/workspaces/{workspaceId}/tags:
+    get:
+      tags: [tags]
+      operationId: listTags
+      description: 工作区标签目录（默认只返回 active，游标稳定排序；usage 不参与排序）
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - name: q
+          in: query
+          schema: { type: string }
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [active, archived, all]
+            default: active
+        - name: sort
+          in: query
+          schema:
+            type: string
+            enum: [key:asc, display_name:asc, created_at:desc]
+            default: key:asc
+        - name: include_usage
+          in: query
+          schema: { type: boolean, default: false }
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: 标签分页
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/Tag' }
+                      page: { $ref: '#/components/schemas/CursorPage' }
+                  - $ref: '#/components/schemas/Envelope'
+    post:
+      tags: [tags]
+      operationId: createTag
+      description: 创建标签（tag.manage）；同 key 并发创建只有一个成功，其余 409 tag_key_exists
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [display_name]
+              properties:
+                key: { type: string, maxLength: 100 }
+                display_name: { type: string, maxLength: 100 }
+      responses:
+        '201':
+          description: 已创建
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Tag'
+                  - $ref: '#/components/schemas/Envelope'
+        '409': { $ref: '#/components/responses/Error' }
+  /api/v2/workspaces/{workspaceId}/tags/{tagId}:
+    get:
+      tags: [tags]
+      operationId: getTag
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/TagId'
+      responses:
+        '200':
+          description: 标签详情（含 ETag）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Tag'
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
+    patch:
+      tags: [tags]
+      operationId: renameTag
+      description: 仅接受 display_name；key/slug 是不可变身份；If-Match 必带且为 tag revision
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/TagId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [display_name]
+              properties:
+                display_name: { type: string, maxLength: 100 }
+      responses:
+        '200':
+          description: 已重命名
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Tag'
+                  - $ref: '#/components/schemas/Envelope'
+        '412': { $ref: '#/components/responses/Error' }
+  /api/v2/workspaces/{workspaceId}/tags/{tagId}/archive:
+    post:
+      tags: [tags]
+      operationId: archiveTag
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/TagId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/IfMatch'
+      responses:
+        '200':
+          description: 已归档（历史关系保持不变）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Tag'
+                  - $ref: '#/components/schemas/Envelope'
+        '409': { $ref: '#/components/responses/Error' }
+  /api/v2/workspaces/{workspaceId}/tags/{tagId}/restore:
+    post:
+      tags: [tags]
+      operationId: restoreTag
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/TagId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/IfMatch'
+      responses:
+        '200':
+          description: 已恢复（key/slug 身份不变）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Tag'
+                  - $ref: '#/components/schemas/Envelope'
+        '409': { $ref: '#/components/responses/Error' }
+  /api/v2/workspaces/{workspaceId}/tag-facets:
+    get:
+      tags: [tags]
+      operationId: listTagFacets
+      description: 标签 facet 计数（COUNT(DISTINCT asset_id)）；未知 key → 422 unknown_tag，矛盾组合 → 422 contradictory_tag_filter
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - name: scope
+          in: query
+          schema:
+            type: string
+            enum: [working, published]
+            default: working
+        - name: resource_model_id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: visibility
+          in: query
+          schema: { type: string }
+        - name: publication_status
+          in: query
+          schema: { type: string }
+        - name: tags_any
+          in: query
+          description: 可重复的 query 参数（normalized key）
+          schema:
+            type: array
+            items: { type: string }
+          style: form
+          explode: true
+        - name: tags_all
+          in: query
+          schema:
+            type: array
+            items: { type: string }
+          style: form
+          explode: true
+        - name: tags_none
+          in: query
+          schema:
+            type: array
+            items: { type: string }
+          style: form
+          explode: true
+        - name: tag_status
+          in: query
+          schema:
+            type: string
+            enum: [active, archived]
+            default: active
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: facet 计数（按计数降序）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/TagFacet' }
+                      page: { $ref: '#/components/schemas/CursorPage' }
+                  - $ref: '#/components/schemas/Envelope'
+        '422': { $ref: '#/components/responses/Error' }
+  /api/open/v2/hooks/assets:
+    post:
+      tags: [tags]
+      operationId: createWebhookAsset
+      description: |
+        Webhook 资产推送（Open API Key 认证）。tag_keys 只能引用同 workspace 已有 active 标签，
+        unknown/archived key 整个请求 422（unknown_tag / tag_archived）；请求含旧 tags 字段返回
+        422 legacy_tags_field_not_supported。
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                source: { type: string, enum: [webhook] }
+                external_ref: { type: string, minLength: 16, maxLength: 200 }
+                workspace_id: { type: string, format: uuid }
+                resource_model_id: { type: string, format: uuid }
+                title: { type: string, nullable: true }
+                markdown: { type: string, nullable: true }
+                fields: { type: object, additionalProperties: true }
+                tag_keys:
+                  type: array
+                  maxItems: 100
+                  items: { type: string }
+      responses:
+        '201':
+          description: 已创建
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    properties:
+                      asset: { $ref: '#/components/schemas/Asset' }
+                      resource_model_id: { type: string, format: uuid }
+                      workspace_id: { type: string, format: uuid }
+                      external_ref: { type: string }
+                      received_at: { type: string, format: date-time }
+                      replayed: { type: boolean }
+                  - $ref: '#/components/schemas/Envelope'
+        '200':
+          description: external_ref 重放
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    properties:
+                      asset: { $ref: '#/components/schemas/Asset' }
+                      replayed: { type: boolean }
+                  - $ref: '#/components/schemas/Envelope'
+        '422': { $ref: '#/components/responses/Error' }
 components:
   responses:
     Error:
@@ -1312,6 +1586,11 @@ components:
       schema: { type: string, format: uuid }
     MembershipId:
       name: membershipId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    TagId:
+      name: tagId
       in: path
       required: true
       schema: { type: string, format: uuid }
@@ -1431,6 +1710,11 @@ components:
         summary: { type: string, nullable: true }
         markdown: { type: string, nullable: true }
         fields: { type: object, additionalProperties: true, nullable: true }
+        tag_ids:
+          type: array
+          maxItems: 100
+          items: { type: string, format: uuid }
+          description: 省略表示保留当前标签；传数组（可空）表示整组替换
     AssetDraft:
       type: object
       properties:
@@ -1442,8 +1726,55 @@ components:
         summary: { type: string }
         markdown: { type: string }
         fields: { type: object, additionalProperties: true }
+        tags:
+          type: array
+          items: { $ref: '#/components/schemas/TagSummary' }
         updated_by: { type: string, format: uuid }
         updated_at: { type: string, format: date-time }
+    TagSummary:
+      type: object
+      description: 草稿/版本/查询结果共用的标签摘要（不暴露裸字符串）
+      properties:
+        id: { type: string, format: uuid }
+        key: { type: string, description: normalized key }
+        display_name: { type: string }
+        slug: { type: string }
+        status:
+          type: string
+          enum: [active, archived]
+    TagUsage:
+      type: object
+      properties:
+        working_assets: { type: integer, format: int64 }
+        published_assets: { type: integer, format: int64 }
+        open_drafts: { type: integer, format: int64 }
+    Tag:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        workspace_id: { type: string, format: uuid }
+        key: { type: string }
+        display_name: { type: string }
+        slug: { type: string }
+        status:
+          type: string
+          enum: [active, archived]
+        revision: { type: integer }
+        created_by: { type: string, format: uuid }
+        updated_by: { type: string, format: uuid }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        archived_at: { type: string, format: date-time, nullable: true }
+        etag: { type: string }
+        usage:
+          nullable: true
+          allOf:
+            - $ref: '#/components/schemas/TagUsage'
+    TagFacet:
+      type: object
+      properties:
+        tag: { $ref: '#/components/schemas/TagSummary' }
+        asset_count: { type: integer, format: int64 }
     AssetVersion:
       type: object
       properties:

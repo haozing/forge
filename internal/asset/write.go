@@ -130,7 +130,7 @@ func (s Service) Create(ctx context.Context, principal auth.Principal, allowedMo
 	assetID, versionID, versionNo, err := createAssetWithFirstVersionTx(ctx, tx,
 		principal.OrganizationID, workspaceID, input.ResourceModelID, modelVersionID,
 		rawInputID, OriginHuman, derefString(input.Title), "", derefString(input.Markdown),
-		fields, principal.UserID)
+		fields, nil, "", principal.UserID)
 	if err != nil {
 		return AssetResult{}, err
 	}
@@ -168,8 +168,11 @@ func (s Service) Create(ctx context.Context, principal auth.Principal, allowedMo
 // (pointers NULL, the deferred triggers tolerate this inside the create
 // transaction), appends the first sealed version through CreateVersionTx,
 // inserts the clean shared draft at revision 1 and links both pointers.
+// tagIDs are the resolved workspace tag identities of the first snapshot;
+// tagSource is their fallback provenance ("import"/"webhook"). The fresh draft
+// inherits the version relations so version and draft stay consistent.
 // Callers own validation, idempotency, events and audit.
-func createAssetWithFirstVersionTx(ctx context.Context, tx pgx.Tx, organizationID, workspaceID, resourceModelID, resourceModelVersionID, rawInputID, origin, title, summary, markdown string, fields map[string]any, actorID string) (string, string, int64, error) {
+func createAssetWithFirstVersionTx(ctx context.Context, tx pgx.Tx, organizationID, workspaceID, resourceModelID, resourceModelVersionID, rawInputID, origin, title, summary, markdown string, fields map[string]any, tagIDs []string, tagSource, actorID string) (string, string, int64, error) {
 	var assetID string
 	if err := tx.QueryRow(ctx, `
 		INSERT INTO asset.assets (organization_id, workspace_id, resource_model_id, created_by)
@@ -190,6 +193,8 @@ func createAssetWithFirstVersionTx(ctx context.Context, tx pgx.Tx, organizationI
 		Summary:                summary,
 		Markdown:               markdown,
 		Fields:                 fields,
+		TagIDs:                 tagIDs,
+		TagSource:              tagSource,
 		SourceRawInputID:       rawInputID,
 		CreatedBy:              actorID,
 	})
@@ -213,6 +218,11 @@ func createAssetWithFirstVersionTx(ctx context.Context, tx pgx.Tx, organizationI
 		WHERE organization_id = $1::uuid AND id = $2::uuid
 	`, organizationID, assetID, versionID, draftID); err != nil {
 		return "", "", 0, fmt.Errorf("link asset pointers: %w", err)
+	}
+	// The fresh draft inherits the version's tag relations and provenance so
+	// a later commit reproduces the same tag set.
+	if err := initializeDraftTagsFromVersionTx(ctx, tx, organizationID, draftID, versionID); err != nil {
+		return "", "", 0, err
 	}
 	return assetID, versionID, versionNo, nil
 }

@@ -13,6 +13,7 @@ func newRouter(deps Dependencies) *http.ServeMux {
 	registerV2IdentityRoutes(deps, mux)
 	registerV2OrganizationRoutes(deps, mux)
 	registerV2AssetRoutes(deps, mux)
+	registerV2TagRoutes(deps, mux)
 	registerV2ReviewRoutes(deps, mux)
 	registerOpenV2Routes(deps, mux)
 	registerPublicV2Routes(deps, mux)
@@ -169,10 +170,21 @@ func registerV2ReviewRoutes(deps Dependencies, mux *http.ServeMux) {
 	mux.HandleFunc("/api/v2/workspaces/{workspaceId}/publication-requests/{requestId}/comments", v2PublicationComments(deps))
 }
 
+// registerV2TagRoutes holds the phase 2 tag domain surface: the workspace
+// catalog, lifecycle commands and facet counts. The legacy frontend tag
+// parameters stay only as ledger-tracked pending retirements.
+func registerV2TagRoutes(deps Dependencies, mux *http.ServeMux) {
+	mux.HandleFunc("/api/v2/workspaces/{workspaceId}/tags", v2TagCollection(deps))
+	mux.HandleFunc("/api/v2/workspaces/{workspaceId}/tags/{tagId}", v2TagResource(deps))
+	mux.HandleFunc("/api/v2/workspaces/{workspaceId}/tags/{tagId}/archive", v2TagArchive(deps))
+	mux.HandleFunc("/api/v2/workspaces/{workspaceId}/tags/{tagId}/restore", v2TagRestore(deps))
+	mux.HandleFunc("/api/v2/workspaces/{workspaceId}/tag-facets", v2TagFacets(deps))
+}
+
 func registerOpenV2Routes(deps Dependencies, mux *http.ServeMux) {
-	_ = deps
-	// /api/open/v2/query arrives with phase 3; webhook intake moves to
-	// /api/open/v2 in phase 2.
+	// Phase 2 moved webhook intake off the retired /api/open/v1 path; query
+	// follows in phase 3.
+	mux.HandleFunc("/api/open/v2/hooks/assets", webhookCreateAsset(deps))
 }
 
 func registerPublicV2Routes(deps Dependencies, mux *http.ServeMux) {
@@ -339,7 +351,8 @@ func registerLegacyAgentRoutes(deps Dependencies, mux *http.ServeMux) {
 	mux.HandleFunc("/api/open/v1/assets/{assetId}/references", assetReferences(deps))
 	mux.HandleFunc("/api/open/v1/agent/tasks", createAgentTask(deps))
 	mux.HandleFunc("/api/open/v1/agent/tasks/{taskId}", getAgentTask(deps))
-	mux.HandleFunc("/api/open/v1/hooks/assets", webhookCreateAsset(deps))
+	// /api/open/v1/hooks/assets retired in phase 2: webhook intake now lives at
+	// /api/open/v2/hooks/assets (see docs/route-retirement-ledger.md).
 	mux.HandleFunc("/api/open/v1/attachments/{attachmentId}/download", downloadAttachment(deps))
 }
 

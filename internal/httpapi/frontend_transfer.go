@@ -15,6 +15,7 @@ import (
 
 	assetservice "agentchunzhi/internal/asset"
 	"agentchunzhi/internal/store"
+	"agentchunzhi/internal/tag"
 )
 
 const maxImportBodyBytes = 8 * 1024 * 1024
@@ -23,6 +24,10 @@ func writeTransferError(w http.ResponseWriter, err error, fallback string) {
 	switch {
 	case errors.Is(err, assetservice.ErrInvalidInput):
 		writeError(w, http.StatusUnprocessableEntity, "validation_failed")
+	case errors.Is(err, tag.ErrCreatePermission):
+		// unknown_tag_policy=create creates catalog resources on behalf of the
+		// submitter and therefore demands tag.manage.
+		writeError(w, http.StatusForbidden, "tag_manage_required")
 	case errors.Is(err, assetservice.ErrForbidden):
 		writeError(w, http.StatusForbidden, "workspace_access_denied")
 	case errors.Is(err, assetservice.ErrNotFound):

@@ -20,7 +20,7 @@ if errorlevel 1 exit /b 1
 
 if not "%RETRIEVAL_INTEGRATION_DATABASE_URL%"=="" (
   echo [3/4] Real PostgreSQL plus PGroonga integration test
-  docker exec -w /src -e RETRIEVAL_INTEGRATION_DATABASE_URL="%RETRIEVAL_INTEGRATION_DATABASE_URL%" "%BUSINESS_CONTAINER%" go test ./internal/retrieval -run TestPGroongaProjectionAndFulltextQuery -count=1 -v
+  docker exec -w /src -e RETRIEVAL_INTEGRATION_DATABASE_URL="%RETRIEVAL_INTEGRATION_DATABASE_URL%" "%BUSINESS_CONTAINER%" go test ./internal/retrieval -run TestPGroongaProjectionPipelineV2 -count=1 -v
   if errorlevel 1 exit /b 1
 ) else (
   echo [3/4] Real PostgreSQL plus PGroonga integration test skipped: set RETRIEVAL_INTEGRATION_DATABASE_URL to enable it.

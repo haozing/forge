@@ -13,7 +13,6 @@ import (
 	assetservice "agentchunzhi/internal/asset"
 	"agentchunzhi/internal/auth"
 	"agentchunzhi/internal/eventing"
-	"agentchunzhi/internal/retrieval"
 	"agentchunzhi/internal/store"
 
 	"github.com/jackc/pgx/v5"
@@ -651,9 +650,11 @@ func (s Service) PublishNote(ctx context.Context, principal auth.Principal, idem
 		}
 		return result, nil
 	}
-	var organizationID, noteAssetID, versionID, previousPublished string
+	var organizationID, noteAssetID, versionID, workspaceID, previousPublished string
+	var assetRevision int64
 	err = tx.QueryRow(ctx, `
 		SELECT nb.organization_id::text, nb.note_asset_id::text, av.id::text,
+		       c.workspace_id::text, a.revision,
 		       COALESCE(a.current_published_version_id::text, '')
 	FROM content.note_bindings nb
 		JOIN content.conversations c ON c.id = nb.conversation_id
@@ -664,7 +665,8 @@ func (s Service) PublishNote(ctx context.Context, principal auth.Principal, idem
                   AND av.id = $4::uuid
                   AND wm.role <> 'viewer' AND (c.visibility = 'workspace' OR c.initiator_user_id = $3::uuid)
 		FOR UPDATE OF nb, a, av
-	`, principal.OrganizationID, conversationID, principal.UserID, expectedVersionID).Scan(&organizationID, &noteAssetID, &versionID, &previousPublished)
+	`, principal.OrganizationID, conversationID, principal.UserID, expectedVersionID).Scan(
+		&organizationID, &noteAssetID, &versionID, &workspaceID, &assetRevision, &previousPublished)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return NotePublishResult{}, ErrNotFound
 	}
@@ -681,13 +683,25 @@ func (s Service) PublishNote(ctx context.Context, principal auth.Principal, idem
 	if s.Events.Queue == nil {
 		return NotePublishResult{}, errors.New("event store is not initialized")
 	}
-	if previousPublished != "" && previousPublished != versionID {
-		if err := retrieval.UpsertProjectionTx(ctx, tx, previousPublished); err != nil {
-			return NotePublishResult{}, err
-		}
-	}
-	if err := retrieval.UpsertProjectionTx(ctx, tx, versionID); err != nil {
-		return NotePublishResult{}, err
+	// Phase 3: note publication emits the asset.published fact; the retrieval
+	// coordinator derives projection runs from it asynchronously.
+	if _, err := s.Events.AppendTx(ctx, tx, eventing.Event{
+		OrganizationID:   organizationID,
+		WorkspaceID:      workspaceID,
+		EventType:        eventing.EventAssetPublished,
+		AggregateType:    "asset",
+		AggregateID:      noteAssetID,
+		AggregateVersion: assetRevision,
+		PayloadVersion:   eventing.PayloadVersionV1,
+		Actor:            eventing.ActorFromPrincipal(principal),
+		Payload: eventing.AssetPublishedPayload{
+			AssetID:           noteAssetID,
+			VersionID:         versionID,
+			PreviousVersionID: previousPublished,
+			WorkspaceID:       workspaceID,
+		},
+	}); err != nil {
+		return NotePublishResult{}, fmt.Errorf("record note publish fact: %w", err)
 	}
 	result := NotePublishResult{ConversationID: conversationID, NoteAssetID: noteAssetID, AssetVersionID: versionID, PublicationStatus: "published"}
 	body, _ := json.Marshal(result)

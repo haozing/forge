@@ -266,14 +266,20 @@ func (s Service) vectorCandidates(ctx context.Context, p auth.Principal, q strin
 	if configCount != len(models) || identityCount != 1 || dimensions <= 0 || modelName == "" || modelVersion == "" {
 		return nil, fmt.Errorf("active embedding config is unavailable or inconsistent")
 	}
-	vs, e := s.Embeddings.Embed(ctx, []string{q})
-	if e != nil || len(vs) != 1 {
+	// Phase 3 compile adaptation: the v2 EmbeddingProvider splits document
+	// and query embedding; the full query rewrite replaces this repository.
+	vec, e := s.Embeddings.EmbedQuery(ctx, q)
+	if e != nil {
 		return nil, fmt.Errorf("query embedding failed: %w", e)
 	}
-	if len(vs[0]) != dimensions {
-		return nil, fmt.Errorf("query embedding dimension %d does not equal active dimension %d", len(vs[0]), dimensions)
+	if len(vec) != dimensions {
+		return nil, fmt.Errorf("query embedding dimension %d does not equal active dimension %d", len(vec), dimensions)
 	}
-	literal, e := vectorvalue.Literal(vs[0])
+	vec64 := make([]float64, len(vec))
+	for i, v := range vec {
+		vec64[i] = float64(v)
+	}
+	literal, e := vectorvalue.Literal(vec64)
 	if e != nil {
 		return nil, fmt.Errorf("encode query embedding: %w", e)
 	}

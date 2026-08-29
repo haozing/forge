@@ -8,6 +8,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Phase 1 mailer providers.
@@ -16,37 +17,48 @@ const (
 	MailerProviderCapture = "capture"
 )
 
+// DefaultEmbeddingDimensions is the fixed v2 semantic ABI (doc §13.1).
+const DefaultEmbeddingDimensions = 1024
+
 type Config struct {
-	Environment                     string
-	HTTPAddr                        string
-	DatabaseURL                     string
-	MigrationPath                   string
-	OSSRegion                       string
-	OSSBucket                       string
-	OSSEndpoint                     string
-	OSSPrefix                       string
-	AttachmentMaxBytes              int64
-	AttachmentClamAVAddr            string
-	AttachmentScanTimeoutSeconds    int
-	ASREndpoint                     string
-	ASRToken                        string
-	ASRModel                        string
-	ASRProvider                     string
-	ASRRegion                       string
-	ASREngine                       string
-	TencentSecretID                 string
-	TencentSecretKey                string
-	ASRTimeoutSeconds               int
-	EmbeddingEndpoint               string
-	EmbeddingToken                  string
-	EmbeddingModel                  string
-	EmbeddingProtocol               string
-	EmbeddingDimension              int
-	RerankerEndpoint                string
-	RerankerToken                   string
-	RerankerModelVersion            string
-	RerankerProtocol                string
-	SearchCursorSecret              string
+	Environment                  string
+	HTTPAddr                     string
+	DatabaseURL                  string
+	MigrationPath                string
+	OSSRegion                    string
+	OSSBucket                    string
+	OSSEndpoint                  string
+	OSSPrefix                    string
+	AttachmentMaxBytes           int64
+	AttachmentClamAVAddr         string
+	AttachmentScanTimeoutSeconds int
+	ASREndpoint                  string
+	ASRToken                     string
+	ASRModel                     string
+	ASRProvider                  string
+	ASRRegion                    string
+	ASREngine                    string
+	TencentSecretID              string
+	TencentSecretKey             string
+	ASRTimeoutSeconds            int
+	EmbeddingEndpoint            string
+	EmbeddingToken               string
+	EmbeddingModel               string
+	EmbeddingProtocol            string
+	EmbeddingDimension           int
+	RerankerEndpoint             string
+	RerankerToken                string
+	RerankerModelVersion         string
+	RerankerProtocol             string
+	SearchCursorSecret           string
+	// Phase 3 retrieval runtime configuration.
+	QueryHashSecret                 string
+	EmbeddingManifestKey            string
+	EmbeddingModelVersion           string
+	RerankerModel                   string
+	RetrievalEmbeddingAllowlist     []string
+	RetrievalSessionTTL             time.Duration
+	RetrievalQueryTimeout           time.Duration
 	AgentModelSecretEncryptionKey   string
 	AgentCheckpointEncryptionKey    string
 	AgentModelAllowedHosts          []string
@@ -90,16 +102,23 @@ func Load() Config {
 		TencentSecretID:                 os.Getenv("TENCENTCLOUD_SECRET_ID"),
 		TencentSecretKey:                os.Getenv("TENCENTCLOUD_SECRET_KEY"),
 		ASRTimeoutSeconds:               int(envInt64OrDefault("ASR_TIMEOUT_SECONDS", 300)),
-		EmbeddingEndpoint:               os.Getenv("EMBEDDING_ENDPOINT"),
-		EmbeddingToken:                  os.Getenv("EMBEDDING_TOKEN"),
-		EmbeddingModel:                  envOrDefault("EMBEDDING_MODEL", "hash-embedding"),
-		EmbeddingProtocol:               envOrDefault("EMBEDDING_PROTOCOL", "generic"),
-		EmbeddingDimension:              int(envInt64OrDefault("EMBEDDING_DIMENSION", 1024)),
-		RerankerEndpoint:                os.Getenv("RERANKER_ENDPOINT"),
-		RerankerToken:                   os.Getenv("RERANKER_TOKEN"),
-		RerankerModelVersion:            envOrDefault("RERANKER_MODEL_VERSION", "bge-reranker-v2-m3"),
-		RerankerProtocol:                envOrDefault("RERANKER_PROTOCOL", "generic"),
-		SearchCursorSecret:              envOrDefault("SEARCH_CURSOR_SECRET", "agentchunzhi-r3-cursor-secret"),
+		EmbeddingEndpoint:               strings.TrimSpace(os.Getenv("RETRIEVAL_EMBEDDING_ENDPOINT")),
+		EmbeddingToken:                  os.Getenv("RETRIEVAL_EMBEDDING_TOKEN"),
+		EmbeddingModel:                  strings.TrimSpace(os.Getenv("RETRIEVAL_EMBEDDING_MODEL")),
+		EmbeddingModelVersion:           strings.TrimSpace(os.Getenv("RETRIEVAL_EMBEDDING_MODEL_VERSION")),
+		EmbeddingManifestKey:            strings.TrimSpace(os.Getenv("RETRIEVAL_EMBEDDING_MANIFEST_KEY")),
+		EmbeddingProtocol:               envOrDefault("RETRIEVAL_EMBEDDING_PROTOCOL", "generic"),
+		EmbeddingDimension:              int(envInt64OrDefault("RETRIEVAL_EMBEDDING_DIMENSIONS", DefaultEmbeddingDimensions)),
+		RerankerEndpoint:                strings.TrimSpace(os.Getenv("RETRIEVAL_RERANKER_ENDPOINT")),
+		RerankerToken:                   os.Getenv("RETRIEVAL_RERANKER_TOKEN"),
+		RerankerModel:                   strings.TrimSpace(os.Getenv("RETRIEVAL_RERANKER_MODEL")),
+		RerankerModelVersion:            strings.TrimSpace(os.Getenv("RETRIEVAL_RERANKER_MODEL_VERSION")),
+		RerankerProtocol:                strings.TrimSpace(envOrDefault("RETRIEVAL_RERANKER_PROTOCOL", "generic")),
+		SearchCursorSecret:              os.Getenv("SEARCH_CURSOR_SECRET"),
+		QueryHashSecret:                 os.Getenv("QUERY_HASH_SECRET"),
+		RetrievalEmbeddingAllowlist:     envCSV("RETRIEVAL_EMBEDDING_ALLOWLIST"),
+		RetrievalSessionTTL:             envDurationOrDefault("RETRIEVAL_SESSION_TTL", 10*time.Minute),
+		RetrievalQueryTimeout:           envDurationOrDefault("RETRIEVAL_QUERY_TIMEOUT", 5*time.Second),
 		AgentModelSecretEncryptionKey:   strings.TrimSpace(os.Getenv("AGENT_MODEL_SECRET_ENCRYPTION_KEY")),
 		AgentCheckpointEncryptionKey:    strings.TrimSpace(os.Getenv("AGENT_CHECKPOINT_ENCRYPTION_KEY")),
 		AgentModelAllowedHosts:          envCSV("AGENT_MODEL_ALLOWED_HOSTS"),
@@ -241,7 +260,98 @@ func (c Config) Validate() error {
 	default:
 		return fmt.Errorf("MAILER_PROVIDER must be %s or %s", MailerProviderSMTP, MailerProviderCapture)
 	}
+
+	// Phase 3 retrieval secrets: never a built-in default, production fails
+	// fast when missing, every environment rejects weak material.
+	for name, secret := range map[string]string{
+		"SEARCH_CURSOR_SECRET": c.SearchCursorSecret,
+		"QUERY_HASH_SECRET":    c.QueryHashSecret,
+	} {
+		if len(secret) > 0 && len(secret) < 32 {
+			return fmt.Errorf("%s must be at least 32 bytes", name)
+		}
+		if production && len(secret) == 0 {
+			return fmt.Errorf("%s is required in production (at least 32 random bytes)", name)
+		}
+	}
+	if c.SearchCursorSecret == c.QueryHashSecret && len(c.QueryHashSecret) > 0 {
+		return errors.New("QUERY_HASH_SECRET must differ from SEARCH_CURSOR_SECRET")
+	}
+
+	// Embedding manifest: production fails fast on missing required values;
+	// incomplete manifests elsewhere only mark semantic unavailable (the
+	// readiness report surfaces SemanticUnavailable()).
+	if production && !c.SemanticConfigured() {
+		return errors.New("RETRIEVAL_EMBEDDING_* manifest is required in production (manifest key, endpoint, token, model, model version, dimensions=1024, protocol)")
+	}
+	if c.SemanticConfigured() && c.EmbeddingDimension != DefaultEmbeddingDimensions {
+		return fmt.Errorf("RETRIEVAL_EMBEDDING_DIMENSIONS must be %d", DefaultEmbeddingDimensions)
+	}
+	if partial := c.embeddingPartialFields(); len(partial) > 0 && len(partial) < 7 {
+		return fmt.Errorf("RETRIEVAL_EMBEDDING_* manifest is partial: %s must all be set together", strings.Join(partial, ", "))
+	}
+
+	// Reranker is optional but must be configured as a complete group.
+	if partial := c.rerankerPartialFields(); len(partial) > 0 && len(partial) < 5 {
+		return fmt.Errorf("RETRIEVAL_RERANKER_* configuration is partial: %s must all be set together", strings.Join(partial, ", "))
+	}
 	return nil
+}
+
+// SemanticConfigured reports whether the semantic embedding manifest is
+// complete enough to build a provider.
+func (c Config) SemanticConfigured() bool {
+	return len(c.embeddingPartialFields()) == 0 && c.EmbeddingDimension == DefaultEmbeddingDimensions
+}
+
+// SemanticUnavailable reports the readiness gap for an incomplete semantic
+// manifest: not fatal, but reported by /readyz (doc §13.1).
+func (c Config) SemanticUnavailable() bool { return !c.SemanticConfigured() }
+
+func (c Config) embeddingPartialFields() []string {
+	fields := make([]string, 0, 7)
+	if strings.TrimSpace(c.EmbeddingManifestKey) == "" {
+		fields = append(fields, "RETRIEVAL_EMBEDDING_MANIFEST_KEY")
+	}
+	if strings.TrimSpace(c.EmbeddingEndpoint) == "" {
+		fields = append(fields, "RETRIEVAL_EMBEDDING_ENDPOINT")
+	}
+	if strings.TrimSpace(c.EmbeddingToken) == "" {
+		fields = append(fields, "RETRIEVAL_EMBEDDING_TOKEN")
+	}
+	if strings.TrimSpace(c.EmbeddingModel) == "" {
+		fields = append(fields, "RETRIEVAL_EMBEDDING_MODEL")
+	}
+	if strings.TrimSpace(c.EmbeddingModelVersion) == "" {
+		fields = append(fields, "RETRIEVAL_EMBEDDING_MODEL_VERSION")
+	}
+	if c.EmbeddingDimension <= 0 {
+		fields = append(fields, "RETRIEVAL_EMBEDDING_DIMENSIONS")
+	}
+	if strings.TrimSpace(c.EmbeddingProtocol) == "" {
+		fields = append(fields, "RETRIEVAL_EMBEDDING_PROTOCOL")
+	}
+	return fields
+}
+
+func (c Config) rerankerPartialFields() []string {
+	fields := make([]string, 0, 5)
+	if strings.TrimSpace(c.RerankerEndpoint) == "" {
+		fields = append(fields, "RETRIEVAL_RERANKER_ENDPOINT")
+	}
+	if strings.TrimSpace(c.RerankerToken) == "" {
+		fields = append(fields, "RETRIEVAL_RERANKER_TOKEN")
+	}
+	if strings.TrimSpace(c.RerankerModel) == "" {
+		fields = append(fields, "RETRIEVAL_RERANKER_MODEL")
+	}
+	if strings.TrimSpace(c.RerankerModelVersion) == "" {
+		fields = append(fields, "RETRIEVAL_RERANKER_MODEL_VERSION")
+	}
+	if strings.TrimSpace(c.RerankerProtocol) == "" {
+		fields = append(fields, "RETRIEVAL_RERANKER_PROTOCOL")
+	}
+	return fields
 }
 
 func envOrDefault(key, fallback string) string {
@@ -253,6 +363,16 @@ func envOrDefault(key, fallback string) string {
 
 func envInt64OrDefault(key string, fallback int64) int64 {
 	value, err := strconv.ParseInt(os.Getenv(key), 10, 64)
+	if err != nil || value <= 0 {
+		return fallback
+	}
+	return value
+}
+
+// envDurationOrDefault parses Go duration strings ("10m", "90s"); invalid or
+// non-positive values fall back to the default.
+func envDurationOrDefault(key string, fallback time.Duration) time.Duration {
+	value, err := time.ParseDuration(strings.TrimSpace(os.Getenv(key)))
 	if err != nil || value <= 0 {
 		return fallback
 	}

@@ -38,6 +38,7 @@ import (
 	"agentchunzhi/internal/retrieval"
 	"agentchunzhi/internal/review"
 	"agentchunzhi/internal/store"
+	"agentchunzhi/internal/tag"
 	"agentchunzhi/internal/workspace"
 )
 
@@ -117,11 +118,17 @@ func main() {
 		}
 		objects = ossStore
 	}
-	var embeddings retrieval.EmbeddingProvider = retrieval.HTTPEmbeddingProvider{Endpoint: cfg.EmbeddingEndpoint, Token: cfg.EmbeddingToken, Model: cfg.EmbeddingModel, Protocol: cfg.EmbeddingProtocol, Dimension: cfg.EmbeddingDimension, Timeout: 5 * time.Second}
-	if cfg.EmbeddingEndpoint == "" && (cfg.Environment == "development" || cfg.Environment == "test") {
-		embeddings = retrieval.HashEmbeddingProvider{Dimensions: retrieval.DefaultEmbeddingDimensions}
-	} else if cfg.EmbeddingEndpoint != "" {
-		embeddings = retrieval.HTTPEmbeddingProvider{Endpoint: cfg.EmbeddingEndpoint, Token: cfg.EmbeddingToken, Model: cfg.EmbeddingModel, Protocol: cfg.EmbeddingProtocol, Dimension: cfg.EmbeddingDimension, Timeout: 5 * time.Second}
+	// Phase 3 retrieval provider registry: the semantic embedding provider is
+	// nil when the runtime manifest is incomplete; readiness reports the gap.
+	// No hash fallback exists. The legacy query service keeps its own reranker
+	// shape until the query rewrite lands.
+	embeddings, semanticAvailable, _, err := retrieval.BuildFromConfig(cfg)
+	if err != nil {
+		log.Fatalf("retrieval provider registry startup failed: %v", err)
+	}
+	manifestFingerprint := ""
+	if semanticAvailable && embeddings != nil {
+		manifestFingerprint = retrieval.ManifestFingerprint(embeddings.Manifest())
 	}
 	var reranker query.Reranker
 	if cfg.RerankerEndpoint != "" {
@@ -169,6 +176,8 @@ func main() {
 		ConversationService:  conversation.Service{Store: db, Policy: authz.WorkspacePolicyService{Store: db}, Content: contentservice.Service{Store: db, Events: events}},
 		AutomationService:    automation.Service{Store: db, Policy: authz.WorkspacePolicyService{Store: db}},
 		OrganizationService:  organization.Service{Store: db, Events: &events},
+		TagService:           tag.Service{Store: db, Events: &events},
+		FacetService:         tag.FacetService{Store: db},
 		InvitationService: &organization.InvitationService{
 			Store: db, Events: &events, Cipher: deliveryCipher,
 			KeyVersion: deliveryKeyVersion, BaseURL: cfg.PublicAppBaseURL,
@@ -181,6 +190,10 @@ func main() {
 		TrustedProxyCIDRs: cfg.TrustedProxyCIDRs,
 		AllowedOrigins:    cfg.MemberAllowedOrigins,
 		AppEnv:            cfg.Environment,
+		// Phase 3 retrieval readiness inputs (/readyz wiring is completed by
+		// the query/httpapi work package).
+		SemanticAvailable:   semanticAvailable,
+		ManifestFingerprint: manifestFingerprint,
 	}
 	server := &http.Server{
 		Addr:              cfg.HTTPAddr,

@@ -21,6 +21,8 @@ import (
 	"agentchunzhi/internal/auth"
 	"agentchunzhi/internal/authz"
 	"agentchunzhi/internal/eventing"
+	"agentchunzhi/internal/store"
+	"agentchunzhi/internal/tag"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -210,9 +212,13 @@ type VersionMaterial struct {
 	Markdown               string
 	Fields                 map[string]any
 	TagIDs                 []string // sorted, workspace-scoped tag identities
-	AttachmentIDs          []string // must reference clean, unexpired attachments
-	SourceRawInputID       string
-	CreatedBy              string
+	// TagSource is the fallback provenance for version tag relations when the
+	// draft carries none of its own (import and webhook channels materialize
+	// the first version before their draft exists). Empty means "manual".
+	TagSource        string
+	AttachmentIDs    []string // must reference clean, unexpired attachments
+	SourceRawInputID string
+	CreatedBy        string
 }
 
 // CreateVersionTx is the only version factory. It locks the asset, appends
@@ -307,13 +313,24 @@ func CreateVersionTx(ctx context.Context, tx pgx.Tx, material VersionMaterial) (
 	if err != nil {
 		return "", 0, fmt.Errorf("insert version: %w", err)
 	}
-	// Materialize version provenance only through the sealed boundary.
+	// Materialize version provenance only through the sealed boundary. Draft
+	// relations carry their source and confidence into the snapshot; channels
+	// without a draft yet fall back to the material's channel source.
+	tagSource := material.TagSource
+	if tagSource == "" {
+		tagSource = tag.SourceManual
+	}
 	for _, tagID := range tagIDs {
 		if _, err := tx.Exec(ctx, `
-			INSERT INTO asset.asset_version_tags (organization_id, workspace_id, asset_version_id, tag_id, created_by)
-			VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, NULLIF($5,'')::uuid)
+			INSERT INTO asset.asset_version_tags
+				(organization_id, workspace_id, asset_version_id, tag_id, source, confidence, created_by)
+			SELECT $1::uuid, $2::uuid, $3::uuid, $4::uuid,
+			       COALESCE(dt.source, $7), dt.confidence, NULLIF($5,'')::uuid
+			FROM asset.asset_drafts d
+			LEFT JOIN asset.asset_draft_tags dt ON dt.organization_id = d.organization_id AND dt.asset_draft_id = d.id AND dt.tag_id = $4::uuid
+			WHERE d.organization_id = $1::uuid AND d.asset_id = $6::uuid
 			ON CONFLICT DO NOTHING
-		`, material.OrganizationID, material.WorkspaceID, versionID, tagID, material.CreatedBy); err != nil {
+		`, material.OrganizationID, material.WorkspaceID, versionID, tagID, material.CreatedBy, material.AssetID, tagSource); err != nil {
 			return "", 0, fmt.Errorf("insert version tag: %w", err)
 		}
 	}
@@ -440,6 +457,22 @@ func commitDraftTx(ctx context.Context, tx pgx.Tx, events *eventing.EventStore, 
 	}
 	if _, err := CancelPendingRequestsTx(ctx, tx, row.OrganizationID, row.ID, principal.UserID, reviewCancelReasonNewVersion); err != nil {
 		return CommitResult{}, err
+	}
+	// Accepted suggestions that actually entered this draft backfill the
+	// version that finally carried their tag; source versions stay immutable.
+	if _, err := tx.Exec(ctx, `
+		UPDATE asset.asset_version_tag_suggestions sg
+		SET materialized_version_id = $3::uuid
+		WHERE sg.accepted_into_draft_id = (
+			SELECT id FROM asset.asset_drafts WHERE organization_id = $1::uuid AND asset_id = $2::uuid
+		)
+		  AND sg.status = 'accepted'
+		  AND EXISTS (
+		    SELECT 1 FROM asset.asset_draft_tags dt
+		    WHERE dt.asset_draft_id = sg.accepted_into_draft_id AND dt.tag_id = sg.resolved_tag_id
+		  )
+	`, row.OrganizationID, row.ID, versionID); err != nil {
+		return CommitResult{}, fmt.Errorf("materialize tag suggestions: %w", err)
 	}
 	// Re-point the draft at the new snapshot and mark it clean.
 	if _, err := tx.Exec(ctx, `
@@ -583,4 +616,221 @@ func (s MemberService) GetDraft(ctx context.Context, principal auth.Principal, a
 	}
 	draft.Dirty = draft.Revision != draft.CommittedRevision
 	return draft, nil
+}
+
+// DraftTags returns the sorted tag summaries currently attached to the shared
+// draft. It backs the v2 draft representation, where tags ride along with the
+// draft payload instead of a separate lookup.
+func (s MemberService) DraftTags(ctx context.Context, principal auth.Principal, assetID string) ([]tag.Summary, error) {
+	if !validID(assetID) {
+		return nil, ErrInvalidInput
+	}
+	var workspaceID, modelID string
+	err := s.Store.Pool.QueryRow(ctx, `
+		SELECT workspace_id::text, resource_model_id::text FROM asset.assets
+		WHERE organization_id = $1::uuid AND id = $2::uuid AND deleted_at IS NULL
+	`, principal.OrganizationID, assetID).Scan(&workspaceID, &modelID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if _, err := s.require(ctx, principal, workspaceID, modelID, authz.ActionAssetRead); err != nil {
+		return nil, err
+	}
+	var draftID string
+	if err := s.Store.Pool.QueryRow(ctx, `
+		SELECT id::text FROM asset.asset_drafts
+		WHERE organization_id = $1::uuid AND asset_id = $2::uuid
+	`, principal.OrganizationID, assetID).Scan(&draftID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	return loadDraftTagSummariesPool(ctx, s.Store, draftID)
+}
+
+// DraftTagEntry is one tag binding in a replacement request.
+type DraftTagEntry struct {
+	TagID         string
+	Source        string
+	Confidence    float64
+	HasConfidence bool
+}
+
+// SetDraftTags replaces the draft tag set with revision control. Surviving
+// tags keep their provenance; new tags use the caller-provided source;
+// removed tags are deleted. Archived tags fail the commit-time validation but
+// are accepted here only if they were already present (carry-over semantics
+// happen at initialization, not edit time).
+func (s MemberService) SetDraftTags(ctx context.Context, principal auth.Principal, workspaceID, assetID, expectedRevision string, entries []DraftTagEntry) (Draft, []tag.Summary, error) {
+	var modelID string
+	err := s.Store.Pool.QueryRow(ctx, `
+		SELECT resource_model_id::text FROM asset.assets
+		WHERE organization_id = $1::uuid AND id = $2::uuid AND deleted_at IS NULL
+	`, principal.OrganizationID, assetID).Scan(&modelID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Draft{}, nil, ErrNotFound
+		}
+		return Draft{}, nil, err
+	}
+	if _, err := s.require(ctx, principal, workspaceID, modelID, authz.ActionAssetWrite); err != nil {
+		return Draft{}, nil, err
+	}
+	if len(entries) > MaxTagsPerDraft {
+		return Draft{}, nil, ErrTooManyTags
+	}
+	ids := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if !validID(entry.TagID) {
+			return Draft{}, nil, ErrInvalidInput
+		}
+		ids = append(ids, entry.TagID)
+	}
+	tx, err := s.Store.Pool.Begin(ctx)
+	if err != nil {
+		return Draft{}, nil, err
+	}
+	defer tx.Rollback(ctx)
+	row, err := LoadLifecycleTx(ctx, tx, principal.OrganizationID, assetID)
+	if err != nil {
+		return Draft{}, nil, err
+	}
+	if row.PublicationStatus == PublicationArchived {
+		return Draft{}, nil, ErrAssetArchived
+	}
+	draft, err := LoadDraftTx(ctx, tx, principal.OrganizationID, assetID, expectedRevision)
+	if err != nil {
+		return Draft{}, nil, err
+	}
+	// Validate every incoming tag: same workspace, and active unless it is
+	// already on the draft (carry-over from initialization).
+	for _, id := range dedupeSort(ids) {
+		var ok bool
+		if err := tx.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM asset.tags t
+				WHERE t.organization_id = $1::uuid AND t.workspace_id = $2::uuid AND t.id = $3::uuid
+				  AND (t.status = 'active'
+				       OR EXISTS (SELECT 1 FROM asset.asset_draft_tags dt
+					        WHERE dt.asset_draft_id = $4::uuid AND dt.tag_id = t.id))
+			)
+		`, principal.OrganizationID, workspaceID, id, draft.DraftID).Scan(&ok); err != nil {
+			return Draft{}, nil, err
+		}
+		if !ok {
+			return Draft{}, nil, ErrTagArchived
+		}
+	}
+	if _, err := tx.Exec(ctx, `
+		DELETE FROM asset.asset_draft_tags
+		WHERE organization_id = $1::uuid AND asset_draft_id = $2::uuid
+		  AND NOT (tag_id = ANY($3::uuid[]))
+	`, principal.OrganizationID, draft.DraftID, dedupeSort(ids)); err != nil {
+		return Draft{}, nil, fmt.Errorf("remove draft tags: %w", err)
+	}
+	for _, entry := range entries {
+		source := entry.Source
+		if source == "" {
+			source = tag.SourceManual
+		}
+		if source == tag.SourceAI && !entry.HasConfidence {
+			return Draft{}, nil, ErrInvalidInput
+		}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO asset.asset_draft_tags
+				(organization_id, workspace_id, asset_draft_id, tag_id, source, confidence, added_by)
+			VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, NULLIF($6::numeric, -1), $7::uuid)
+			ON CONFLICT (asset_draft_id, tag_id) DO NOTHING
+		`, principal.OrganizationID, workspaceID, draft.DraftID, entry.TagID, source,
+			confidenceOrNull(entry), principal.UserID); err != nil {
+			return Draft{}, nil, fmt.Errorf("insert draft tag: %w", err)
+		}
+	}
+	if err := persistDraftPatch(ctx, tx, principal.OrganizationID, draft, principal.UserID); err != nil {
+		return Draft{}, nil, err
+	}
+	summaries, err := loadDraftTagSummaries(ctx, tx, draft.DraftID)
+	if err != nil {
+		return Draft{}, nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Draft{}, nil, err
+	}
+	draft.Revision++
+	draft.Dirty = true
+	return draft, summaries, nil
+}
+
+func confidenceOrNull(entry DraftTagEntry) float64 {
+	if !entry.HasConfidence {
+		return -1
+	}
+	return entry.Confidence
+}
+
+// loadDraftTagSummaries returns the sorted TagSummaries of a draft.
+func loadDraftTagSummaries(ctx context.Context, tx pgx.Tx, draftID string) ([]tag.Summary, error) {
+	rows, err := tx.Query(ctx, `
+		SELECT t.id::text, t.normalized_key, t.display_name, t.slug, t.status
+		FROM asset.asset_draft_tags dt
+		JOIN asset.tags t ON t.organization_id = dt.organization_id AND t.id = dt.tag_id
+		WHERE dt.asset_draft_id = $1::uuid
+		ORDER BY t.normalized_key, t.id
+	`, draftID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	summaries := []tag.Summary{}
+	for rows.Next() {
+		var summary tag.Summary
+		if err := rows.Scan(&summary.ID, &summary.Key, &summary.DisplayName, &summary.Slug, &summary.Status); err != nil {
+			return nil, err
+		}
+		summaries = append(summaries, summary)
+	}
+	return summaries, rows.Err()
+}
+
+// loadDraftTagSummariesPool reads the sorted tag summaries of a draft outside
+// an open transaction.
+func loadDraftTagSummariesPool(ctx context.Context, db *store.Store, draftID string) ([]tag.Summary, error) {
+	rows, err := db.Pool.Query(ctx, `
+		SELECT t.id::text, t.normalized_key, t.display_name, t.slug, t.status
+		FROM asset.asset_draft_tags dt
+		JOIN asset.tags t ON t.organization_id = dt.organization_id AND t.id = dt.tag_id
+		WHERE dt.asset_draft_id = $1::uuid
+		ORDER BY t.normalized_key, t.id
+	`, draftID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	summaries := []tag.Summary{}
+	for rows.Next() {
+		var summary tag.Summary
+		if err := rows.Scan(&summary.ID, &summary.Key, &summary.DisplayName, &summary.Slug, &summary.Status); err != nil {
+			return nil, err
+		}
+		summaries = append(summaries, summary)
+	}
+	return summaries, rows.Err()
+}
+
+// InitializeDraftTagsFromVersion copies version tag relations and their
+// provenance into a fresh draft (create/confirm flows).
+func initializeDraftTagsFromVersionTx(ctx context.Context, tx pgx.Tx, organizationID, draftID, versionID string) error {
+	_, err := tx.Exec(ctx, `
+		INSERT INTO asset.asset_draft_tags
+			(organization_id, workspace_id, asset_draft_id, tag_id, source, confidence, added_by)
+		SELECT vt.organization_id, vt.workspace_id, $2::uuid, vt.tag_id, vt.source, vt.confidence, vt.created_by
+		FROM asset.asset_version_tags vt
+		WHERE vt.organization_id = $1::uuid AND vt.asset_version_id = $3::uuid
+		ON CONFLICT (asset_draft_id, tag_id) DO NOTHING
+	`, organizationID, draftID, versionID)
+	return err
 }

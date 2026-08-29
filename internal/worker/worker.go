@@ -13,7 +13,6 @@ import (
 	"agentchunzhi/internal/deletion"
 	"agentchunzhi/internal/eventing"
 	"agentchunzhi/internal/resourcemodel"
-	"agentchunzhi/internal/retrieval"
 	"agentchunzhi/internal/store"
 
 	"github.com/jackc/pgx/v5"
@@ -21,14 +20,18 @@ import (
 )
 
 const (
-	ProjectionConsumer     = retrieval.ProjectionConsumer
+	// ProjectionConsumer is the retrieval fact consumer key registered in
+	// the eventing registry.
+	ProjectionConsumer     = "retrieval.projection"
 	TranscriptionConsumer  = "conversation.transcription"
 	AttachmentScanConsumer = "attachment.scan"
 )
 
-type ProjectionProcessor interface {
-	Rebuild(context.Context, string) error
-	Delete(context.Context, string) error
+// EventProcessor is the retrieval v2 fact consumer surface: the coordinator
+// reacts to domain facts and ensures projection runs/jobs in short
+// transactions.
+type EventProcessor interface {
+	ProcessFact(ctx context.Context, eventType string, payload json.RawMessage) error
 }
 
 type TranscriptionProcessor interface {
@@ -45,7 +48,7 @@ type AttachmentScanProcessor interface {
 // wakeups, retries, and worker process lifecycle.
 type Dispatcher struct {
 	Store            *store.Store
-	Projection       ProjectionProcessor
+	Retrieval        EventProcessor
 	Transcription    TranscriptionProcessor
 	AttachmentScan   AttachmentScanProcessor
 	Lease            time.Duration
@@ -93,48 +96,16 @@ func (d Dispatcher) ProcessEvent(ctx context.Context, eventID string, maxAttempt
 
 func (d Dispatcher) processDelivery(ctx context.Context, delivery store.Delivery, maxAttempts int) (bool, error) {
 	if delivery.ConsumerKey == ProjectionConsumer {
-		// Phase 0 fact consumer: the projector reacts to asset domain facts
-		// instead of receiving downstream commands from the asset service.
-		switch delivery.EventType {
-		case eventing.EventAssetPublished:
-			var payload eventing.AssetPublishedPayload
-			if err := json.Unmarshal(delivery.Payload, &payload); err != nil || payload.VersionID == "" {
-				return false, d.finish(ctx, delivery, true, "invalid_payload", "asset.published payload is invalid")
-			}
-			if d.Projection == nil {
-				return d.fail(ctx, delivery, delivery.AttemptNo >= maxAttempts, "processor_unavailable", "retrieval projector is not configured")
-			}
-			if payload.PreviousVersionID != "" && payload.PreviousVersionID != payload.VersionID {
-				if err := d.Projection.Delete(ctx, payload.PreviousVersionID); err != nil {
-					return d.fail(ctx, delivery, delivery.AttemptNo >= maxAttempts, "processor_error", err.Error())
-				}
-			}
-			if err := d.Projection.Rebuild(ctx, payload.VersionID); err != nil {
-				return d.fail(ctx, delivery, delivery.AttemptNo >= maxAttempts, "processor_error", err.Error())
-			}
-			return false, d.finish(ctx, delivery, false, "", "")
-		case eventing.EventAssetArchived:
-			var payload eventing.AssetArchivedPayload
-			if err := json.Unmarshal(delivery.Payload, &payload); err != nil {
-				return false, d.finish(ctx, delivery, true, "invalid_payload", "asset.archived payload is invalid")
-			}
-			if d.Projection == nil {
-				return d.fail(ctx, delivery, delivery.AttemptNo >= maxAttempts, "processor_unavailable", "retrieval projector is not configured")
-			}
-			if payload.PreviousVersionID != "" {
-				if err := d.Projection.Delete(ctx, payload.PreviousVersionID); err != nil {
-					return d.fail(ctx, delivery, delivery.AttemptNo >= maxAttempts, "processor_error", err.Error())
-				}
-			}
-			return false, d.finish(ctx, delivery, false, "", "")
-		case eventing.EventAssetVisibilityChanged, eventing.EventTagUpdated, eventing.EventResourceModelPolicyPublished:
-			// Visibility is re-checked against primary data at query time and
-			// tag/policy-driven canonical rebuilds arrive with phase 3; the
-			// fact itself is consumed successfully here.
-			return false, d.finish(ctx, delivery, false, "", "")
-		default:
-			return false, d.finish(ctx, delivery, true, "unsupported_event", fmt.Sprintf("projection consumer does not handle %q", delivery.EventType))
+		// Phase 3 retrieval consumer: the coordinator reacts to the domain
+		// facts declared in the event registry and ensures projection runs
+		// and River jobs in short transactions.
+		if d.Retrieval == nil {
+			return d.fail(ctx, delivery, delivery.AttemptNo >= maxAttempts, "processor_unavailable", "retrieval coordinator is not configured")
 		}
+		if err := d.Retrieval.ProcessFact(ctx, delivery.EventType, delivery.Payload); err != nil {
+			return d.fail(ctx, delivery, delivery.AttemptNo >= maxAttempts, "processor_error", err.Error())
+		}
+		return false, d.finish(ctx, delivery, false, "", "")
 	}
 
 	if delivery.ConsumerKey == TranscriptionConsumer {

@@ -13,12 +13,14 @@ import (
 	"fmt"
 	"html"
 	"os"
+	"sort"
 	"strings"
 
 	"agentchunzhi/internal/auth"
 	"agentchunzhi/internal/eventing"
 	"agentchunzhi/internal/objectstore"
 	"agentchunzhi/internal/store"
+	"agentchunzhi/internal/tag"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -111,14 +113,15 @@ func (p TransferProcessor) ProcessImportJob(ctx context.Context, id string) erro
 
 // importBatchHeader is the immutable context every row of one batch shares.
 type importBatchHeader struct {
-	id             string
-	organizationID string
-	workspaceID    string
-	modelID        string
-	versionID      string
-	sourceName     string
-	submittedBy    string
-	fieldSchema    []byte
+	id               string
+	organizationID   string
+	workspaceID      string
+	modelID          string
+	versionID        string
+	sourceName       string
+	submittedBy      string
+	fieldSchema      []byte
+	unknownTagPolicy string
 }
 
 type pendingImportRow struct {
@@ -135,12 +138,13 @@ func (p TransferProcessor) processImport(ctx context.Context, batchID string) er
 	var header importBatchHeader
 	if err := p.Store.Pool.QueryRow(ctx, `
 		SELECT b.id::text, b.organization_id::text, b.workspace_id::text, b.resource_model_id::text,
-		       b.resource_model_version_id::text, COALESCE(b.source_name, ''), b.submitted_by::text, v.field_schema
+		       b.resource_model_version_id::text, COALESCE(b.source_name, ''), b.submitted_by::text, v.field_schema,
+		       COALESCE(b.unknown_tag_policy, 'reject')
 		FROM asset.import_batches b
 		JOIN model.resource_model_versions v ON v.organization_id = b.organization_id AND v.id = b.resource_model_version_id
 		WHERE b.id = $1::uuid AND b.status = 'processing'
 	`, batchID).Scan(&header.id, &header.organizationID, &header.workspaceID, &header.modelID,
-		&header.versionID, &header.sourceName, &header.submittedBy, &header.fieldSchema); err != nil {
+		&header.versionID, &header.sourceName, &header.submittedBy, &header.fieldSchema, &header.unknownTagPolicy); err != nil {
 		return fmt.Errorf("load import job: %w", err)
 	}
 	rows, err := p.Store.Pool.Query(ctx, `
@@ -221,6 +225,21 @@ func (p TransferProcessor) processImportRow(ctx context.Context, header importBa
 		}
 		return tx.Commit(ctx)
 	}
+	// tag_keys is the only supported tag channel; the retired top-level tags
+	// field fails the row instead of being silently migrated.
+	if _, legacy := sourceRow[LegacyTagsField]; legacy {
+		if err := reject([]ImportRowError{{Code: "legacy_tags_field_not_supported"}}); err != nil {
+			return err
+		}
+		return tx.Commit(ctx)
+	}
+	tagKeys, hasTagKeys, err := importRowTagKeys(sourceRow)
+	if err != nil {
+		if err := reject([]ImportRowError{{Code: "invalid_tag_keys", Message: err.Error()}}); err != nil {
+			return err
+		}
+		return tx.Commit(ctx)
+	}
 	title := stringPointer(sourceRow["title"])
 	markdown := stringPointer(sourceRow["markdown"])
 	fields := importFields(sourceRow)
@@ -236,6 +255,36 @@ func (p TransferProcessor) processImportRow(ctx context.Context, header importBa
 		}
 		return tx.Commit(ctx)
 	}
+	// Resolve tag_keys before any content is written: the batch policy decides
+	// whether unknown keys reject the row or create the tags explicitly.
+	actor := auth.Principal{OrganizationID: header.organizationID, UserID: header.submittedBy, UserType: "member"}
+	var tagIDs []string
+	if hasTagKeys && len(tagKeys) > 0 {
+		if len(tagKeys) > MaxTagsPerDraft {
+			if err := reject([]ImportRowError{{Code: "too_many_tags"}}); err != nil {
+				return err
+			}
+			return tx.Commit(ctx)
+		}
+		tagIDs, err = p.resolveImportRowTags(ctx, tx, header, actor, tagKeys)
+		if err != nil {
+			var rowErrors []ImportRowError
+			switch {
+			case errors.Is(err, tag.ErrUnknownTag):
+				rowErrors = []ImportRowError{{Code: "unknown_tag"}}
+			case errors.Is(err, tag.ErrArchived):
+				rowErrors = []ImportRowError{{Code: "tag_archived"}}
+			case errors.Is(err, errImportTagCreateLimitExceeded):
+				rowErrors = []ImportRowError{{Code: "import_tag_create_limit_exceeded"}}
+			default:
+				return err
+			}
+			if err := reject(rowErrors); err != nil {
+				return err
+			}
+			return tx.Commit(ctx)
+		}
+	}
 	payload, _ := json.Marshal(sourceRow)
 	sum := sha256.Sum256(payload)
 	var rawInputID string
@@ -250,11 +299,10 @@ func (p TransferProcessor) processImportRow(ctx context.Context, header importBa
 	assetID, versionID, versionNo, err := createAssetWithFirstVersionTx(ctx, tx,
 		header.organizationID, header.workspaceID, header.modelID, header.versionID,
 		rawInputID, OriginImported, derefString(title), "", derefString(markdown),
-		fields, header.submittedBy)
+		fields, tagIDs, tag.SourceImport, header.submittedBy)
 	if err != nil {
 		return err
 	}
-	actor := auth.Principal{OrganizationID: header.organizationID, UserID: header.submittedBy, UserType: "member"}
 	if err := emitAssetVersionCreatedTx(ctx, tx, &p.Events, header.organizationID, header.workspaceID, assetID, versionID, versionNo, actor); err != nil {
 		return err
 	}
@@ -388,7 +436,14 @@ func (p TransferProcessor) processExport(ctx context.Context, jobID string) erro
 	if format == "" {
 		format = "jsonl"
 	}
-	query, args := exportAssetQuery(organizationID, workspaceID, modelID, snapshot)
+	// Tag filters resolve before the export query is built: unknown or
+	// contradictory keys fail the job instead of silently exporting everything.
+	filters, _ := snapshot["filters"].(map[string]any)
+	tagFilter, err := p.resolveExportTagFilter(ctx, organizationID, workspaceID, filters)
+	if err != nil {
+		return err
+	}
+	query, args := exportAssetQuery(organizationID, workspaceID, modelID, snapshot, tagFilter)
 	rows, err := p.Store.Pool.Query(ctx, query, args...)
 	if err != nil {
 		return err
@@ -396,17 +451,28 @@ func (p TransferProcessor) processExport(ctx context.Context, jobID string) erro
 	defer rows.Close()
 	headers := []string{"id", "title", "markdown", "fields", "tag_keys", "visibility", "publication_status", "origin"}
 	records := make([][]string, 0, 128)
+	versionIDs := make([]string, 0, 128)
 	for rows.Next() {
-		var id, visibility, publication, origin string
+		var id, versionID, visibility, publication, origin string
 		var title, markdown *string
 		var fields []byte
-		if err := rows.Scan(&id, &title, &markdown, &fields, &visibility, &publication, &origin); err != nil {
+		if err := rows.Scan(&id, &title, &markdown, &fields, &versionID, &visibility, &publication, &origin); err != nil {
 			return err
 		}
 		records = append(records, []string{id, derefString(title), derefString(markdown), string(fields), "[]", visibility, publication, origin})
+		versionIDs = append(versionIDs, versionID)
 	}
 	if err := rows.Err(); err != nil {
 		return err
+	}
+	// tag_keys come from one batched query over the exported versions — never a
+	// per-row lookup.
+	keysByVersion, err := p.loadExportTagKeys(ctx, organizationID, versionIDs)
+	if err != nil {
+		return err
+	}
+	for index, record := range records {
+		record[4] = formatTagKeysCell(keysByVersion[versionIDs[index]])
 	}
 	var body bytes.Buffer
 	var contentType string
@@ -438,8 +504,8 @@ func (p TransferProcessor) processExport(ctx context.Context, jobID string) erro
 		for _, record := range records {
 			line, _ := json.Marshal(map[string]any{
 				"id": record[0], "title": nullableString(record[1]), "markdown": nullableString(record[2]),
-				"fields": decodeJSONMap([]byte(record[3])), "tag_keys": []any{},
-				"visibility": record[4], "publication_status": record[5], "origin": record[6],
+				"fields": decodeJSONMap([]byte(record[3])), "tag_keys": decodeTagKeysCell(record[4]),
+				"visibility": record[5], "publication_status": record[6], "origin": record[7],
 			})
 			body.Write(line)
 			body.WriteByte('\n')
@@ -530,7 +596,164 @@ func xlsxColumnName(index int) string {
 	return name
 }
 
-func exportAssetQuery(organizationID, workspaceID, modelID string, snapshot map[string]any) (string, []any) {
+// resolveExportTagFilter extracts and resolves the snapshot's
+// tags_any/tags_all/tags_none key groups into workspace tag identities.
+// Unknown keys and contradictions fail the export loudly.
+func (p TransferProcessor) resolveExportTagFilter(ctx context.Context, organizationID, workspaceID string, filters map[string]any) (tag.ResolvedFilter, error) {
+	if len(filters) == 0 {
+		return tag.ResolvedFilter{}, nil
+	}
+	raw := tag.KeyFilter{}
+	for name, target := range map[string]*[]string{
+		"tags_any": &raw.Any, "tags_all": &raw.All, "tags_none": &raw.None,
+	} {
+		value, ok := filters[name]
+		if !ok || value == nil {
+			continue
+		}
+		items, isArray := value.([]any)
+		if !isArray {
+			return tag.ResolvedFilter{}, fmt.Errorf("%w: %s must be an array of keys", tag.ErrUnknownTag, name)
+		}
+		keys := make([]string, 0, len(items))
+		for _, item := range items {
+			key, isString := item.(string)
+			if !isString {
+				return tag.ResolvedFilter{}, fmt.Errorf("%w: %s entries must be strings", tag.ErrUnknownTag, name)
+			}
+			keys = append(keys, key)
+		}
+		*target = keys
+	}
+	normalized, err := tag.NormalizeFilter(raw)
+	if err != nil {
+		return tag.ResolvedFilter{}, err
+	}
+	resolve := func(keys []string) ([]string, error) {
+		if len(keys) == 0 {
+			return nil, nil
+		}
+		rows, err := p.Store.Pool.Query(ctx, `
+			SELECT id::text FROM asset.tags
+			WHERE organization_id = $1::uuid AND workspace_id = $2::uuid AND normalized_key = ANY($3::text[])
+		`, organizationID, workspaceID, keys)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+		ids := []string{}
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				return nil, err
+			}
+			ids = append(ids, id)
+		}
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		if len(ids) != len(keys) {
+			return nil, tag.ErrUnknownTag
+		}
+		return ids, nil
+	}
+	anyIDs, err := resolve(normalized.Any)
+	if err != nil {
+		return tag.ResolvedFilter{}, err
+	}
+	allIDs, err := resolve(normalized.All)
+	if err != nil {
+		return tag.ResolvedFilter{}, err
+	}
+	noneIDs, err := resolve(normalized.None)
+	if err != nil {
+		return tag.ResolvedFilter{}, err
+	}
+	return tag.ResolvedFilter{Any: anyIDs, All: allIDs, None: noneIDs}, nil
+}
+
+// versionTagKeyPair is one scanned (asset_version_id, normalized_key) row.
+type versionTagKeyPair struct {
+	VersionID string
+	Key       string
+}
+
+// mergeVersionTagKeys folds scanned pairs into a version→sorted normalized
+// keys map; duplicate keys collapse.
+func mergeVersionTagKeys(pairs []versionTagKeyPair) map[string][]string {
+	result := make(map[string][]string, len(pairs))
+	for _, pair := range pairs {
+		list := result[pair.VersionID]
+		if !containsString(list, pair.Key) {
+			list = append(list, pair.Key)
+			result[pair.VersionID] = list
+		}
+	}
+	for versionID, keys := range result {
+		sort.Strings(keys)
+		result[versionID] = keys
+	}
+	return result
+}
+
+// formatTagKeysCell renders the sorted tag_keys cell used by CSV/XLSX exports:
+// a JSON array text of normalized keys, deduplicated. Empty sets render as [].
+func formatTagKeysCell(keys []string) string {
+	sorted := make([]string, 0, len(keys))
+	for _, key := range keys {
+		if !containsString(sorted, key) {
+			sorted = append(sorted, key)
+		}
+	}
+	sort.Strings(sorted)
+	return string(mustJSON(sorted))
+}
+
+// decodeTagKeysCell parses a tag_keys cell back into the string array the JSONL
+// export embeds. Unparseable cells degrade to an empty array instead of
+// failing the whole download.
+func decodeTagKeysCell(raw string) []string {
+	keys := []string{}
+	if raw != "" {
+		_ = json.Unmarshal([]byte(raw), &keys)
+	}
+	if keys == nil {
+		keys = []string{}
+	}
+	return keys
+}
+
+// loadExportTagKeys reads the normalized keys of many versions in one query,
+// deduplicated and sorted per version.
+func (p TransferProcessor) loadExportTagKeys(ctx context.Context, organizationID string, versionIDs []string) (map[string][]string, error) {
+	if len(versionIDs) == 0 {
+		return map[string][]string{}, nil
+	}
+	rows, err := p.Store.Pool.Query(ctx, `
+		SELECT avt.asset_version_id::text, t.normalized_key
+		FROM asset.asset_version_tags avt
+		JOIN asset.tags t ON t.organization_id = avt.organization_id AND t.id = avt.tag_id
+		WHERE avt.organization_id = $1::uuid AND avt.asset_version_id = ANY($2::uuid[])
+	`, organizationID, versionIDs)
+	if err != nil {
+		return nil, fmt.Errorf("load export tag keys: %w", err)
+	}
+	defer rows.Close()
+	pairs := make([]versionTagKeyPair, 0, len(versionIDs))
+	for rows.Next() {
+		var pair versionTagKeyPair
+		if err := rows.Scan(&pair.VersionID, &pair.Key); err != nil {
+			return nil, err
+		}
+		pairs = append(pairs, pair)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return mergeVersionTagKeys(pairs), nil
+}
+
+func exportAssetQuery(organizationID, workspaceID, modelID string, snapshot map[string]any, tagFilter tag.ResolvedFilter) (string, []any) {
 	args := []any{organizationID, workspaceID, modelID}
 	where := []string{
 		"a.organization_id = $1::uuid",
@@ -559,7 +782,20 @@ func exportAssetQuery(organizationID, workspaceID, modelID string, snapshot map[
 		encoded, _ := json.Marshal(fields)
 		where = append(where, add("v.fields @> $%d::jsonb", string(encoded)))
 	}
-	query := "SELECT a.id::text, v.title, v.markdown, v.fields, a.visibility, a.publication_status, v.origin FROM asset.assets a JOIN asset.asset_versions v ON v.organization_id = a.organization_id AND v.id = COALESCE(a.current_published_version_id, a.current_working_version_id) WHERE " + strings.Join(where, " AND ") + " ORDER BY a.id"
+	// Relational tag filters run EXISTS/NOT EXISTS against the selected version
+	// pointer — the same fixed shape the facet and member list paths use.
+	if len(tagFilter.Any) > 0 {
+		where = append(where, add("EXISTS (SELECT 1 FROM asset.asset_version_tags fx WHERE fx.asset_version_id = v.id AND fx.tag_id = ANY($%d::uuid[]))", tagFilter.Any))
+	}
+	for _, id := range tagFilter.All {
+		placeholder := add("SELECT $%d::uuid[]", []string{id})
+		where = append(where, fmt.Sprintf(
+			"EXISTS (SELECT 1 FROM asset.asset_version_tags fa%s WHERE fa%s.asset_version_id = v.id AND fa%s.tag_id = ANY(%s::uuid[]))", id, id, id, placeholder))
+	}
+	if len(tagFilter.None) > 0 {
+		where = append(where, add("NOT EXISTS (SELECT 1 FROM asset.asset_version_tags fn WHERE fn.asset_version_id = v.id AND fn.tag_id = ANY($%d::uuid[]))", tagFilter.None))
+	}
+	query := "SELECT a.id::text, v.title, v.markdown, v.fields, v.id::text, a.visibility, a.publication_status, v.origin FROM asset.assets a JOIN asset.asset_versions v ON v.organization_id = a.organization_id AND v.id = COALESCE(a.current_published_version_id, a.current_working_version_id) WHERE " + strings.Join(where, " AND ") + " ORDER BY a.id"
 	return query, args
 }
 
@@ -655,6 +891,87 @@ func importPreRowErrors(sourceRow map[string]any) []ImportRowError {
 	return entries
 }
 
+// Row system fields: tag_keys is the supported tag channel; the legacy
+// top-level tags field is rejected, never migrated and never leaks into the
+// dynamic fields document.
+const (
+	ImportTagKeysField = "tag_keys"
+	LegacyTagsField    = "tags" // retired input beside tag_keys; rejected per row
+)
+
+// errImportTagCreateLimitExceeded marks a row whose batch already created the
+// allowed number of new tags under unknown_tag_policy=create.
+var errImportTagCreateLimitExceeded = errors.New("import batch exceeded the created tag limit")
+
+// resolveImportRowTags maps one row's tag_keys onto workspace tag identities
+// inside the row transaction. The batch's frozen policy decides the channel:
+// reject fails unknown/archived keys via tag.ResolveExisting semantics; create
+// resolves through tag.CreateOrReuseTx and atomically charges the actual number
+// of newly created tags against the batch's created_tag_count budget.
+func (p TransferProcessor) resolveImportRowTags(ctx context.Context, tx pgx.Tx, header importBatchHeader, actor auth.Principal, tagKeys []string) ([]string, error) {
+	ids := make([]string, 0, len(tagKeys))
+	if header.unknownTagPolicy == UnknownTagPolicyCreate {
+		created := 0
+		for _, key := range tagKeys {
+			resolved, err := tag.CreateOrReuseTx(ctx, tx, actor, header.workspaceID, key)
+			if err != nil {
+				return nil, err
+			}
+			ids = append(ids, resolved.ID)
+			if resolved.Created {
+				created++
+			}
+		}
+		if created > 0 {
+			result, err := tx.Exec(ctx, `
+				UPDATE asset.import_batches
+				SET created_tag_count = created_tag_count + $2
+				WHERE id = $1::uuid AND created_tag_count + $2 <= $3
+			`, header.id, created, maxImportCreatedTags)
+			if err != nil {
+				return nil, fmt.Errorf("charge created tags: %w", err)
+			}
+			if affected := result.RowsAffected(); affected == 0 {
+				return nil, errImportTagCreateLimitExceeded
+			}
+		}
+		return ids, nil
+	}
+	resolved, err := tag.ResolveExisting(ctx, p.Store, actor, header.workspaceID, tagKeys)
+	if err != nil {
+		return nil, err
+	}
+	for _, item := range resolved {
+		ids = append(ids, item.ID)
+	}
+	return ids, nil
+}
+
+// importRowTagKeys extracts the top-level tag_keys system field. ok reports
+// whether the field was present; malformed payloads (non-array, non-string
+// entries) fail with an error so the row lands in the rejected report.
+func importRowTagKeys(row map[string]any) (keys []string, ok bool, err error) {
+	raw, present := row[ImportTagKeysField]
+	if !present || raw == nil {
+		return nil, false, nil
+	}
+	list, isArray := raw.([]any)
+	if !isArray {
+		return nil, true, fmt.Errorf("%s must be a JSON array of strings", ImportTagKeysField)
+	}
+	keys = make([]string, 0, len(list))
+	for _, item := range list {
+		value, isString := item.(string)
+		if !isString {
+			return nil, true, fmt.Errorf("%s entries must be strings", ImportTagKeysField)
+		}
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			keys = append(keys, trimmed)
+		}
+	}
+	return keys, true, nil
+}
+
 func importFields(row map[string]any) map[string]any {
 	result := map[string]any{}
 	if fields, ok := row["fields"].(map[string]any); ok {
@@ -664,9 +981,13 @@ func importFields(row map[string]any) map[string]any {
 		return result
 	}
 	for key, value := range row {
-		if key != "title" && key != "markdown" && key != "source" && key != ImportPreRowErrorsKey {
-			result[key] = value
+		// tag_keys and the legacy tags field are system fields: they resolve to
+		// relations and never enter the dynamic fields document.
+		if key == "title" || key == "markdown" || key == "source" || key == ImportPreRowErrorsKey ||
+			key == ImportTagKeysField || key == LegacyTagsField {
+			continue
 		}
+		result[key] = value
 	}
 	return result
 }

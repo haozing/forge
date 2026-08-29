@@ -28,11 +28,12 @@ import (
 	"agentchunzhi/internal/conversation"
 	"agentchunzhi/internal/identity"
 	"agentchunzhi/internal/modelendpoint"
-	agentquery "agentchunzhi/internal/query"
 	"agentchunzhi/internal/organization"
+	agentquery "agentchunzhi/internal/query"
 	"agentchunzhi/internal/resourcemodel"
 	"agentchunzhi/internal/review"
 	"agentchunzhi/internal/store"
+	"agentchunzhi/internal/tag"
 	"agentchunzhi/internal/workspace"
 )
 
@@ -68,11 +69,19 @@ type Dependencies struct {
 	InvitationService   *organization.InvitationService
 	IdentityService     *identity.Service
 	LoginThrottle       *auth.LoginThrottle
+	// Phase 2 tag domain services.
+	TagService   tag.Service
+	FacetService tag.FacetService
 	// TrustedProxyCIDRs vouches the proxies allowed to set X-Forwarded-For
 	// for rate-limit keys; AllowedOrigins drives the CSRF Origin policy.
 	TrustedProxyCIDRs []string
 	AllowedOrigins    []string
 	AppEnv            string
+	// Phase 3 retrieval readiness: SemanticAvailable mirrors the provider
+	// registry result and ManifestFingerprint is the embedding manifest
+	// fingerprint compared against worker heartbeats by /readyz.
+	SemanticAvailable   bool
+	ManifestFingerprint string
 }
 
 func NewHandler() http.Handler {

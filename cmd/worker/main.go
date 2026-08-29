@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"os"
@@ -138,11 +140,12 @@ func main() {
 	if strings.EqualFold(cfg.ASRProvider, "tencent") || (cfg.TencentSecretID != "" && cfg.TencentSecretKey != "") {
 		asrProvider = transcription.TencentProvider{SecretID: cfg.TencentSecretID, SecretKey: cfg.TencentSecretKey, Region: cfg.ASRRegion, Engine: cfg.ASREngine}
 	}
-	var embeddings retrieval.EmbeddingProvider = retrieval.HTTPEmbeddingProvider{Endpoint: cfg.EmbeddingEndpoint, Token: cfg.EmbeddingToken, Model: cfg.EmbeddingModel, Protocol: cfg.EmbeddingProtocol, Dimension: cfg.EmbeddingDimension, Timeout: 5 * time.Second}
-	if cfg.EmbeddingEndpoint == "" && (cfg.Environment == "development" || cfg.Environment == "test") {
-		embeddings = retrieval.HashEmbeddingProvider{Dimensions: retrieval.DefaultEmbeddingDimensions}
-	} else if cfg.EmbeddingEndpoint != "" {
-		embeddings = retrieval.HTTPEmbeddingProvider{Endpoint: cfg.EmbeddingEndpoint, Token: cfg.EmbeddingToken, Model: cfg.EmbeddingModel, Protocol: cfg.EmbeddingProtocol, Dimension: cfg.EmbeddingDimension, Timeout: 5 * time.Second}
+	// Phase 3 retrieval provider registry: the semantic embedding provider is
+	// nil when the runtime manifest is incomplete (readiness reports the gap);
+	// no hash fallback exists.
+	embeddings, semanticAvailable, _, err := retrieval.BuildFromConfig(cfg)
+	if err != nil {
+		log.Fatalf("retrieval provider registry startup failed: %v", err)
 	}
 	queryService := query.Service{Store: db, Embeddings: embeddings, CursorSecret: cfg.SearchCursorSecret}
 	reactProcessor := &agentruntime.PersistentReActService{
@@ -168,9 +171,17 @@ func main() {
 			Timeout: time.Duration(cfg.AttachmentScanTimeoutSeconds) * time.Second,
 		}
 	}
+	// Phase 3 retrieval pipeline: the coordinator consumes the asset/tag/
+	// model facts and the River workers own build/embed/finalize/backfill.
+	coordinator := retrieval.Coordinator{Store: db, Queue: events.Queue}
+	manifestFingerprint := ""
+	if semanticAvailable && embeddings != nil {
+		manifestFingerprint = retrieval.ManifestFingerprint(embeddings.Manifest())
+	}
+	retrievalEngine := retrieval.Engine{Store: db, Queue: nil, Embeddings: embeddings, Tokenizer: retrieval.NewWordTokenizer()}
 	dispatcher := worker.Dispatcher{
 		Store:            db,
-		Projection:       retrieval.Projector{Store: db, Embeddings: embeddings, EmbeddingModel: cfg.EmbeddingModel},
+		Retrieval:        coordinator,
 		Transcription:    transcription.Processor{Store: db, Objects: objects, Provider: asrProvider, Timeout: time.Duration(cfg.ASRTimeoutSeconds) * time.Second},
 		AttachmentScan:   attachment.ScanProcessor{Store: db, Objects: objects, Scanner: attachmentScanner},
 		Lease:            10 * time.Minute,
@@ -182,6 +193,12 @@ func main() {
 	river.AddWorker(workers, &worker.DispatchEventWorker{Dispatcher: dispatcher})
 	river.AddWorker(workers, &worker.RecoverPendingDeliveriesWorker{Store: db, Limit: 100})
 	river.AddWorker(workers, &worker.RecoverAutomationAttemptsWorker{Service: automation.Service{Store: db}, Limit: 100})
+	river.AddWorker(workers, &retrieval.BuildProjectionRunWorker{Engine: retrievalEngine})
+	river.AddWorker(workers, &retrieval.EmbedChunkBatchWorker{Engine: retrievalEngine})
+	river.AddWorker(workers, &retrieval.FinalizeProjectionRunWorker{Engine: retrievalEngine})
+	river.AddWorker(workers, &retrieval.BackfillProfileWorker{Engine: retrievalEngine})
+	river.AddWorker(workers, &retrieval.ReconcileWorker{Engine: retrievalEngine})
+	river.AddWorker(workers, &retrieval.CleanupWorker{Engine: retrievalEngine})
 	river.AddWorker(workers, &worker.BackgroundJobsWorker{
 		Migrations:  resourcemodel.MigrationProcessor{Store: db, Events: events},
 		Transfers:   asset.TransferProcessor{Store: db, Events: events, Objects: objects, ObjectPrefix: cfg.OSSPrefix},
@@ -196,6 +213,9 @@ func main() {
 		Queues: map[string]river.QueueConfig{
 			eventing.QueueEvents:      {MaxWorkers: 4},
 			eventing.QueueMaintenance: {MaxWorkers: 1},
+			retrieval.BuildQueue:      {MaxWorkers: 4},
+			retrieval.EmbedQueue:      {MaxWorkers: 4},
+			retrieval.MaintQueue:      {MaxWorkers: 1},
 		},
 		Workers:     workers,
 		MaxAttempts: eventing.DefaultMaxDeliveryAttempts,
@@ -210,6 +230,13 @@ func main() {
 			river.NewPeriodicJob(river.PeriodicInterval(5*time.Second), func() (river.JobArgs, *river.InsertOpts) {
 				return eventing.ProcessBackgroundJobsArgs{}, nil
 			}, nil),
+			// Phase 3 retrieval maintenance sweeps.
+			river.NewPeriodicJob(river.PeriodicInterval(time.Minute), func() (river.JobArgs, *river.InsertOpts) {
+				return retrieval.ReconcileArgs{}, nil
+			}, nil),
+			river.NewPeriodicJob(river.PeriodicInterval(time.Minute), func() (river.JobArgs, *river.InsertOpts) {
+				return retrieval.CleanupArgs{}, nil
+			}, nil),
 		},
 	})
 	if err != nil {
@@ -222,7 +249,15 @@ func main() {
 	// restarts, or parallel worker processes cannot double-fire one minute.
 	cronScheduler := automation.NewScheduler(automation.NewServiceScheduleEnqueuer(db), log.Printf)
 	go cronScheduler.Run(ctx, automation.DefaultSchedulerInterval)
-	log.Printf("worker starting environment=%s queues=%s,%s", cfg.Environment, eventing.QueueEvents, eventing.QueueMaintenance)
+	// Phase 3 readiness: register this retrieval worker in
+	// system.worker_heartbeats so the API /readyz can verify a live worker
+	// with a matching manifest fingerprint; the row is removed on exit.
+	hostname, _ := os.Hostname()
+	heartbeat := retrieval.NewHeartbeat(db, fmt.Sprintf("%s-%d-%s", hostname, os.Getpid(), randomSuffix()), manifestFingerprint)
+	go heartbeat.Run(ctx)
+	log.Printf("worker starting environment=%s semantic_available=%v manifest=%s queues=%s,%s,%s,%s,%s",
+		cfg.Environment, semanticAvailable, manifestFingerprint,
+		eventing.QueueEvents, eventing.QueueMaintenance, retrieval.BuildQueue, retrieval.EmbedQueue, retrieval.MaintQueue)
 	if err := riverClient.Start(ctx); err != nil {
 		log.Fatalf("worker River start failed: %v", err)
 	}
@@ -232,4 +267,13 @@ func main() {
 		return
 	}
 	log.Fatal(fmt.Errorf("worker River stopped unexpectedly"))
+}
+
+// randomSuffix produces a short process-unique worker suffix.
+func randomSuffix() string {
+	raw := make([]byte, 4)
+	if _, err := rand.Read(raw); err != nil {
+		return fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(raw)
 }

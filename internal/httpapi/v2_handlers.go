@@ -14,6 +14,7 @@ import (
 	"agentchunzhi/internal/auth"
 	"agentchunzhi/internal/authz"
 	"agentchunzhi/internal/review"
+	"agentchunzhi/internal/tag"
 )
 
 // requireIdempotencyKeyV2 enforces the mandatory Idempotency-Key contract on
@@ -315,6 +316,21 @@ func v2PublicationComments(deps Dependencies) http.HandlerFunc {
 
 // ---------- asset draft + lifecycle ----------
 
+// v2AssetDraftPatchBody extends the draft autosave patch with the phase 2
+// tag_ids replacement set. Omitting tag_ids keeps the current tags; passing a
+// list (possibly empty) reconciles the draft tag set.
+type v2AssetDraftPatchBody struct {
+	asset.DraftPatch
+	TagIDs *[]string `json:"tag_ids"`
+}
+
+// v2AssetDraftResponse is the draft representation with its tag summaries
+// attached; the v2 contract never returns bare tag id strings.
+type v2AssetDraftResponse struct {
+	asset.Draft
+	Tags []tag.Summary `json:"tags"`
+}
+
 func v2AssetDraft(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		principal, ok := v2Principal(w, r, deps)
@@ -332,21 +348,73 @@ func v2AssetDraft(deps Dependencies) http.HandlerFunc {
 				v2ServiceError(w, err)
 				return
 			}
-			writeETag(w, `"`+itoa(draft.Revision)+`"`)
-			writeData(w, r, http.StatusOK, draft)
-		case http.MethodPatch:
-			expected := expectedRevisionFromIfMatch(r)
-			var patch asset.DraftPatch
-			if !decodeV2Body(w, r, &patch, 4<<20) {
-				return
-			}
-			draft, err := deps.MemberAssetService.AutosaveDraft(r.Context(), principal, assetID, expected, patch)
+			tags, err := deps.MemberAssetService.DraftTags(r.Context(), principal, assetID)
 			if err != nil {
 				v2ServiceError(w, err)
 				return
 			}
 			writeETag(w, `"`+itoa(draft.Revision)+`"`)
-			writeData(w, r, http.StatusOK, draft)
+			writeData(w, r, http.StatusOK, v2AssetDraftResponse{Draft: draft, Tags: tags})
+		case http.MethodPatch:
+			expected := expectedRevisionFromIfMatch(r)
+			var body v2AssetDraftPatchBody
+			if !decodeV2Body(w, r, &body, 4<<20) {
+				return
+			}
+			patch := body.DraftPatch
+			hasFields := patch.Title != nil || patch.Summary != nil || patch.Markdown != nil ||
+				patch.Fields != nil || patch.Visibility != nil
+			var (
+				draft     asset.Draft
+				summaries []tag.Summary
+				err       error
+			)
+			if body.TagIDs == nil {
+				// Content-only (or empty) patch: unchanged phase 0 behavior.
+				draft, err = deps.MemberAssetService.AutosaveDraft(r.Context(), principal, assetID, expected, patch)
+				if err != nil {
+					v2ServiceError(w, err)
+					return
+				}
+			} else {
+				// Tag reconciliation runs after the content autosave. Both
+				// commands own one revision bump each; SetDraftTags re-reads
+				// the draft inside its own transaction, so once the autosave
+				// has already advanced the revision we must not replay the
+				// stale If-Match token (it would fail against the incremented
+				// revision) — hence expectedRevision="" for the mixed case.
+				if hasFields {
+					if _, err = deps.MemberAssetService.AutosaveDraft(r.Context(), principal, assetID, expected, patch); err != nil {
+						v2ServiceError(w, err)
+						return
+					}
+					expected = ""
+				}
+				target, targetErr := deps.MemberAssetService.Get(r.Context(), principal, assetID)
+				if targetErr != nil {
+					v2ServiceError(w, targetErr)
+					return
+				}
+				entries := make([]asset.DraftTagEntry, 0, len(*body.TagIDs))
+				for _, id := range *body.TagIDs {
+					entries = append(entries, asset.DraftTagEntry{TagID: id})
+				}
+				draft, summaries, err = deps.MemberAssetService.SetDraftTags(r.Context(), principal, target.WorkspaceID, assetID, expected, entries)
+				if err != nil {
+					v2ServiceError(w, err)
+					return
+				}
+			}
+			if summaries == nil {
+				// An untouched tag set still reports its current summaries.
+				summaries, err = deps.MemberAssetService.DraftTags(r.Context(), principal, assetID)
+				if err != nil {
+					v2ServiceError(w, err)
+					return
+				}
+			}
+			writeETag(w, `"`+itoa(draft.Revision)+`"`)
+			writeData(w, r, http.StatusOK, v2AssetDraftResponse{Draft: draft, Tags: summaries})
 		default:
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
 		}

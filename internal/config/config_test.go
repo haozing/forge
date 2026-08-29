@@ -30,6 +30,16 @@ func validProductionConfig() Config {
 		MailerProvider:       MailerProviderSMTP,
 		MailFrom:             "no-reply@example.com",
 		SMTPHost:             "smtp.example.com",
+		// Phase 3 retrieval requirements.
+		SearchCursorSecret:    strings.Repeat("c", 32),
+		QueryHashSecret:       strings.Repeat("q", 32),
+		EmbeddingManifestKey:  "text-embedding-v4@1024",
+		EmbeddingEndpoint:     "https://api.openai.com/v1/embeddings",
+		EmbeddingToken:        "token",
+		EmbeddingModel:        "text-embedding-v4",
+		EmbeddingModelVersion: "1",
+		EmbeddingDimension:    DefaultEmbeddingDimensions,
+		EmbeddingProtocol:     "generic",
 	}
 }
 
@@ -55,6 +65,14 @@ func TestValidateProductionFailures(t *testing.T) {
 		{"missing smtp host", func(c *Config) { c.SMTPHost = "" }},
 		{"missing mail from", func(c *Config) { c.MailFrom = "" }},
 		{"broken delivery keys", func(c *Config) { c.EmailDeliveryKeys = "1:not-base64" }},
+		{"missing cursor secret", func(c *Config) { c.SearchCursorSecret = "" }},
+		{"short cursor secret", func(c *Config) { c.SearchCursorSecret = "short" }},
+		{"missing query hash secret", func(c *Config) { c.QueryHashSecret = "" }},
+		{"identical secrets", func(c *Config) { c.QueryHashSecret = c.SearchCursorSecret }},
+		{"missing embedding manifest", func(c *Config) { c.EmbeddingManifestKey = "" }},
+		{"missing embedding endpoint", func(c *Config) { c.EmbeddingEndpoint = "" }},
+		{"wrong embedding dimensions", func(c *Config) { c.EmbeddingDimension = 768 }},
+		{"partial reranker group", func(c *Config) { c.RerankerEndpoint = "https://api.openai.com/rerank" }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -75,6 +93,21 @@ func TestValidateDevelopmentDefaults(t *testing.T) {
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("minimal development config rejected: %v", err)
+	}
+	if !cfg.SemanticUnavailable() {
+		t.Fatal("development config without an embedding manifest must report semantic unavailable")
+	}
+}
+
+func TestValidateDevelopmentPartialEmbeddingRejected(t *testing.T) {
+	cfg := Config{
+		Environment:       "development",
+		EmailDeliveryKeys: testKeyRingCSV(),
+		MailerProvider:    MailerProviderCapture,
+		EmbeddingEndpoint: "https://api.openai.com/v1/embeddings",
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("partial embedding manifest must be rejected")
 	}
 }
 

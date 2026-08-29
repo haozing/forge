@@ -8,13 +8,15 @@ import (
 	"time"
 
 	assetservice "agentchunzhi/internal/asset"
+	"agentchunzhi/internal/tag"
 )
 
-// webhookCreateAssetRequest is the envelope of POST /api/open/v1/hooks/assets.
+// webhookCreateAssetRequest is the envelope of POST /api/open/v2/hooks/assets.
 // Source must be "webhook" (or empty); external_ref is an optional caller-side
 // idempotency marker: replaying it returns the first result with
 // replayed=true. workspace_id/resource_model_id are optional and resolved by
-// TransferService.ResolveWebhookTarget (default model fallback).
+// TransferService.ResolveWebhookTarget (default model fallback). tag_keys may
+// only cite existing active workspace tags; the retired tags field is refused.
 type webhookCreateAssetRequest struct {
 	Source          string         `json:"source"`
 	ExternalRef     string         `json:"external_ref"`
@@ -23,6 +25,10 @@ type webhookCreateAssetRequest struct {
 	Title           *string        `json:"title"`
 	Markdown        *string        `json:"markdown"`
 	Fields          map[string]any `json:"fields"`
+	TagKeys         []string       `json:"tag_keys"`
+	// Tags holds the retired input so the handler can answer the dedicated
+	// legacy field error instead of a generic decode failure.
+	Tags []string `json:"tags,omitempty"`
 }
 
 // webhookAssetResult wraps the created asset with channel metadata.
@@ -41,6 +47,10 @@ func writeWebhookAssetError(w http.ResponseWriter, err error, fallback string) {
 		writeError(w, http.StatusUnprocessableEntity, "webhook_workspace_unresolved")
 	case errors.Is(err, assetservice.ErrWebhookDefaultModelMissing):
 		writeError(w, http.StatusUnprocessableEntity, "default_resource_model_missing")
+	case errors.Is(err, tag.ErrUnknownTag):
+		writeError(w, http.StatusUnprocessableEntity, "unknown_tag")
+	case errors.Is(err, tag.ErrArchived):
+		writeError(w, http.StatusUnprocessableEntity, "tag_archived")
 	case errors.Is(err, assetservice.ErrForbidden):
 		writeError(w, http.StatusForbidden, "permission_denied")
 	case errors.Is(err, assetservice.ErrNotFound):
@@ -75,6 +85,12 @@ func webhookCreateAsset(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusUnprocessableEntity, "validation_failed")
 			return
 		}
+		// tag_keys replaced tags in phase 2; the retired field is rejected
+		// outright instead of being silently honored.
+		if input.Tags != nil {
+			writeError(w, http.StatusUnprocessableEntity, "legacy_tags_field_not_supported")
+			return
+		}
 		source := strings.TrimSpace(input.Source)
 		if source != "" && source != "webhook" {
 			writeError(w, http.StatusUnprocessableEntity, "invalid_webhook_source")
@@ -98,6 +114,7 @@ func webhookCreateAsset(deps Dependencies) http.HandlerFunc {
 			Title:           input.Title,
 			Markdown:        input.Markdown,
 			Fields:          input.Fields,
+			TagKeys:         input.TagKeys,
 			ReceivedAt:      receivedAt,
 		})
 		if err != nil {

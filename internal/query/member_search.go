@@ -297,11 +297,17 @@ func (s Service) memberVectorCandidates(ctx context.Context, principal auth.Prin
 	if configCount != len(models) || identityCount != 1 || dimensions != 1024 || modelName == "" || modelVersion == "" {
 		return nil, errors.New("active member embedding config is unavailable or inconsistent")
 	}
-	vectors, err := s.Embeddings.Embed(ctx, []string{q})
-	if err != nil || len(vectors) != 1 || len(vectors[0]) != dimensions {
+	// Phase 3 compile adaptation: the v2 EmbeddingProvider splits document
+	// and query embedding; the full query rewrite replaces this repository.
+	vector, err := s.Embeddings.EmbedQuery(ctx, q)
+	if err != nil || len(vector) != dimensions {
 		return nil, fmt.Errorf("member query embedding failed: %w", err)
 	}
-	literal, err := vectorvalue.Literal(vectors[0])
+	vector64 := make([]float64, len(vector))
+	for i, v := range vector {
+		vector64[i] = float64(v)
+	}
+	literal, err := vectorvalue.Literal(vector64)
 	if err != nil {
 		return nil, fmt.Errorf("encode member query embedding: %w", err)
 	}

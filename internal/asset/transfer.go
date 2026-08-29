@@ -13,6 +13,7 @@ import (
 	"agentchunzhi/internal/auth"
 	"agentchunzhi/internal/authz"
 	"agentchunzhi/internal/store"
+	"agentchunzhi/internal/tag"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -21,12 +22,40 @@ type TransferService struct {
 	Policy authz.WorkspacePolicy
 }
 
+// Unknown tag policies frozen on the batch: "reject" fails unknown keys per
+// row, "create" resolves unknown keys through tag.CreateOrReuseTx under the
+// submitter's tag.manage authority (bounded by maxImportCreatedTags).
+const (
+	UnknownTagPolicyReject = "reject"
+	UnknownTagPolicyCreate = "create"
+)
+
+// maxImportCreatedTags caps how many distinct new tags one batch may create so
+// an import file cannot expand the workspace catalog without bound.
+const maxImportCreatedTags = 500
+
 type ImportInput struct {
 	ResourceModelID        string           `json:"resource_model_id"`
 	ResourceModelVersionID string           `json:"resource_model_version_id"`
 	WorkspaceID            string           `json:"workspace_id"`
 	Rows                   []map[string]any `json:"rows"`
 	SourceName             string           `json:"source_name"`
+	// UnknownTagPolicy defaults to reject. Rows carry tag_keys; the retired
+	// top-level tags field (legacy "tags" input beside tag_keys) is rejected
+	// by the row worker.
+	UnknownTagPolicy string `json:"unknown_tag_policy"`
+}
+
+// NormalizedUnknownTagPolicy returns the effective policy for an input value.
+func NormalizedUnknownTagPolicy(value string) (string, bool) {
+	switch value {
+	case "":
+		return UnknownTagPolicyReject, true
+	case UnknownTagPolicyReject, UnknownTagPolicyCreate:
+		return value, true
+	default:
+		return "", false
+	}
 }
 
 type ExportInput struct {
@@ -104,7 +133,30 @@ func (s TransferService) StartImport(ctx context.Context, principal auth.Princip
 	if versionStatus != "published" {
 		return ImportJob{}, fmt.Errorf("%w: import requires a published resource model version", ErrConflict)
 	}
-	payload, _ := json.Marshal(map[string]any{"source_name": input.SourceName, "rows": input.Rows})
+	policy, policyOK := NormalizedUnknownTagPolicy(input.UnknownTagPolicy)
+	if !policyOK {
+		return ImportJob{}, ErrInvalidInput
+	}
+	input.UnknownTagPolicy = policy
+	// The create policy creates catalog resources on behalf of the submitter,
+	// so it additionally demands tag.manage: the submitter must currently hold
+	// a workspace admin membership (same rule the tag API gates tag.manage with).
+	if policy == UnknownTagPolicyCreate {
+		var allowed bool
+		if err := s.Store.Pool.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM content.workspace_members
+				WHERE organization_id = $1::uuid AND workspace_id = $2::uuid
+				  AND user_id = $3::uuid AND role = 'admin'
+			)
+		`, principal.OrganizationID, workspaceID, principal.UserID).Scan(&allowed); err != nil {
+			return ImportJob{}, fmt.Errorf("verify import tag.manage: %w", err)
+		}
+		if !allowed {
+			return ImportJob{}, fmt.Errorf("%w: unknown_tag_policy=create requires tag.manage", tag.ErrCreatePermission)
+		}
+	}
+	payload, _ := json.Marshal(map[string]any{"source_name": input.SourceName, "rows": input.Rows, "unknown_tag_policy": policy})
 	checksum := sha256.Sum256(payload)
 	tx, err := s.Store.Pool.Begin(ctx)
 	if err != nil {
@@ -115,14 +167,14 @@ func (s TransferService) StartImport(ctx context.Context, principal auth.Princip
 	err = tx.QueryRow(ctx, `
                 INSERT INTO asset.import_batches
                         (organization_id, workspace_id, resource_model_id, resource_model_version_id, submitted_by,
-                         source_checksum, source_name, idempotency_key, status, summary)
-                VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6, $7, $8, 'queued', $9::jsonb)
+                         source_checksum, source_name, idempotency_key, status, summary, unknown_tag_policy)
+                VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6, $7, $8, 'queued', $9::jsonb, $10)
                 ON CONFLICT (organization_id, submitted_by, idempotency_key)
                 WHERE idempotency_key IS NOT NULL DO NOTHING
                 RETURNING id::text
         `, principal.OrganizationID, workspaceID, input.ResourceModelID, input.ResourceModelVersionID,
 		principal.UserID, hex.EncodeToString(checksum[:]), input.SourceName, idempotencyKey,
-		mustJSON(map[string]any{"rows_total": len(input.Rows), "rows_accepted": 0, "rows_rejected": 0})).Scan(&id)
+		mustJSON(map[string]any{"rows_total": len(input.Rows), "rows_accepted": 0, "rows_rejected": 0}), policy).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		var storedChecksum string
 		if err := tx.QueryRow(ctx, `SELECT id::text, source_checksum FROM asset.import_batches WHERE organization_id = $1::uuid AND submitted_by = $2::uuid AND idempotency_key = $3`, principal.OrganizationID, principal.UserID, idempotencyKey).Scan(&id, &storedChecksum); err != nil {

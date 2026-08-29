@@ -14,6 +14,7 @@ import (
 	"agentchunzhi/internal/authz"
 	"agentchunzhi/internal/eventing"
 	"agentchunzhi/internal/store"
+	"agentchunzhi/internal/tag"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -30,7 +31,8 @@ const webhookCreateOperation = "asset.webhook.create"
 
 // WebhookAssetInput carries an inbound webhook asset push after handler-level
 // authentication. WorkspaceID/ResourceModelID hold the target resolved by
-// TransferService.ResolveWebhookTarget.
+// TransferService.ResolveWebhookTarget. TagKeys are normalized tag references;
+// the webhook channel can only cite existing active tags, never create them.
 type WebhookAssetInput struct {
 	WorkspaceID     string
 	ResourceModelID string
@@ -38,6 +40,7 @@ type WebhookAssetInput struct {
 	Title           *string
 	Markdown        *string
 	Fields          map[string]any
+	TagKeys         []string
 	ReceivedAt      time.Time
 }
 
@@ -204,7 +207,8 @@ func (s Service) CreateFromWebhook(ctx context.Context, principal auth.Principal
 		Title    *string        `json:"title"`
 		Markdown *string        `json:"markdown"`
 		Fields   map[string]any `json:"fields"`
-	}{input.Title, input.Markdown, input.Fields})
+		TagKeys  []string       `json:"tag_keys"`
+	}{input.Title, input.Markdown, input.Fields, input.TagKeys})
 	tx, err := s.Store.Pool.Begin(ctx)
 	if err != nil {
 		return replay, false, fmt.Errorf("begin webhook asset create: %w", err)
@@ -253,6 +257,17 @@ func (s Service) CreateFromWebhook(ctx context.Context, principal auth.Principal
 	if err := validateAssetReferences(ctx, tx, principal, modelWorkspace, fieldSchema, fields); err != nil {
 		return replay, false, err
 	}
+	// The webhook technical identity may only reference existing active tags;
+	// unknown or archived keys fail the whole request (tag.ErrUnknownTag /
+	// tag.ErrArchived) so external systems can never expand the catalog.
+	resolvedTags, err := tag.ResolveExisting(ctx, s.Store, principal, modelWorkspace, input.TagKeys)
+	if err != nil {
+		return replay, false, err
+	}
+	tagIDs := make([]string, 0, len(resolvedTags))
+	for _, resolved := range resolvedTags {
+		tagIDs = append(tagIDs, resolved.ID)
+	}
 	payload := map[string]any{
 		"channel":     provenance["channel"],
 		"received_at": provenance["received_at"],
@@ -275,7 +290,7 @@ func (s Service) CreateFromWebhook(ctx context.Context, principal auth.Principal
 	assetID, versionID, versionNo, err := createAssetWithFirstVersionTx(ctx, tx,
 		principal.OrganizationID, modelWorkspace, resourceModelID, modelVersionID,
 		rawInputID, OriginHuman, derefString(input.Title), "", derefString(input.Markdown),
-		fields, principal.UserID)
+		fields, tagIDs, tag.SourceWebhook, principal.UserID)
 	if err != nil {
 		return replay, false, err
 	}
