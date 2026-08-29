@@ -126,13 +126,17 @@ func (s Service) List(ctx context.Context, principal auth.Principal, workspaceID
 		return nil, err
 	}
 	rows, err := s.Store.Pool.Query(ctx, `
-		SELECT rm.id::text, rm.workspace_id::text, rm.model_key, rm.name, rm.description,
+		SELECT rm.id::text, COALESCE(rm.workspace_id::text, '') AS workspace_id, rm.model_key, rm.name, rm.description,
 		       rm.content_kind, rm.status, rm.model_capabilities, rm.created_at, rm.updated_at,
 		       mv.id::text, mv.version_no, mv.status, mv.field_schema, mv.form_schema,
 		       mv.list_schema, mv.policy, mv.schema_checksum, mv.validated_at, mv.published_at, mv.retired_at, mv.created_at
 		FROM model.resource_models rm
 		LEFT JOIN model.resource_model_versions mv ON mv.organization_id = rm.organization_id AND mv.id = rm.current_version_id
-		WHERE rm.organization_id = $1::uuid AND rm.workspace_id = $2::uuid AND rm.status <> 'archived'
+		-- Workspace-scoped models plus organization-level (builtin) models:
+		-- the builtin seed creates models with NULL workspace_id for every
+		-- organization, and the CMS model picker must surface them.
+		WHERE rm.organization_id = $1::uuid AND (rm.workspace_id = $2::uuid OR rm.workspace_id IS NULL)
+		  AND rm.status <> 'archived'
 		ORDER BY rm.updated_at DESC, rm.id
 	`, principal.OrganizationID, scope.WorkspaceID)
 	if err != nil {
