@@ -1,7 +1,6 @@
 -- 0007_content_runtime.sql
 -- Conversation, note, derivation and processing runtime tables required by the
 -- not-yet-migrated conversation/automation modules.
-BEGIN;
 
 CREATE TABLE content.conversations (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -246,4 +245,3 @@ CREATE INDEX deletion_jobs_pending_idx
 CREATE INDEX deletion_jobs_scope_idx
     ON content.deletion_jobs (organization_id, workspace_id, created_at DESC);
 
-COMMIT;

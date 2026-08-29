@@ -9,6 +9,10 @@ import (
 	"agentchunzhi/internal/store"
 )
 
+// maxBuildAttempts caps how often one run may be (re)built before the
+// reconciler declares it a poison build and fails it for good.
+const maxBuildAttempts = 8
+
 // ReconcileProjection repairs the projection pipeline without ever touching
 // ready chunk content: expired build leases return to queued, embedding
 // counters recalibrate from actual rows, lost embed jobs are re-inserted and
@@ -21,10 +25,12 @@ func ReconcileProjection(ctx context.Context, st *store.Store, queue QueueInsert
 		lease = 15 * time.Minute
 	}
 
-	// 1. Requeue building runs whose lease expired.
+	// 1. Requeue building runs whose lease expired. A stalled build burns one
+	// attempt like a failed one so poison builds cannot loop forever.
 	if _, err := st.Pool.Exec(ctx, `
 		UPDATE retrieval.projection_runs
-		SET status = 'queued', started_at = NULL, updated_at = now()
+		SET status = 'queued', started_at = NULL, updated_at = now(),
+		    build_attempts = build_attempts + 1
 		WHERE status = 'building'
 		  AND started_at < now() - $1::interval
 	`, lease.String()); err != nil {
@@ -135,7 +141,7 @@ func ReconcileProjection(ctx context.Context, st *store.Store, queue QueueInsert
 		}
 
 		buildRows, err := st.Pool.Query(ctx, `
-			SELECT run.id::text
+			SELECT run.id::text, run.build_attempts
 			FROM retrieval.projection_runs run
 			WHERE run.status = 'queued'
 			LIMIT 200
@@ -143,29 +149,46 @@ func ReconcileProjection(ctx context.Context, st *store.Store, queue QueueInsert
 		if err != nil {
 			return fmt.Errorf("list queued retrieval runs: %w", err)
 		}
-		var queuedIDs []string
+		type queuedRun struct {
+			ID       string
+			Attempts int
+		}
+		var queuedRuns []queuedRun
 		for buildRows.Next() {
-			var runID string
-			if err := buildRows.Scan(&runID); err != nil {
+			var item queuedRun
+			if err := buildRows.Scan(&item.ID, &item.Attempts); err != nil {
 				buildRows.Close()
 				return err
 			}
-			queuedIDs = append(queuedIDs, runID)
+			queuedRuns = append(queuedRuns, item)
 		}
 		if err := buildRows.Err(); err != nil {
 			buildRows.Close()
 			return err
 		}
 		buildRows.Close()
-		for _, runID := range queuedIDs {
-			live, err := hasLiveRiverJob(ctx, st, JobKindBuildProjectionRun, runID)
+		for _, item := range queuedRuns {
+			live, err := hasLiveRiverJob(ctx, st, JobKindBuildProjectionRun, item.ID)
 			if err != nil {
 				return err
 			}
 			if live {
 				continue
 			}
-			if _, err := queue.Insert(ctx, BuildProjectionRunArgs{RunID: runID}, nil); err != nil {
+			if item.Attempts >= maxBuildAttempts {
+				// Poison build: every retry burned an attempt and none
+				// completed the run — fail it instead of requeueing forever.
+				if _, err := st.Pool.Exec(ctx, `
+					UPDATE retrieval.projection_runs
+					SET status = 'failed', failure_code = 'build_attempts_exhausted',
+					    failure_stage = 'build', updated_at = now()
+					WHERE id = $1::uuid AND status = 'queued'
+				`, item.ID); err != nil {
+					return fmt.Errorf("fail exhausted retrieval build: %w", err)
+				}
+				continue
+			}
+			if _, err := queue.Insert(ctx, BuildProjectionRunArgs{RunID: item.ID}, nil); err != nil {
 				return fmt.Errorf("re-enqueue retrieval build: %w", err)
 			}
 		}

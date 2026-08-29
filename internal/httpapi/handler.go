@@ -1805,6 +1805,24 @@ func publishAsset(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusConflict, "asset_publish_conflict")
 			return
 		}
+		// The agent-facing publish path enforces the same publishing policy
+		// gates as the member surface; keep the error contract identical.
+		if errors.Is(err, assetservice.ErrApprovalRequired) {
+			writeError(w, http.StatusForbidden, "action_not_allowed")
+			return
+		}
+		if errors.Is(err, assetservice.ErrConfirmationRequired) {
+			writeError(w, http.StatusConflict, "human_confirmation_required")
+			return
+		}
+		if errors.Is(err, assetservice.ErrAttachmentNotClean) {
+			writeError(w, http.StatusConflict, "attachments_not_clean")
+			return
+		}
+		if errors.Is(err, assetservice.ErrRequiredFieldMissing) {
+			writeError(w, http.StatusConflict, "required_field_missing")
+			return
+		}
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "asset_publish_failed")
 			return

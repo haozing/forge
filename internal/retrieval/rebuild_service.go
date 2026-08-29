@@ -83,7 +83,7 @@ func (s RebuildService) StartRebuild(ctx context.Context, organizationID string,
 	}
 	reason = normalizeRebuildReason(reason)
 
-	profileID, err := s.resolveProfileID(ctx, organizationID, reason)
+	profileID, err := s.resolveProfileID(ctx, organizationID)
 	if err != nil {
 		return Rebuild{}, err
 	}
@@ -162,23 +162,22 @@ func normalizeRebuildReason(reason string) string {
 	}
 }
 
-func (s RebuildService) resolveProfileID(ctx context.Context, organizationID, reason string) (string, error) {
+// resolveProfileID picks the profile a rebuild backfills. The active profile
+// serves every reason; when only a warming profile exists, any rebuild —
+// manual included — backfills that profile: warming an organization that has
+// never activated one is exactly the bootstrap semantic.
+func (s RebuildService) resolveProfileID(ctx context.Context, organizationID string) (string, error) {
 	repo := ProfileRepository{Store: s.Store}
 	profile, err := repo.GetActiveProfile(ctx, organizationID)
 	if errors.Is(err, ErrNoActiveProfile) {
 		warming, warmErr := repo.GetWarmingProfile(ctx, organizationID)
+		if errors.Is(warmErr, pgx.ErrNoRows) {
+			return "", ErrNoActiveProfile
+		}
 		if warmErr != nil {
-			if errors.Is(warmErr, pgx.ErrNoRows) {
-				return "", ErrNoActiveProfile
-			}
 			return "", warmErr
 		}
-		// A warming rebuild targets the warming profile; any other scope
-		// needs the active profile.
-		if reason == ReasonProfileWarming {
-			return warming.ID, nil
-		}
-		return "", ErrNoActiveProfile
+		return warming.ID, nil
 	}
 	return profile.ID, err
 }

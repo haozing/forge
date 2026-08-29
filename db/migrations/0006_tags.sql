@@ -2,7 +2,6 @@
 -- Tag storage boundary fixed in phase 0 (service arrives in phase 2):
 -- workspace-scoped definitions, draft relations, immutable version relations
 -- and AI suggestion records.
-BEGIN;
 
 CREATE TABLE asset.tags (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -139,4 +138,3 @@ CREATE CONSTRAINT TRIGGER asset_version_tags_limit_guard
     DEFERRABLE INITIALLY DEFERRED
     FOR EACH ROW EXECUTE FUNCTION asset.enforce_version_tag_limit();
 
-COMMIT;

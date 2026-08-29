@@ -82,6 +82,23 @@ func (s Service) Publish(ctx context.Context, principal auth.Principal, allowedM
 	if row.PublicationStatus == PublicationArchived {
 		return PublishResult{}, ErrAssetArchived
 	}
+	// The immutable publishing policy bound to the current working version
+	// gates agent publishes exactly like the member surface: approval-policy
+	// assets must go through a PublicationRequest, and the gates (required
+	// fields, human confirmation, clean attachments) must hold for the version
+	// about to be published. versionID is deliberately ignored — the contract
+	// publishes the asset's current working version.
+	_ = versionID
+	policy, err := PublishPolicyForAssetTx(ctx, tx, row.OrganizationID, assetID)
+	if err != nil {
+		return PublishResult{}, err
+	}
+	if policy.Mode != PublishingModeDirect {
+		return PublishResult{}, ErrApprovalRequired
+	}
+	if err := EnsurePublishableVersionTx(ctx, tx, row.OrganizationID, row.CurrentWorkingVersionID, policy); err != nil {
+		return PublishResult{}, err
+	}
 	previous := row.CurrentPublishedVersionID
 	row, err = SetPublishedPointerTx(ctx, tx, row, row.CurrentWorkingVersionID)
 	if err != nil {

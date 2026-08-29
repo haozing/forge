@@ -3,7 +3,6 @@
 -- globally unique email; agents are technical identities without any member
 -- role. Departments, groups and per-organization role tables from v1 are not
 -- part of the v2 ownership chain.
-BEGIN;
 
 CREATE TABLE organization.organizations (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -129,4 +128,3 @@ CREATE TABLE "authorization".policy_revisions (
     updated_at timestamptz NOT NULL DEFAULT now()
 );
 
-COMMIT;

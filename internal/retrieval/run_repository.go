@@ -60,6 +60,21 @@ func EnsureQueuedRunTx(ctx context.Context, tx pgx.Tx, organizationID, workspace
 	return runID, nil
 }
 
+// NoteBuildAttempt records one burned build attempt of a run (build failure or
+// expired lease); the reconciler stops requeueing once the attempts reach the
+// cap and fails the run instead of looping on a poison build.
+func (r RunRepository) NoteBuildAttempt(ctx context.Context, runID string) error {
+	_, err := r.Store.Pool.Exec(ctx, `
+		UPDATE retrieval.projection_runs
+		SET build_attempts = build_attempts + 1, updated_at = now()
+		WHERE id = $1::uuid
+	`, runID)
+	if err != nil {
+		return fmt.Errorf("note retrieval build attempt: %w", err)
+	}
+	return nil
+}
+
 // ClaimRun transitions a queued/failed run to building. The conditional
 // UPDATE is atomic: only one worker can win per run.
 func (r RunRepository) ClaimRun(ctx context.Context, runID string) (Run, error) {

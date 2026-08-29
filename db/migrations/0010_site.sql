@@ -2,7 +2,6 @@
 -- Public site storage boundary fixed in phase 0 (service arrives in phase 5).
 -- Bindings store asset identity and display configuration only; the published
 -- version is always resolved from the Asset's current published pointer.
-BEGIN;
 
 CREATE TABLE site.public_sites (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -42,4 +41,3 @@ CREATE TABLE site.site_content_bindings (
 CREATE INDEX site_content_bindings_site_idx
     ON site.site_content_bindings (site_id, created_at);
 
-COMMIT;

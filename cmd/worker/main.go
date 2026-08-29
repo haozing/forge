@@ -193,6 +193,7 @@ func main() {
 	river.AddWorker(workers, &worker.DispatchEventWorker{Dispatcher: dispatcher})
 	river.AddWorker(workers, &worker.RecoverPendingDeliveriesWorker{Store: db, Limit: 100})
 	river.AddWorker(workers, &worker.RecoverAutomationAttemptsWorker{Service: automation.Service{Store: db}, Limit: 100})
+	river.AddWorker(workers, &worker.ExpiredRowsWorker{Store: db, Logf: log.Printf})
 	river.AddWorker(workers, &retrieval.BuildProjectionRunWorker{Engine: retrievalEngine})
 	river.AddWorker(workers, &retrieval.EmbedChunkBatchWorker{Engine: retrievalEngine})
 	river.AddWorker(workers, &retrieval.FinalizeProjectionRunWorker{Engine: retrievalEngine})
@@ -236,6 +237,12 @@ func main() {
 			}, nil),
 			river.NewPeriodicJob(river.PeriodicInterval(time.Minute), func() (river.JobArgs, *river.InsertOpts) {
 				return retrieval.CleanupArgs{}, nil
+			}, nil),
+			// Retention sweep for tables without an application-level expiry
+			// path: idempotency replay keys, dead sessions, auth rate-limit
+			// buckets.
+			river.NewPeriodicJob(river.PeriodicInterval(time.Minute), func() (river.JobArgs, *river.InsertOpts) {
+				return worker.CleanupExpiredRowsArgs{}, nil
 			}, nil),
 		},
 	})

@@ -34,6 +34,7 @@ func newCursorCodec(secret string) cursorCodec {
 
 func (c cursorCodec) key() []byte {
 	if c.secret == "" {
+		warnFallbackSecret("SEARCH_CURSOR_SECRET", "cursor signing")
 		return []byte("agentchunzhi-cursor-test-secret")
 	}
 	return []byte(c.secret)

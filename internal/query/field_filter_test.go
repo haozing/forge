@@ -3,6 +3,7 @@ package query
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func testSchema() map[string]map[string]fieldDefinition {
@@ -140,5 +141,83 @@ func TestTypedFieldFilterNeverInlinesValues(t *testing.T) {
 	// Every placeholder indexes into the bound argument list.
 	if len(builder.args) < 4 {
 		t.Fatalf("expected bound parameters, got %#v", builder.args)
+	}
+}
+
+func TestTypedFieldFilterJsonbBindsJSONStringLiterals(t *testing.T) {
+	schemas := testSchema()
+	// Text/enum equality binds a complete JSON document (with quotes) so the
+	// ::jsonb cast cannot fail with 22P02 on plain text.
+	compiled, err := compileFieldFilters([]FieldFilter{
+		{testModel, "title_text", "eq", "wide"},
+		{testModel, "summary_md", "neq", "he said \"hi\""},
+		{testModel, "shot_size", "in", []any{"wide", "close"}},
+	}, schemas)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	builder := &sqlBuilder{}
+	predicates := fieldPredicates(builder, compiled, "v.fields")
+	if len(predicates) != 3 {
+		t.Fatalf("expected three predicates, got %d", len(predicates))
+	}
+	// Args alternate field key / comparison value; every value must be a
+	// complete JSON document (leading/trailing quotes).
+	want := []any{
+		"title_text", `"wide"`,
+		"summary_md", `"he said \"hi\""`,
+		"shot_size", `"wide"`, `"close"`,
+	}
+	if len(builder.args) != len(want) {
+		t.Fatalf("bound args = %#v, want %#v", builder.args, want)
+	}
+	for index, value := range want {
+		if builder.args[index] != value {
+			t.Fatalf("bound arg %d = %#v, want %#v (text values must be quoted JSON)", index, builder.args[index], value)
+		}
+	}
+	// The SQL text itself stays free of the values.
+	for _, predicate := range predicates {
+		if strings.Contains(predicate, "wide") || strings.Contains(predicate, "close") {
+			t.Fatalf("value leaked into SQL text: %q", predicate)
+		}
+	}
+}
+
+func TestTypedFieldFilterScalarPathsBindUntyped(t *testing.T) {
+	schemas := testSchema()
+	compiled, err := compileFieldFilters([]FieldFilter{
+		{testModel, "duration", "eq", float64(30)},
+		{testModel, "shot_day", "eq", "2026-01-01"},
+		{testModel, "approved", "eq", true},
+	}, schemas)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	builder := &sqlBuilder{}
+	predicates := fieldPredicates(builder, compiled, "v.fields")
+	if len(predicates) != 3 {
+		t.Fatalf("expected three predicates, got %d", len(predicates))
+	}
+	for _, arg := range builder.args {
+		// Only the bound field keys are strings here; numeric, temporal and
+		// boolean values must not be JSON-quoted.
+		if text, ok := arg.(string); ok && (text == `"30"` || strings.HasPrefix(text, `"2`) || text == `"true"`) {
+			t.Fatalf("scalar value bound as JSON literal: %#v", builder.args)
+		}
+	}
+	numericSeen, temporalSeen, booleanSeen := false, false, false
+	for _, arg := range builder.args {
+		switch arg.(type) {
+		case float64:
+			numericSeen = true
+		case time.Time:
+			temporalSeen = true
+		case bool:
+			booleanSeen = true
+		}
+	}
+	if !numericSeen || !temporalSeen || !booleanSeen {
+		t.Fatalf("numeric/temporal/boolean bindings missing: %#v", builder.args)
 	}
 }

@@ -169,7 +169,7 @@ func main() {
 	// Cookie identity is fixed from configuration, never from the request:
 	// production uses the __Host- prefix which forces Secure, Path=/ and no
 	// Domain.
-	if cfg.Environment == "production" {
+	if cfg.IsProduction() {
 		auth.SessionCookieConfig.Name = "__Host-agent_session"
 		auth.SessionCookieConfig.Secure = true
 	}
@@ -211,7 +211,10 @@ func main() {
 		// lifecycle via the service) and rebuild batches.
 		RetrievalProfiles: retrievalProfileAdapter{
 			service: retrieval.ProfileService{
-				Store:              db,
+				Store: db,
+				// Queue lets profile creation enqueue the warming backfill
+				// immediately; the API process only inserts River jobs.
+				Queue:              rebuildQueue,
 				Manifests:          registeredManifests,
 				DefaultManifestKey: registry.ManifestKey,
 			},

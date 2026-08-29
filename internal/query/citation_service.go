@@ -39,6 +39,7 @@ func buildCitationToken(secret string, payload citationPayload) (string, error) 
 func citationMAC(secret string, body []byte) []byte {
 	key := secret
 	if key == "" {
+		warnFallbackSecret("QUERY_HASH_SECRET", "citation token signing")
 		key = "agentchunzhi-citation-test-secret"
 	}
 	mac := hmac.New(sha256.New, []byte(key))

@@ -182,6 +182,12 @@ func (s Service) Submit(ctx context.Context, principal auth.Principal, workspace
 	if err != nil {
 		return Request{}, err
 	}
+	// The asset must live in the routed workspace; a mismatch hides as
+	// NotFound (CommitDraft already blocks it — this is the redundant
+	// defense-in-depth re-check on the aggregate's own transaction).
+	if assetWorkspace != workspaceID {
+		return Request{}, ErrNotFound
+	}
 	if assetVisibility == access.VisibilityPublic && !access.Valid(assetVisibility) {
 		return Request{}, ErrInvalidInput
 	}
@@ -189,8 +195,15 @@ func (s Service) Submit(ctx context.Context, principal auth.Principal, workspace
 	// submission: human confirmation and clean attachments are re-checked in
 	// this transaction because the working version may have moved since the
 	// draft commit.
-	if _, err := enforcePublishPolicyTx(ctx, tx, principal.OrganizationID, assetID, versionID); err != nil {
+	policy, err := enforcePublishPolicyTx(ctx, tx, principal.OrganizationID, assetID, versionID)
+	if err != nil {
 		return Request{}, err
+	}
+	// Only approval-policy assets enter the queue: a direct-policy submission
+	// would strand a permanently pending request on the per-asset unique index
+	// (mirrors the Approve-side mode check below).
+	if policy.Mode != asset.PublishingModeApproval {
+		return Request{}, ErrConflict
 	}
 	var request Request
 	var decisionComment, cancelReason *string
@@ -460,8 +473,8 @@ func (s Service) Get(ctx context.Context, principal auth.Principal, workspaceID,
 		       COALESCE(v.title, '')
 		FROM asset.publication_requests pr
 		LEFT JOIN asset.asset_versions v ON v.id = pr.asset_version_id
-		WHERE pr.organization_id = $1::uuid AND pr.id = $2::uuid
-	`, principal.OrganizationID, requestID)
+		WHERE pr.organization_id = $1::uuid AND pr.id = $2::uuid AND pr.workspace_id = $3::uuid
+	`, principal.OrganizationID, requestID, workspaceID)
 	item, err := scanRequest(row)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Request{}, ErrNotFound
@@ -501,9 +514,9 @@ func (s Service) decide(ctx context.Context, principal auth.Principal, workspace
 		       a.workspace_id::text, a.resource_model_id::text
 		FROM asset.publication_requests pr
 		JOIN asset.assets a ON a.organization_id = pr.organization_id AND a.id = pr.asset_id
-		WHERE pr.organization_id = $1::uuid AND pr.id = $2::uuid
+		WHERE pr.organization_id = $1::uuid AND pr.id = $2::uuid AND pr.workspace_id = $3::uuid
 		FOR UPDATE OF pr
-	`, principal.OrganizationID, requestID).Scan(&status, &submittedBy, &assetID, &versionID, &revision, &assetWorkspace, &assetModel)
+	`, principal.OrganizationID, requestID, workspaceID).Scan(&status, &submittedBy, &assetID, &versionID, &revision, &assetWorkspace, &assetModel)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Request{}, ErrNotFound
 	}
@@ -645,9 +658,9 @@ func (s Service) Cancel(ctx context.Context, principal auth.Principal, workspace
 	err = tx.QueryRow(ctx, `
 		SELECT status, submitted_by::text, revision, workspace_id::text
 		FROM asset.publication_requests
-		WHERE organization_id = $1::uuid AND id = $2::uuid
+		WHERE organization_id = $1::uuid AND id = $2::uuid AND workspace_id = $3::uuid
 		FOR UPDATE
-	`, principal.OrganizationID, requestID).Scan(&status, &submittedBy, &revision, &assetWorkspace)
+	`, principal.OrganizationID, requestID, workspaceID).Scan(&status, &submittedBy, &revision, &assetWorkspace)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Request{}, ErrNotFound
 	}
@@ -734,6 +747,8 @@ func batchErrorCode(err error) string {
 		return "human_confirmation_required"
 	case errors.Is(err, asset.ErrAttachmentNotClean):
 		return "attachments_not_clean"
+	case errors.Is(err, asset.ErrRequiredFieldMissing):
+		return "required_field_missing"
 	case errors.Is(err, ErrSelfApproval):
 		return "self_approval_not_allowed"
 	case errors.Is(err, ErrVersionSuperseded):
@@ -760,8 +775,8 @@ func (s Service) AddComment(ctx context.Context, principal auth.Principal, works
 	var status string
 	err = s.Store.Pool.QueryRow(ctx, `
 		SELECT submitted_by::text, workspace_id::text, status FROM asset.publication_requests
-		WHERE organization_id = $1::uuid AND id = $2::uuid
-	`, principal.OrganizationID, requestID).Scan(&submittedBy, &requestWorkspace, &status)
+		WHERE organization_id = $1::uuid AND id = $2::uuid AND workspace_id = $3::uuid
+	`, principal.OrganizationID, requestID, workspaceID).Scan(&submittedBy, &requestWorkspace, &status)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Comment{}, ErrNotFound
 	}
@@ -785,7 +800,8 @@ func (s Service) AddComment(ctx context.Context, principal auth.Principal, works
 	return comment, nil
 }
 
-// ListComments returns the discussion thread of one request.
+// ListComments returns one page of a request's discussion thread, ordered by
+// (created_at, id) with keyset pagination.
 func (s Service) ListComments(ctx context.Context, principal auth.Principal, workspaceID, requestID, cursor string, limit int) ([]Comment, string, error) {
 	scope, err := s.require(ctx, principal, workspaceID, authz.ActionPublicationRead)
 	if err != nil {
@@ -797,12 +813,22 @@ func (s Service) ListComments(ctx context.Context, principal auth.Principal, wor
 	if limit <= 0 || limit > 100 {
 		limit = 50
 	}
+	var pageCursor struct {
+		CreatedAt time.Time `json:"created_at"`
+		ID        string    `json:"id"`
+	}
+	if strings.TrimSpace(cursor) != "" {
+		raw, err := base64.RawURLEncoding.DecodeString(cursor)
+		if err != nil || json.Unmarshal(raw, &pageCursor) != nil || !s.validID(pageCursor.ID) {
+			return nil, "", ErrInvalidInput
+		}
+	}
 	if scope.Role == authz.WorkspaceRoleEditor {
 		var submittedBy string
 		err := s.Store.Pool.QueryRow(ctx, `
 			SELECT submitted_by::text FROM asset.publication_requests
-			WHERE organization_id = $1::uuid AND id = $2::uuid
-		`, principal.OrganizationID, requestID).Scan(&submittedBy)
+			WHERE organization_id = $1::uuid AND id = $2::uuid AND workspace_id = $3::uuid
+		`, principal.OrganizationID, requestID, workspaceID).Scan(&submittedBy)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, "", ErrNotFound
 		}
@@ -813,12 +839,18 @@ func (s Service) ListComments(ctx context.Context, principal auth.Principal, wor
 			return nil, "", ErrNotFound
 		}
 	}
-	rows, err := s.Store.Pool.Query(ctx, `
+	query := `
 		SELECT id::text, publication_request_id::text, body, author_user_id::text, created_at
 		FROM asset.publication_request_comments
 		WHERE organization_id = $1::uuid AND publication_request_id = $2::uuid
-		ORDER BY created_at, id
-	`, principal.OrganizationID, requestID)
+		  AND workspace_id = $3::uuid`
+	args := []any{principal.OrganizationID, requestID, workspaceID}
+	if pageCursor.ID != "" {
+		query += fmt.Sprintf(" AND (created_at, id) > ($%d::timestamptz, $%d::uuid)", len(args)+1, len(args)+2)
+		args = append(args, pageCursor.CreatedAt.UTC().Format(time.RFC3339Nano), pageCursor.ID)
+	}
+	query += " ORDER BY created_at, id LIMIT " + fmt.Sprint(limit+1)
+	rows, err := s.Store.Pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, "", err
 	}
@@ -831,7 +863,20 @@ func (s Service) ListComments(ctx context.Context, principal auth.Principal, wor
 		}
 		comments = append(comments, comment)
 	}
-	return comments, "", rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, "", err
+	}
+	next := ""
+	if len(comments) > limit {
+		comments = comments[:limit]
+		last := comments[len(comments)-1]
+		raw, _ := json.Marshal(map[string]string{
+			"created_at": last.CreatedAt.UTC().Format(time.RFC3339Nano),
+			"id":         last.ID,
+		})
+		next = base64.RawURLEncoding.EncodeToString(raw)
+	}
+	return comments, next, nil
 }
 
 // PendingCount feeds the workspace statistics.

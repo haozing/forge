@@ -20,6 +20,7 @@ import (
 	"agentchunzhi/internal/notification"
 	"agentchunzhi/internal/store"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -36,9 +37,9 @@ type Service struct {
 	Store  *store.Store
 	Events *eventing.EventStore
 	// Password reset delivery dependencies.
-	Cipher          *notification.Cipher
-	KeyVersion      int32
-	BaseURL         string
+	Cipher           *notification.Cipher
+	KeyVersion       int32
+	BaseURL          string
 	OrganizationName string
 }
 
@@ -420,11 +421,15 @@ func (s Service) RequestPasswordReset(ctx context.Context, email string) error {
 	payload, _ := json.Marshal(map[string]any{
 		"token": token, "link": link, "organization_name": s.OrganizationName, "email": normalized,
 	})
-	_, ciphertext, err := s.Cipher.Encrypt(userID, notification.TemplatePasswordReset, payload)
+	// The ciphertext is bound to the delivery row id, so the id is generated
+	// here and written explicitly by Enqueue; the worker re-derives the same
+	// associated data from the claimed row.
+	deliveryID := uuid.NewString()
+	_, ciphertext, err := s.Cipher.Encrypt(deliveryID, notification.TemplatePasswordReset, payload)
 	if err != nil {
 		return err
 	}
-	if _, err := notification.Enqueue(ctx, tx, organizationID, notification.TemplatePasswordReset, normalized, s.KeyVersion, ciphertext); err != nil {
+	if _, err := notification.Enqueue(ctx, tx, deliveryID, organizationID, notification.TemplatePasswordReset, normalized, s.KeyVersion, ciphertext); err != nil {
 		return err
 	}
 	store.AppendAuditTx(ctx, tx, store.NewAuditEntry("identity.password.reset_requested", organizationID, userID, "user", userID, nil), "")

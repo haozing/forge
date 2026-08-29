@@ -2,6 +2,8 @@ package tag
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -30,6 +32,9 @@ type Tag struct {
 	UpdatedAt      time.Time  `json:"updated_at"`
 	ArchivedAt     *time.Time `json:"archived_at,omitempty"`
 	ETag           string     `json:"etag"`
+	// sortValue is the catalog sort key of the row (never serialized); List
+	// embeds it into the next-page cursor.
+	sortValue string `json:"-"`
 }
 
 // Summary is the DTO embedded in draft/version/query responses.
@@ -225,6 +230,54 @@ func (s Service) Get(ctx context.Context, principal auth.Principal, workspaceID,
 	return item, err
 }
 
+// tagListCursorVersion is the payload schema version of the catalog cursor.
+const tagListCursorVersion = 1
+
+// tagListCursor is the opaque keyset cursor of one sort option: the sort key
+// value plus the id tie-breaker of the last returned row.
+type tagListCursor struct {
+	Version int    `json:"v"`
+	Sort    string `json:"sort"`
+	Value   string `json:"value"`
+	ID      string `json:"id"`
+}
+
+// encodeTagListCursor renders base64url(JSON) so key values never depend on a
+// delimiter that display names could contain.
+func encodeTagListCursor(sort, value, id string) (string, error) {
+	payload, err := json.Marshal(tagListCursor{Version: tagListCursorVersion, Sort: sort, Value: value, ID: id})
+	if err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(payload), nil
+}
+
+// decodeTagListCursor validates the framing, the version and — for the
+// created_at sort — the timestamp value; sort must match the request the page
+// continues. Malformed cursors fail with ErrInvalidInput (422).
+func decodeTagListCursor(token, sort string) (tagListCursor, error) {
+	if token == "" {
+		return tagListCursor{}, nil
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(token)
+	if err != nil {
+		return tagListCursor{}, ErrInvalidInput
+	}
+	var cursor tagListCursor
+	if err := json.Unmarshal(raw, &cursor); err != nil {
+		return tagListCursor{}, ErrInvalidInput
+	}
+	if cursor.Version != tagListCursorVersion || cursor.Sort != sort || cursor.ID == "" || cursor.Value == "" {
+		return tagListCursor{}, ErrInvalidInput
+	}
+	if sort == "created_at:desc" {
+		if _, err := time.Parse(time.RFC3339Nano, cursor.Value); err != nil {
+			return tagListCursor{}, ErrInvalidInput
+		}
+	}
+	return cursor, nil
+}
+
 // List returns the workspace catalog with cursor pagination.
 func (s Service) List(ctx context.Context, principal auth.Principal, workspaceID string, input ListInput) (Page, error) {
 	if !s.validID(workspaceID) {
@@ -247,6 +300,26 @@ func (s Service) List(ctx context.Context, principal auth.Principal, workspaceID
 	if sort == "" {
 		sort = "key:asc"
 	}
+	order := "normalized_key ASC, id ASC"
+	sortExpr := "normalized_key"
+	switch sort {
+	case "key:asc":
+	case "display_name:asc":
+		order = "lower(display_name) ASC, id ASC"
+		sortExpr = "lower(display_name)"
+	case "created_at:desc":
+		order = "created_at DESC, id DESC"
+		sortExpr = "created_at"
+	default:
+		return Page{}, ErrInvalidInput
+	}
+	cursor, err := decodeTagListCursor(input.Cursor, sort)
+	if err != nil {
+		return Page{}, err
+	}
+	if cursor.ID != "" && !s.validID(cursor.ID) {
+		return Page{}, ErrInvalidInput
+	}
 	where := []string{"organization_id = $1::uuid", "workspace_id = $2::uuid"}
 	args := []any{principal.OrganizationID, workspaceID}
 	arg := func(value any) string {
@@ -259,24 +332,26 @@ func (s Service) List(ctx context.Context, principal auth.Principal, workspaceID
 	if q := strings.TrimSpace(input.Query); q != "" {
 		where = append(where, "(normalized_key ILIKE "+arg("%"+q+"%")+" OR display_name ILIKE "+arg("%"+q+"%")+")")
 	}
-	order := "normalized_key ASC, id ASC"
-	switch sort {
-	case "key:asc":
-	case "display_name:asc":
-		order = "lower(display_name) ASC, id ASC"
-	case "created_at:desc":
-		order = "created_at DESC, id DESC"
-	default:
-		return Page{}, ErrInvalidInput
+	if cursor.ID != "" {
+		// Keyset continuation on the exact sort key plus the id tie-breaker.
+		switch sort {
+		case "key:asc":
+			where = append(where, "(normalized_key, id) > ("+arg(cursor.Value)+", "+arg(cursor.ID)+"::uuid)")
+		case "display_name:asc":
+			where = append(where, "(lower(display_name), id) > ("+arg(cursor.Value)+", "+arg(cursor.ID)+"::uuid)")
+		case "created_at:desc":
+			where = append(where, "(created_at, id) < ("+arg(cursor.Value)+"::timestamptz, "+arg(cursor.ID)+"::uuid)")
+		}
 	}
 	query := fmt.Sprintf(`
 		SELECT id::text, workspace_id::text, normalized_key, display_name, slug, status, revision,
-		       created_by::text, updated_by::text, created_at, updated_at, archived_at
+		       created_by::text, updated_by::text, created_at, updated_at, archived_at,
+		       %s::text
 		FROM asset.tags
 		WHERE %s
 		ORDER BY %s
 		LIMIT %d
-	`, strings.Join(where, " AND "), order, limit+1)
+	`, sortExpr, strings.Join(where, " AND "), order, limit+1)
 	rows, err := s.Store.Pool.Query(ctx, query, args...)
 	if err != nil {
 		return Page{}, err
@@ -285,12 +360,20 @@ func (s Service) List(ctx context.Context, principal auth.Principal, workspaceID
 	page := Page{Items: make([]Tag, 0, limit+1)}
 	for rows.Next() {
 		var item Tag
+		var sortValue string
 		if err := rows.Scan(&item.ID, &item.WorkspaceID, &item.Key, &item.DisplayName, &item.Slug,
 			&item.Status, &item.Revision, &item.CreatedBy, &item.UpdatedBy, &item.CreatedAt,
-			&item.UpdatedAt, &item.ArchivedAt); err != nil {
+			&item.UpdatedAt, &item.ArchivedAt, &sortValue); err != nil {
 			return Page{}, err
 		}
 		item.ETag = fmt.Sprint(item.Revision)
+		if sort == "created_at:desc" {
+			// RFC 3339 travels through the cursor verbatim; the database text
+			// rendering depends on the session timezone.
+			item.sortValue = item.CreatedAt.UTC().Format(time.RFC3339Nano)
+		} else {
+			item.sortValue = sortValue
+		}
 		page.Items = append(page.Items, item)
 	}
 	if err := rows.Err(); err != nil {
@@ -300,7 +383,10 @@ func (s Service) List(ctx context.Context, principal auth.Principal, workspaceID
 		page.HasMore = true
 		page.Items = page.Items[:limit]
 		last := page.Items[len(page.Items)-1]
-		page.NextCursor = last.ID
+		page.NextCursor, err = encodeTagListCursor(sort, last.sortValue, last.ID)
+		if err != nil {
+			return Page{}, err
+		}
 	}
 	return page, nil
 }
@@ -438,7 +524,10 @@ func lockTag(ctx context.Context, tx pgx.Tx, organizationID, workspaceID, tagID,
 	if err != nil {
 		return Tag{}, err
 	}
-	if expectedRevision != "" && fmt.Sprint(item.Revision) != strings.Trim(expectedRevision, "\"") {
+	// An empty expected revision or the If-Match wildcard "*" only demands the
+	// tag exists; any concrete revision must match exactly.
+	trimmed := strings.Trim(expectedRevision, "\"")
+	if expectedRevision != "" && trimmed != "*" && fmt.Sprint(item.Revision) != trimmed {
 		return Tag{}, ErrRevisionMismatch
 	}
 	return item, nil

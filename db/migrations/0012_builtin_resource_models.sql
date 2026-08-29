@@ -4,7 +4,6 @@
 -- visibility/channels/retrieval/publishing policy structure. Runtime
 -- bootstrap re-applies the same inserts for organizations created after this
 -- migration (store.SeedBuiltinResourceModels).
-BEGIN;
 
 INSERT INTO model.resource_models
     (organization_id, model_key, name, description, content_kind, status, created_by)
@@ -192,4 +191,3 @@ WHERE v.resource_model_id = m.id
   AND m.current_version_id IS NULL
   AND m.model_key IN ('builtin_document', 'builtin_note', 'builtin_faq', 'builtin_shot');
 
-COMMIT;

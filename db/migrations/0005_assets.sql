@@ -3,7 +3,6 @@
 -- editable working copy; AssetVersion is an immutable, sealed snapshot.
 -- Processing state lives in content.processing_jobs, publication approval in
 -- asset.publication_requests.
-BEGIN;
 
 CREATE TABLE asset.raw_inputs (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -65,6 +64,9 @@ CREATE CONSTRAINT TRIGGER asset_pointers_required
 
 CREATE INDEX assets_workspace_model_idx
     ON asset.assets (organization_id, workspace_id, resource_model_id, publication_status, updated_at DESC);
+CREATE INDEX assets_workspace_updated_idx
+    ON asset.assets (organization_id, workspace_id, updated_at DESC, id)
+    WHERE deleted_at IS NULL;
 CREATE INDEX assets_published_model_idx
     ON asset.assets (organization_id, resource_model_id)
     WHERE publication_status = 'published';
@@ -348,8 +350,54 @@ CREATE TABLE asset.asset_relations (
     relation_type text NOT NULL,
     created_by uuid NOT NULL REFERENCES identity.users(id),
     created_at timestamptz NOT NULL DEFAULT now(),
-    UNIQUE (source_asset_version_id, target_asset_version_id, relation_type)
+    UNIQUE (source_asset_version_id, target_asset_version_id, relation_type),
+    FOREIGN KEY (organization_id, source_asset_version_id)
+        REFERENCES asset.asset_versions (organization_id, id),
+    FOREIGN KEY (organization_id, target_asset_version_id)
+        REFERENCES asset.asset_versions (organization_id, id)
 );
+
+-- Relations follow the same sealed-version immutability as attachments and
+-- tags: both endpoints must reference an unsealed (working) version.
+CREATE FUNCTION asset.reject_sealed_asset_relation() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+    org_id uuid;
+    source_id uuid;
+    target_id uuid;
+    sealed boolean;
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        org_id := OLD.organization_id;
+        source_id := OLD.source_asset_version_id;
+        target_id := OLD.target_asset_version_id;
+    ELSE
+        org_id := NEW.organization_id;
+        source_id := NEW.source_asset_version_id;
+        target_id := NEW.target_asset_version_id;
+    END IF;
+    SELECT TRUE INTO sealed
+    FROM asset.asset_versions
+    WHERE organization_id = org_id
+      AND id IN (source_id, target_id)
+      AND sealed_at IS NOT NULL;
+    IF sealed IS TRUE THEN
+        RAISE EXCEPTION 'asset version relations are sealed'
+            USING ERRCODE = 'restrict_violation';
+    END IF;
+    IF TG_OP = 'DELETE' THEN
+        RETURN OLD;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER asset_relations_sealed_guard
+    BEFORE INSERT OR UPDATE OR DELETE ON asset.asset_relations
+    FOR EACH ROW EXECUTE FUNCTION asset.reject_sealed_asset_relation();
+
+CREATE INDEX asset_relations_source_idx
+    ON asset.asset_relations (organization_id, source_asset_version_id, created_at DESC);
 
 CREATE TABLE asset.import_batches (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -538,4 +586,3 @@ CREATE TABLE content.asset_version_content_fields (
         REFERENCES content.container_versions (organization_id, id)
 );
 
-COMMIT;

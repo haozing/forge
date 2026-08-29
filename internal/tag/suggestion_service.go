@@ -118,12 +118,15 @@ func (s SuggestionService) AcceptTx(ctx context.Context, tx pgx.Tx, decision Acc
 		return ErrSuggestionState
 	}
 	// Existing draft relation keeps its provenance; only genuinely new
-	// relations are inserted with the AI source.
+	// relations are inserted with the AI source. The draft is re-read inside
+	// the caller's organization so a cross-organization draft id cannot mix
+	// its workspace into this organization's relation.
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO asset.asset_draft_tags
 			(organization_id, workspace_id, asset_draft_id, tag_id, source, confidence, added_by)
 		SELECT $1::uuid, workspace_id, $3::uuid, $4::uuid, $5, $6, $7::uuid
-		FROM asset.asset_drafts WHERE id = $3::uuid
+		FROM asset.asset_drafts
+		WHERE organization_id = $1::uuid AND id = $3::uuid
 		ON CONFLICT (asset_draft_id, tag_id) DO NOTHING
 	`, decision.Actor.OrganizationID, "", decision.DraftID, decision.TagID, source, decision.Confidence, decision.Actor.UserID); err != nil {
 		return fmt.Errorf("accept suggestion into draft: %w", err)

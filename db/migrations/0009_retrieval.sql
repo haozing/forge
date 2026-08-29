@@ -9,7 +9,6 @@
 -- references the parent's UNIQUE (organization_id, id) so a bare UUID can
 -- never cross a tenant boundary. asset.asset_versions,
 -- content.workspaces and model.resource_models all carry that key.
-BEGIN;
 
 -- ---------------------------------------------------------------------------
 -- Projection profiles
@@ -106,6 +105,9 @@ CREATE TABLE retrieval.projection_runs (
     ready_chunk_count integer NOT NULL DEFAULT 0 CHECK (ready_chunk_count >= 0),
     expected_embedding_count integer NOT NULL DEFAULT 0 CHECK (expected_embedding_count >= 0),
     ready_embedding_count integer NOT NULL DEFAULT 0 CHECK (ready_embedding_count >= 0),
+    -- Incremented every time a build is claimed or the reconciler re-enqueues
+    -- a queued run; exhausted runs are marked failed instead of looping.
+    build_attempts integer NOT NULL DEFAULT 0 CHECK (build_attempts >= 0),
     failure_code text,
     failure_stage text,
     queued_at timestamptz NOT NULL DEFAULT now(),
@@ -545,4 +547,6 @@ CREATE TABLE retrieval.query_execution_workspaces (
     FOREIGN KEY (organization_id, workspace_id)
         REFERENCES content.workspaces (organization_id, id) ON DELETE CASCADE
 );
-COMMIT;
+
+CREATE INDEX query_execution_workspaces_workspace_idx
+    ON retrieval.query_execution_workspaces (organization_id, workspace_id, execution_id);

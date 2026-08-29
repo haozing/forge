@@ -198,6 +198,29 @@ func EncodePayload(payload any) ([]byte, error) {
 	return json.Marshal(payload)
 }
 
+// encodeEventPayload renders the payload exactly once: []byte and
+// json.RawMessage inputs are already encoded JSON and must pass through
+// unchanged (json.Marshal would re-encode them as a base64 string), anything
+// else is marshalled directly.
+func encodeEventPayload(payload any) ([]byte, error) {
+	switch value := payload.(type) {
+	case json.RawMessage:
+		if len(value) == 0 {
+			return []byte("{}"), nil
+		}
+		return value, nil
+	case []byte:
+		if len(value) == 0 {
+			return []byte("{}"), nil
+		}
+		return value, nil
+	case nil:
+		return []byte("{}"), nil
+	default:
+		return json.Marshal(payload)
+	}
+}
+
 // AppendTx writes the immutable event, its declared consumer deliveries, and
 // the River dispatch job in the caller's business transaction.
 func (s EventStore) AppendTx(ctx context.Context, tx pgx.Tx, event Event) (string, error) {
@@ -209,7 +232,7 @@ func (s EventStore) AppendTx(ctx context.Context, tx pgx.Tx, event Event) (strin
 		event.AggregateVersion <= 0 || event.PayloadVersion <= 0 {
 		return "", errors.New("event metadata is invalid")
 	}
-	payload, err := json.Marshal(event.Payload)
+	payload, err := encodeEventPayload(event.Payload)
 	if err != nil {
 		return "", fmt.Errorf("encode event payload: %w", err)
 	}

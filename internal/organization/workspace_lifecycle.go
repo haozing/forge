@@ -334,14 +334,28 @@ func (s Service) RevokeWorkspaceMembership(ctx context.Context, principal auth.P
 	if err := lockOrganizationTx(ctx, tx, principal.OrganizationID); err != nil {
 		return err
 	}
-	var role, userID, workspaceStatus string
+	// Lock the workspace row before re-counting admins. The workspace surface
+	// takes the same lock, so the fixed Organization -> Workspace -> Member
+	// order serializes every last-admin decision across both surfaces.
+	var workspaceStatus string
 	err = tx.QueryRow(ctx, `
-		SELECT wm.role, wm.user_id::text, w.status
-		FROM content.workspace_members wm
-		JOIN content.workspaces w ON w.organization_id = wm.organization_id AND w.id = wm.workspace_id
-		WHERE wm.organization_id = $1::uuid AND wm.id = $2::uuid AND wm.workspace_id = $3::uuid
-		FOR UPDATE OF wm
-	`, principal.OrganizationID, membershipID, workspaceID).Scan(&role, &userID, &workspaceStatus)
+		SELECT status FROM content.workspaces
+		WHERE organization_id = $1::uuid AND id = $2::uuid
+		FOR UPDATE
+	`, principal.OrganizationID, workspaceID).Scan(&workspaceStatus)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("lock workspace for membership revoke: %w", err)
+	}
+	var role, userID string
+	err = tx.QueryRow(ctx, `
+		SELECT role, user_id::text
+		FROM content.workspace_members
+		WHERE organization_id = $1::uuid AND id = $2::uuid AND workspace_id = $3::uuid
+		FOR UPDATE
+	`, principal.OrganizationID, membershipID, workspaceID).Scan(&role, &userID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrNotFound
 	}
@@ -396,14 +410,28 @@ func (s Service) PatchWorkspaceMembership(ctx context.Context, principal auth.Pr
 	if err := lockOrganizationTx(ctx, tx, principal.OrganizationID); err != nil {
 		return Workspace{}, "", err
 	}
-	var oldRole, userID, workspaceStatus string
+	// Lock the workspace row before re-counting admins. The workspace surface
+	// takes the same lock, so the fixed Organization -> Workspace -> Member
+	// order serializes every last-admin decision across both surfaces.
+	var workspaceStatus string
 	err = tx.QueryRow(ctx, `
-		SELECT wm.role, wm.user_id::text, w.status
-		FROM content.workspace_members wm
-		JOIN content.workspaces w ON w.organization_id = wm.organization_id AND w.id = wm.workspace_id
-		WHERE wm.organization_id = $1::uuid AND wm.id = $2::uuid AND wm.workspace_id = $3::uuid
-		FOR UPDATE OF wm
-	`, principal.OrganizationID, membershipID, workspaceID).Scan(&oldRole, &userID, &workspaceStatus)
+		SELECT status FROM content.workspaces
+		WHERE organization_id = $1::uuid AND id = $2::uuid
+		FOR UPDATE
+	`, principal.OrganizationID, workspaceID).Scan(&workspaceStatus)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Workspace{}, "", ErrNotFound
+	}
+	if err != nil {
+		return Workspace{}, "", fmt.Errorf("lock workspace for membership role change: %w", err)
+	}
+	var oldRole, userID string
+	err = tx.QueryRow(ctx, `
+		SELECT role, user_id::text
+		FROM content.workspace_members
+		WHERE organization_id = $1::uuid AND id = $2::uuid AND workspace_id = $3::uuid
+		FOR UPDATE
+	`, principal.OrganizationID, membershipID, workspaceID).Scan(&oldRole, &userID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Workspace{}, "", ErrNotFound
 	}

@@ -113,6 +113,45 @@ func TestNormalizedRequestSortsAndDedupes(t *testing.T) {
 	}
 }
 
+func TestRequestHashMatchesValidatorRewrite(t *testing.T) {
+	// Cursor pages recompute the hash from the raw request before validation,
+	// while the stored session hash was computed after validateRequest rewrote
+	// the tag groups in place. Both sides must agree for non-normalized keys.
+	raw := Request{
+		Mode:     ModeFulltext,
+		Query:    " hello ",
+		TagsAny:  []string{"Release ", "release"},
+		TagsAll:  []string{"Featured"},
+		TagsNone: []string{"draft"},
+	}
+	scope := QueryAccessScope{
+		WorkspaceIDs:        []string{"00000000-0000-4000-8000-000000000001"},
+		ResourceModelIDs:    []string{"00000000-0000-4000-8000-000000000002"},
+		AllowedVisibilities: []string{"organization", "public"},
+	}
+	beforeValidation := RequestHash(NormalizedRequest(raw), "secret")
+
+	rewritten := NormalizedRequest(raw)
+	if err := validateRequest(scope, &rewritten); err != nil {
+		t.Fatalf("valid request rejected: %v", err)
+	}
+	afterValidation := RequestHash(rewritten, "secret")
+	if beforeValidation != afterValidation {
+		t.Fatalf("hash before validation %s != hash after tag rewrite %s", beforeValidation, afterValidation)
+	}
+
+	// Groups the tag domain rejects (contradictions, garbage keys) stay raw in
+	// the normalized form; validation rejects those requests anyway.
+	invalid := Request{Mode: ModeFulltext, Query: "x", TagsAny: []string{"a"}, TagsNone: []string{"A "}}
+	normalizedInvalid := NormalizedRequest(invalid)
+	if len(normalizedInvalid.TagsAny) != 1 || normalizedInvalid.TagsAny[0] != "a" {
+		t.Fatalf("rejected groups must stay raw: %#v", normalizedInvalid.TagsAny)
+	}
+	if err := validateRequest(scope, &invalid); err != ErrInvalidTagFilter {
+		t.Fatalf("contradictory groups: got %v, want ErrInvalidTagFilter", err)
+	}
+}
+
 func makeRuneString(count int) string {
 	runes := make([]rune, count)
 	for index := range runes {

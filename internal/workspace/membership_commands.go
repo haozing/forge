@@ -68,12 +68,12 @@ func (s Service) AddMember(ctx context.Context, principal auth.Principal, worksp
 		SELECT EXISTS (SELECT 1 FROM upsert),
 		       COALESCE((SELECT u.id::text FROM identity.users u WHERE u.id = $4::uuid), ''),
 		       COALESCE((SELECT u.display_name FROM identity.users u WHERE u.id = $4::uuid), ''),
-		       COALESCE((SELECT u.login_name FROM identity.users u WHERE u.id = $4::uuid AND u.login_name IS NOT NULL), ''),
+		       COALESCE((SELECT u.email FROM identity.users u WHERE u.id = $4::uuid AND u.email IS NOT NULL), ''),
 		       $3,
 		       COALESCE((SELECT u.status FROM identity.users u WHERE u.id = $4::uuid), ''),
 		       COALESCE((SELECT wm.created_at FROM content.workspace_members wm WHERE wm.workspace_id = $2::uuid AND wm.user_id = $4::uuid), now())
 	`, principal.OrganizationID, workspaceID, role, userID, principal.UserID).Scan(
-		&inserted, &detail.ID, &detail.DisplayName, &detail.LoginName, &detail.Role, &detail.Status, &detail.JoinedAt)
+		&inserted, &detail.ID, &detail.DisplayName, &detail.Email, &detail.Role, &detail.Status, &detail.JoinedAt)
 	if err != nil {
 		return MemberDetail{}, fmt.Errorf("add workspace member: %w", err)
 	}

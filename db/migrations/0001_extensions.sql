@@ -1,7 +1,6 @@
 -- 0001_extensions.sql
 -- Phase 0 v2 baseline. Shared deployment has not happened: this baseline is
 -- rebuilt from an empty database on every change before first deployment.
-BEGIN;
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 CREATE EXTENSION IF NOT EXISTS pgroonga;
@@ -21,4 +20,3 @@ CREATE SCHEMA IF NOT EXISTS site;
 CREATE SCHEMA IF NOT EXISTS audit;
 CREATE SCHEMA IF NOT EXISTS system;
 
-COMMIT;

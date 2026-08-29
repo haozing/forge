@@ -108,7 +108,7 @@ func (s Service) Get(ctx context.Context, principal auth.Principal, jobID string
 		      SELECT 1 FROM content.workspace_members wm
 		      WHERE wm.organization_id = content.deletion_jobs.organization_id
 		        AND wm.workspace_id = content.deletion_jobs.workspace_id
-		        AND wm.user_id = $3::uuid AND wm.role IN ('owner', 'admin')
+		        AND wm.user_id = $3::uuid AND wm.role = 'admin'
 		  ))
 	`, principal.OrganizationID, jobID, principal.UserID).Scan(jobDestinations(&job)...)
 	if errors.Is(err, pgx.ErrNoRows) {

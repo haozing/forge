@@ -373,7 +373,10 @@ func fieldPredicates(builder *sqlBuilder, filters []compiledFieldFilter, fieldsE
 			predicates = append(predicates, fmt.Sprintf(
 				"(%s ? %s) = %s::boolean", fieldsExpr, keyParam, builder.arg(filter.boolean)))
 		case "jsonb":
-			predicates = append(predicates, builder.jsonbComparison(filter.operator, fieldsJSON, builder.arg(filter.texts[0])))
+			// The bound parameter must be a complete JSON document (quoted
+			// string); raw text would fail the ::jsonb cast with 22P02.
+			predicates = append(predicates, builder.jsonbComparison(filter.operator, fieldsJSON,
+				builder.arg(jsonbTextLiteral(filter.texts[0]))))
 		case "jsonb_bool":
 			predicates = append(predicates, builder.jsonbComparison(filter.operator, fieldsJSON,
 				"to_jsonb("+builder.arg(filter.boolean)+"::boolean)"))
@@ -398,7 +401,8 @@ func fieldPredicates(builder *sqlBuilder, filters []compiledFieldFilter, fieldsE
 		case "jsonb_in":
 			comparisons := make([]string, 0, len(filter.inValues))
 			for _, value := range filter.inValues {
-				comparisons = append(comparisons, fmt.Sprintf("%s = (%s)::jsonb", fieldsJSON, builder.arg(value.text)))
+				comparisons = append(comparisons, fmt.Sprintf("%s = (%s)::jsonb",
+					fieldsJSON, builder.arg(jsonbTextLiteral(value.text))))
 			}
 			predicates = append(predicates, "("+strings.Join(comparisons, " OR ")+")")
 		case "array_member":
@@ -416,6 +420,20 @@ func fieldPredicates(builder *sqlBuilder, filters []compiledFieldFilter, fieldsE
 		}
 	}
 	return predicates
+}
+
+// jsonbTextLiteral encodes one text comparison value as a JSON string document
+// so the bound parameter survives the ::jsonb cast (a raw string is invalid
+// JSON and raises 22P02 at the database). Only jsonb/jsonb_in use it; array
+// membership compares the raw element text, which is a different semantic.
+func jsonbTextLiteral(value string) string {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		// Values are utf8-validated at compile time; the JSON null document can
+		// never equal a field value, so a failed encode simply matches nothing.
+		return "null"
+	}
+	return string(encoded)
 }
 
 func (b *sqlBuilder) jsonbComparison(operator, leftExpr, rightExpr string) string {

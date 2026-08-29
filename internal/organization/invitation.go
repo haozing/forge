@@ -25,6 +25,7 @@ import (
 	"agentchunzhi/internal/notification"
 	"agentchunzhi/internal/store"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -32,7 +33,7 @@ const (
 	AuthorityOrganization = "organization"
 	AuthorityWorkspace    = "workspace"
 
-	InvitationPending = "pending"
+	InvitationPending  = "pending"
 	InvitationAccepted = "accepted"
 	InvitationRevoked  = "revoked"
 	InvitationExpired  = "expired"
@@ -44,39 +45,39 @@ type Grant struct {
 }
 
 type Invitation struct {
-	ID              string     `json:"id"`
-	Email           string     `json:"email"`
-	DisplayName     string     `json:"display_name,omitempty"`
-	OrganizationRole string    `json:"organization_role"`
-	AuthorityScope  string     `json:"authority_scope"`
-	ScopeWorkspace  string     `json:"scope_workspace_id,omitempty"`
-	Status          string     `json:"status"`
-	InvitedBy       string     `json:"invited_by"`
-	ExpiresAt       time.Time  `json:"expires_at"`
-	Grants          []Grant    `json:"grants"`
-	CreatedAt       time.Time  `json:"created_at"`
-	AcceptedAt      *time.Time `json:"accepted_at,omitempty"`
-	Revision        int64      `json:"revision"`
-	ETag            string     `json:"etag"`
+	ID               string     `json:"id"`
+	Email            string     `json:"email"`
+	DisplayName      string     `json:"display_name,omitempty"`
+	OrganizationRole string     `json:"organization_role"`
+	AuthorityScope   string     `json:"authority_scope"`
+	ScopeWorkspace   string     `json:"scope_workspace_id,omitempty"`
+	Status           string     `json:"status"`
+	InvitedBy        string     `json:"invited_by"`
+	ExpiresAt        time.Time  `json:"expires_at"`
+	Grants           []Grant    `json:"grants"`
+	CreatedAt        time.Time  `json:"created_at"`
+	AcceptedAt       *time.Time `json:"accepted_at,omitempty"`
+	Revision         int64      `json:"revision"`
+	ETag             string     `json:"etag"`
 }
 
 type InvitationService struct {
-	Store *store.Store
+	Store  *store.Store
 	Events *eventing.EventStore
 	// Mail enqueues must happen through the domain transaction; the cipher
 	// and key version are provided by composition root.
-	Cipher       *notification.Cipher
-	KeyVersion   int32
-	BaseURL      string
+	Cipher           *notification.Cipher
+	KeyVersion       int32
+	BaseURL          string
 	OrganizationName string
 }
 
 type CreateInput struct {
-	Email          string
-	DisplayName    string
+	Email            string
+	DisplayName      string
 	OrganizationRole string
-	Grants         []Grant
-	ExpiresInHours int
+	Grants           []Grant
+	ExpiresInHours   int
 }
 
 var emailPattern = regexp.MustCompile(`^[^@\s]+@[^@\s\.]+(\.[^@\s\.]+)+$`)
@@ -224,14 +225,17 @@ func (s InvitationService) Create(ctx context.Context, principal auth.Principal,
 	if err != nil {
 		return Invitation{}, "", err
 	}
-	keyVersion, ciphertext, err := s.Cipher.Encrypt(invitationID, notification.TemplateOrganizationInvitation, payload)
+	// The ciphertext is bound to the delivery row id, so the id is generated
+	// here and written explicitly by Enqueue; the worker re-derives the same
+	// associated data from the claimed row.
+	deliveryID := uuid.NewString()
+	_, ciphertext, err := s.Cipher.Encrypt(deliveryID, notification.TemplateOrganizationInvitation, payload)
 	if err != nil {
 		return Invitation{}, "", err
 	}
-	if _, err := notification.Enqueue(ctx, tx, principal.OrganizationID, notification.TemplateOrganizationInvitation, email, s.KeyVersion, ciphertext); err != nil {
+	if _, err := notification.Enqueue(ctx, tx, deliveryID, principal.OrganizationID, notification.TemplateOrganizationInvitation, email, s.KeyVersion, ciphertext); err != nil {
 		return Invitation{}, "", err
 	}
-	_ = keyVersion
 	invitation := Invitation{
 		ID: invitationID, Email: email, DisplayName: strings.TrimSpace(input.DisplayName),
 		OrganizationRole: input.OrganizationRole, AuthorityScope: AuthorityOrganization,
@@ -325,11 +329,12 @@ func (s InvitationService) resendInvitation(ctx context.Context, principal auth.
 		"token": rawToken, "link": link, "organization_name": s.orgName(ctx, principal.OrganizationID),
 		"email": email, "workspace_name": s.workspaceNameTx(ctx, tx, principal.OrganizationID, scopeWorkspace),
 	})
-	_, ciphertext, err := s.Cipher.Encrypt(invitationID, notification.TemplateOrganizationInvitation, payload)
+	deliveryID := uuid.NewString()
+	_, ciphertext, err := s.Cipher.Encrypt(deliveryID, notification.TemplateOrganizationInvitation, payload)
 	if err != nil {
 		return Invitation{}, err
 	}
-	if _, err := notification.Enqueue(ctx, tx, principal.OrganizationID, notification.TemplateOrganizationInvitation, email, s.KeyVersion, ciphertext); err != nil {
+	if _, err := notification.Enqueue(ctx, tx, deliveryID, principal.OrganizationID, notification.TemplateOrganizationInvitation, email, s.KeyVersion, ciphertext); err != nil {
 		return Invitation{}, err
 	}
 	store.AppendAuditTx(ctx, tx, store.NewAuditEntry("organization.invitation.resent", principal.OrganizationID, principal.UserID, "invitation", invitationID, nil), "")

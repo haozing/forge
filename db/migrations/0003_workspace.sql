@@ -3,7 +3,6 @@
 -- admin/editor/reviewer/viewer; there is no workspace owner. Containers and
 -- blocks (content organization structures, never permission carriers) and the
 -- not-yet-migrated invitation/preference runtime tables live here.
-BEGIN;
 
 CREATE TABLE content.workspaces (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -247,4 +246,3 @@ CREATE TABLE content.block_placements (
 CREATE INDEX content_block_placements_version_idx
     ON content.block_placements (organization_id, container_version_id, parent_placement_id, position);
 
-COMMIT;

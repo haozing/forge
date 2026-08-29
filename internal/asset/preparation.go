@@ -215,6 +215,12 @@ func (s AssetPreparationService) persistCandidate(ctx context.Context, req Prepa
 	if err != nil {
 		return PrepareResult{}, err
 	}
+	// The working version moved to the candidate: pending publication requests
+	// against the source version are cancelled with the shared new_version
+	// reason, mirroring the member commit path.
+	if _, err := CancelPendingRequestsTx(ctx, tx, metadata.OrganizationID, metadata.AssetID, req.AgentUserID, reviewCancelReasonNewVersion); err != nil {
+		return PrepareResult{}, err
+	}
 	next := row
 	next.CurrentWorkingVersionID = candidateID
 	next.Revision++

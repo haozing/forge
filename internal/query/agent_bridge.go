@@ -159,6 +159,10 @@ func (s Service) Reference(ctx context.Context, principal auth.Principal, assetI
 		return AssetReference{}, errors.New("database store is not initialized")
 	}
 	var result AssetReference
+	// Visibility boundary: organization/public assets are readable across the
+	// organization; workspace-private ones require the principal to be an
+	// active member of the owning workspace (the same member-shape SQL the
+	// scope compiler uses, so agent principals never see them).
 	err := s.Store.Pool.QueryRow(ctx, `
 		SELECT a.id::text, v.id::text, COALESCE(v.title, ''),
 		       LEFT(COALESCE(v.markdown, ''), 500),
@@ -173,7 +177,26 @@ func (s Service) Reference(ctx context.Context, principal auth.Principal, assetI
 		  AND a.current_published_version_id IS NOT NULL
 		  AND a.deleted_at IS NULL
 		  AND COALESCE(NULLIF(mv.policy #>> '{channels,agent,enabled}', '')::boolean, false)
-	`, assetID, principal.OrganizationID, allowedModelIDs).Scan(
+		  AND (
+		        a.visibility IN ('organization', 'public')
+		        OR (
+		              a.visibility = 'workspace'
+		              AND EXISTS (
+		                SELECT 1
+		                FROM content.workspace_members wm
+		                JOIN content.workspaces w
+		                  ON w.organization_id = wm.organization_id
+		                 AND w.id = wm.workspace_id AND w.status = 'active'
+		                JOIN identity.users u
+		                  ON u.id = wm.user_id AND u.user_type = 'member'
+		                 AND u.status = 'active'
+		                WHERE wm.organization_id = a.organization_id
+		                  AND wm.workspace_id = a.workspace_id
+		                  AND wm.user_id = $4::uuid
+		              )
+		    )
+		  )
+	`, assetID, principal.OrganizationID, allowedModelIDs, principal.UserID).Scan(
 		&result.AssetID, &result.AssetVersionID, &result.Title,
 		&result.SourceExcerpt, &result.UpdatedAt,
 	)

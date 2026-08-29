@@ -23,7 +23,7 @@ type CreateInput struct {
 type MemberDetail struct {
 	ID          string     `json:"id"`
 	DisplayName string     `json:"display_name"`
-	LoginName   string     `json:"login_name"`
+	Email       string     `json:"email"`
 	Role        string     `json:"role"`
 	Status      string     `json:"status"`
 	JoinedAt    time.Time  `json:"joined_at"`
@@ -103,7 +103,7 @@ func (s Service) ListMembers(ctx context.Context, principal auth.Principal, work
 		return nil, err
 	}
 	rows, err := s.Store.Pool.Query(ctx, `
-		SELECT u.id::text, u.display_name, COALESCE(u.login_name, ''), wm.role, u.status, wm.created_at
+		SELECT u.id::text, u.display_name, COALESCE(u.email, ''), wm.role, u.status, wm.created_at
 		FROM content.workspace_members wm
 		JOIN identity.users u ON u.id = wm.user_id
 		WHERE wm.organization_id = $1::uuid AND wm.workspace_id = $2::uuid
@@ -116,7 +116,7 @@ func (s Service) ListMembers(ctx context.Context, principal auth.Principal, work
 	items := make([]MemberDetail, 0)
 	for rows.Next() {
 		var item MemberDetail
-		if err := rows.Scan(&item.ID, &item.DisplayName, &item.LoginName, &item.Role, &item.Status, &item.JoinedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.DisplayName, &item.Email, &item.Role, &item.Status, &item.JoinedAt); err != nil {
 			return nil, fmt.Errorf("scan workspace member: %w", err)
 		}
 		items = append(items, item)
@@ -585,10 +585,10 @@ func (s Service) MemberDetail(ctx context.Context, principal auth.Principal, wor
 	}
 	var item MemberDetail
 	err := s.Store.Pool.QueryRow(ctx, `
-		SELECT u.id::text, u.display_name, COALESCE(u.login_name, ''), wm.role, u.status, wm.created_at
+		SELECT u.id::text, u.display_name, COALESCE(u.email, ''), wm.role, u.status, wm.created_at
 		FROM content.workspace_members wm JOIN identity.users u ON u.id = wm.user_id
 		WHERE wm.organization_id = $1::uuid AND wm.workspace_id = $2::uuid AND wm.user_id = $3::uuid
-	`, principal.OrganizationID, workspaceID, userID).Scan(&item.ID, &item.DisplayName, &item.LoginName, &item.Role, &item.Status, &item.JoinedAt)
+	`, principal.OrganizationID, workspaceID, userID).Scan(&item.ID, &item.DisplayName, &item.Email, &item.Role, &item.Status, &item.JoinedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return MemberDetail{}, ErrNotFound
 	}

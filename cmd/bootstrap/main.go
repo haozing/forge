@@ -13,6 +13,7 @@ import (
 
 	"agentchunzhi/internal/auth"
 	"agentchunzhi/internal/config"
+	"agentchunzhi/internal/retrieval"
 	"agentchunzhi/internal/store"
 )
 
@@ -60,6 +61,28 @@ func main() {
 	}
 	if err := store.SeedBuiltinResourceModels(ctx, db, organizationID); err != nil {
 		log.Fatalf("seed builtin resource models: %v", err)
+	}
+	// Bootstrap the initial retrieval profile best-effort: a fresh organization
+	// activates immediately; failures only warn so bootstrap stays repeatable.
+	registry := retrieval.RegistryFromConfig(cfg)
+	if registry.SemanticConfigured() {
+		manifests, manifestErr := registry.RegisteredManifests()
+		if manifestErr != nil {
+			log.Printf("WARNING: retrieval manifest registry unavailable, skipping profile bootstrap: %v", manifestErr)
+		} else {
+			profiles := retrieval.ProfileService{
+				Store:              db,
+				Manifests:          manifests,
+				DefaultManifestKey: registry.ManifestKey,
+			}
+			if _, _, profileErr := profiles.EnsureProfilesForOrganization(ctx, organizationID); profileErr != nil {
+				log.Printf("WARNING: retrieval profile bootstrap failed for organization %s: %v", organizationID, profileErr)
+			} else {
+				fmt.Println("retrieval profile bootstrapped")
+			}
+		}
+	} else {
+		log.Printf("WARNING: semantic embedding manifest is not configured, skipping retrieval profile bootstrap")
 	}
 	fmt.Printf("created organization=%s admin_user=%s email=%s\n", organizationID, userID, adminEmail)
 }

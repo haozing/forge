@@ -3,6 +3,8 @@ package review
 import (
 	"errors"
 	"testing"
+
+	"agentchunzhi/internal/asset"
 )
 
 func TestRequestStatusAndCancelReasonContract(t *testing.T) {
@@ -45,5 +47,28 @@ func TestSentinelErrorsAreDistinct(t *testing.T) {
 	}
 	if errors.Is(ErrVersionSuperseded, ErrConflict) {
 		t.Fatal("superseded request is a distinct invariant")
+	}
+}
+
+// TestBatchErrorCodeMapsPublishingGates pins the per-item vocabulary of the
+// publishing-policy gates so batch and HTTP responses agree.
+func TestBatchErrorCodeMapsPublishingGates(t *testing.T) {
+	cases := []struct {
+		err  error
+		want string
+	}{
+		{asset.ErrConfirmationRequired, "human_confirmation_required"},
+		{asset.ErrAttachmentNotClean, "attachments_not_clean"},
+		{asset.ErrRequiredFieldMissing, "required_field_missing"},
+		{asset.ErrApprovalRequired, "publication_request_error"},
+		{ErrNotFound, "publication_request_not_found"},
+	}
+	for _, tc := range cases {
+		if got := batchErrorCode(tc.err); got != tc.want {
+			t.Fatalf("batchErrorCode(%v) = %q, want %q", tc.err, got, tc.want)
+		}
+	}
+	if batchErrorCode(nil) != "" {
+		t.Fatal("nil error must map to the empty code")
 	}
 }

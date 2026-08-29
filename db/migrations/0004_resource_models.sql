@@ -1,7 +1,6 @@
 -- 0004_resource_models.sql
 -- ResourceModel and its immutable versions. The published policy JSON uses the
 -- final visibility/channels/retrieval/publishing structure only.
-BEGIN;
 
 CREATE TABLE model.resource_models (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -97,4 +96,3 @@ CREATE TABLE content.agent_access_policies (
         REFERENCES model.resource_models (organization_id, id)
 );
 
-COMMIT;

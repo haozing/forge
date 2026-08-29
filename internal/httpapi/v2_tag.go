@@ -310,6 +310,12 @@ func v2TagFacets(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusUnprocessableEntity, "validation_failed")
 			return
 		}
+		// The facet tag status is a closed whitelist like the scope parameter.
+		tagStatus := query.Get("tag_status")
+		if tagStatus != "" && tagStatus != tag.StatusActive && tagStatus != tag.StatusArchived {
+			writeError(w, http.StatusUnprocessableEntity, "validation_failed")
+			return
+		}
 		items, err := deps.FacetService.Counts(r.Context(), principal, workspaceID, tag.FacetScope{
 			Scope:             scope,
 			ResourceModelID:   resourceModelID,
@@ -319,7 +325,7 @@ func v2TagFacets(deps Dependencies) http.HandlerFunc {
 			Any:  query["tags_any"],
 			All:  query["tags_all"],
 			None: query["tags_none"],
-		}, query.Get("tag_status"), atoiDefault(query.Get("limit"), 50))
+		}, tagStatus, atoiDefault(query.Get("limit"), 50))
 		if err != nil {
 			v2TagError(w, err)
 			return

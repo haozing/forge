@@ -20,6 +20,7 @@ import (
 	"agentchunzhi/internal/notification"
 	"agentchunzhi/internal/store"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -163,11 +164,12 @@ func (s InvitationService) CreateWorkspaceScoped(ctx context.Context, principal 
 	if err != nil {
 		return Invitation{}, "", err
 	}
-	_, ciphertext, err := s.Cipher.Encrypt(invitationID, notification.TemplateOrganizationInvitation, payload)
+	deliveryID := uuid.NewString()
+	_, ciphertext, err := s.Cipher.Encrypt(deliveryID, notification.TemplateOrganizationInvitation, payload)
 	if err != nil {
 		return Invitation{}, "", err
 	}
-	if _, err := notification.Enqueue(ctx, tx, principal.OrganizationID, notification.TemplateOrganizationInvitation, email, s.KeyVersion, ciphertext); err != nil {
+	if _, err := notification.Enqueue(ctx, tx, deliveryID, principal.OrganizationID, notification.TemplateOrganizationInvitation, email, s.KeyVersion, ciphertext); err != nil {
 		return Invitation{}, "", err
 	}
 	invitation := Invitation{

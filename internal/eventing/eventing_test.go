@@ -1,6 +1,52 @@
 package eventing
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
+
+func TestEncodeEventPayload(t *testing.T) {
+	raw := []byte(`{"asset_id":"00000000-0000-4000-8000-000000000001"}`)
+	cases := []struct {
+		name      string
+		payload   any
+		wantEmpty bool
+	}{
+		{"byte slice passes through", raw, false},
+		{"json raw message passes through", json.RawMessage(`{"asset_id":"00000000-0000-4000-8000-000000000001"}`), false},
+		{"typed struct is marshalled", AssetPublishedPayload{
+			AssetID:     "00000000-0000-4000-8000-000000000001",
+			VersionID:   "00000000-0000-4000-8000-000000000002",
+			WorkspaceID: "00000000-0000-4000-8000-000000000003",
+		}, false},
+		{"map is marshalled", map[string]any{"job_id": "j1"}, false},
+		{"nil becomes empty object", nil, true},
+		{"empty byte slice becomes empty object", []byte(nil), true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			encoded, err := encodeEventPayload(tc.payload)
+			if err != nil {
+				t.Fatalf("encodeEventPayload: %v", err)
+			}
+			// A double-encoded byte slice lands as a base64 JSON string, which
+			// no consumer can decode into a payload object.
+			var object map[string]any
+			if err := json.Unmarshal(encoded, &object); err != nil {
+				t.Fatalf("payload is not a JSON object: %q (%v)", encoded, err)
+			}
+			if tc.wantEmpty {
+				if string(encoded) != "{}" {
+					t.Fatalf("payload = %q, want {}", encoded)
+				}
+				return
+			}
+			if len(object) == 0 {
+				t.Fatalf("payload object is empty: %q", encoded)
+			}
+		})
+	}
+}
 
 func TestDefaultRegistryMatchesDeclaredConsumers(t *testing.T) {
 	registry, err := DefaultRegistry()

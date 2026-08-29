@@ -55,6 +55,7 @@ func (s QueryAccessScope) Empty() bool {
 // hash secret. It deliberately excludes role display names and credentials.
 func computeScopeFingerprint(scope QueryAccessScope, secret string) [32]byte {
 	if secret == "" {
+		warnFallbackSecret("QUERY_HASH_SECRET", "scope fingerprint")
 		secret = "agentchunzhi-query-hash"
 	}
 	canonical := strings.Join([]string{

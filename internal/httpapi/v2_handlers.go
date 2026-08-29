@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"agentchunzhi/internal/asset"
@@ -69,6 +70,8 @@ func v2ServiceError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusConflict, "human_confirmation_required")
 	case errors.Is(err, asset.ErrAttachmentNotClean):
 		writeError(w, http.StatusConflict, "attachments_not_clean")
+	case errors.Is(err, asset.ErrRequiredFieldMissing):
+		writeError(w, http.StatusConflict, "required_field_missing")
 	case errors.Is(err, asset.ErrTagArchived):
 		writeError(w, http.StatusConflict, "tag_archived")
 	case errors.Is(err, asset.ErrTooManyTags):
@@ -587,21 +590,26 @@ func v2ConfirmVersion(deps Dependencies) http.HandlerFunc {
 	}
 }
 
+// atoiDefaultLimit is the upper bound applied to client-supplied page sizes;
+// it matches the largest per-surface limit the query handlers accept.
+const atoiDefaultLimit = 200
+
+// atoiDefault parses a decimal limit, falling back to the default for absent,
+// non-numeric or non-positive input. Overflowing and oversized values are
+// clamped instead of wrapping (a hand-rolled digit loop would silently
+// overflow int and feed an arbitrary page size downstream).
 func atoiDefault(value string, fallback int) int {
 	if value == "" {
 		return fallback
 	}
-	result := 0
-	for _, ch := range value {
-		if ch < '0' || ch > '9' {
-			return fallback
-		}
-		result = result*10 + int(ch-'0')
-	}
-	if result == 0 {
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed < 1 {
 		return fallback
 	}
-	return result
+	if parsed > atoiDefaultLimit {
+		return atoiDefaultLimit
+	}
+	return parsed
 }
 
 func itoa(value int64) string {

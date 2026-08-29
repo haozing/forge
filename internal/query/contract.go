@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"agentchunzhi/internal/tag"
 )
 
 // Query mode names (doc §6.1). No lexical/vector/keyword aliases exist.
@@ -174,8 +176,8 @@ type canonicalRequestValue struct {
 }
 
 // NormalizedRequest renders the canonical form: trimmed query, sorted
-// de-duplicated ID lists and stable field filter ordering. Cursor pages are
-// verified against this hash, not the raw body.
+// de-duplicated ID lists, normalized tag keys and stable field filter
+// ordering. Cursor pages are verified against this hash, not the raw body.
 func NormalizedRequest(req Request) Request {
 	normalized := req
 	normalized.Query = strings.TrimSpace(req.Query)
@@ -183,6 +185,8 @@ func NormalizedRequest(req Request) Request {
 	normalized.Visibility = normalizeStringList(req.Visibility)
 	normalized.Origins = normalizeStringList(req.Origins)
 	normalized.ConfirmationStatuses = normalizeStringList(req.ConfirmationStatuses)
+	normalized.TagsAny, normalized.TagsAll, normalized.TagsNone = normalizeTagGroups(
+		req.TagsAny, req.TagsAll, req.TagsNone)
 	filters := make([]FieldFilter, len(req.FieldFilters))
 	copy(filters, req.FieldFilters)
 	sort.SliceStable(filters, func(i, j int) bool {
@@ -198,10 +202,22 @@ func NormalizedRequest(req Request) Request {
 	return normalized
 }
 
+// normalizeTagGroups mirrors the validator's in-place tag-group rewrite so the
+// hash computed before validation equals the hash persisted after it. Groups
+// the tag domain rejects stay raw: those requests fail validation anyway.
+func normalizeTagGroups(anyKeys, allKeys, noneKeys []string) ([]string, []string, []string) {
+	normalized, err := tag.NormalizeFilter(tag.KeyFilter{Any: anyKeys, All: allKeys, None: noneKeys})
+	if err != nil {
+		return anyKeys, allKeys, noneKeys
+	}
+	return normalized.Any, normalized.All, normalized.None
+}
+
 // RequestHash computes the HMAC-SHA256 of the canonical request. The raw
 // request text is never persisted — only this hash (doc §10.9).
 func RequestHash(req Request, secret string) string {
 	if secret == "" {
+		warnFallbackSecret("QUERY_HASH_SECRET", "request hash")
 		secret = "agentchunzhi-query-hash"
 	}
 	canonical := canonicalRequestValue{

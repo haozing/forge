@@ -20,8 +20,21 @@ import (
 // memberAssetVisibility validates the requested visibility against the
 // contract and the model policy's allowed set. An empty allowed set means the
 // policy did not restrict visibility beyond the contract default (workspace).
+// An empty request resolves to the policy's visibility.default when present
+// (schema validation guarantees default is a contract value inside allowed);
+// otherwise it falls back to workspace.
 func memberAssetVisibility(rawPolicy []byte, requested string) (string, error) {
 	if requested == "" {
+		if len(rawPolicy) > 0 {
+			var policy struct {
+				Visibility struct {
+					Default string `json:"default"`
+				} `json:"visibility"`
+			}
+			if err := jsonUnmarshal(rawPolicy, &policy); err == nil && access.Valid(policy.Visibility.Default) {
+				return policy.Visibility.Default, nil
+			}
+		}
 		return access.VisibilityWorkspace, nil
 	}
 	if !access.Valid(requested) {

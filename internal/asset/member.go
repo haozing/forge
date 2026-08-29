@@ -726,6 +726,31 @@ func PublishPolicyForAssetTx(ctx context.Context, tx pgx.Tx, organizationID, ass
 	return decodePublishingPolicy(raw)
 }
 
+// loadModelPolicyTx reads the policy of the model head's current version; an
+// unknown model hides as NotFound. The empty policy means "no restrictions".
+func loadModelPolicyTx(ctx context.Context, tx pgx.Tx, organizationID, modelID string) ([]byte, error) {
+	var raw []byte
+	err := tx.QueryRow(ctx, `
+		SELECT COALESCE(v.policy, '{}'::jsonb)
+		FROM model.resource_models m
+		LEFT JOIN model.resource_model_versions v ON v.organization_id = m.organization_id AND v.id = m.current_version_id
+		WHERE m.organization_id = $1::uuid AND m.id = $2::uuid
+	`, organizationID, modelID).Scan(&raw)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("load model policy: %w", err)
+	}
+	return raw, nil
+}
+
+// decodePublishingPolicy parses the publishing block of a ResourceModelVersion
+// policy. Omitting the block is intentional semantics, not a gap: a custom
+// model version without a publishing section decodes as direct mode with both
+// gates and required fields disabled, matching the phase-0 canonical policy
+// where direct is the baseline mode. Only model versions that explicitly opt
+// in get the approval queue or the publish gates.
 func decodePublishingPolicy(raw []byte) (PublishingPolicy, error) {
 	var document struct {
 		Publishing struct {
@@ -756,11 +781,18 @@ func decodePublishingPolicy(raw []byte) (PublishingPolicy, error) {
 type publishGateFacts struct {
 	HumanConfirmed     bool
 	UncleanAttachments int64
+	Fields             map[string]any
 }
 
 // gate rejects versions that miss the policy's publish preconditions. The
-// sentinels are the shared asset errors so every surface maps them alike.
+// sentinels are the shared asset errors so every surface map them alike.
 func (p PublishingPolicy) gate(facts publishGateFacts) error {
+	for _, name := range p.RequiredFields {
+		value, ok := facts.Fields[name]
+		if !ok || !requiredFieldValuePresent(value) {
+			return ErrRequiredFieldMissing
+		}
+	}
 	if p.RequireHumanConfirmation && !facts.HumanConfirmed {
 		return ErrConfirmationRequired
 	}
@@ -770,12 +802,31 @@ func (p PublishingPolicy) gate(facts publishGateFacts) error {
 	return nil
 }
 
-// EnsurePublishableVersionTx enforces the human-confirmation and
-// clean-attachment gates of policy against the sealed version. Callers run it
-// inside their publish transaction so the checks and the pointer switch commit
-// together.
+// requiredFieldValuePresent judges one policy-required field value: strings
+// must be non-blank after trimming, arrays and objects non-empty; any other
+// non-nil scalar counts as present.
+func requiredFieldValuePresent(value any) bool {
+	switch typed := value.(type) {
+	case nil:
+		return false
+	case string:
+		return strings.TrimSpace(typed) != ""
+	case []any:
+		return len(typed) > 0
+	case map[string]any:
+		return len(typed) > 0
+	default:
+		return true
+	}
+}
+
+// EnsurePublishableVersionTx enforces the required-fields,
+// human-confirmation and clean-attachment gates of policy against the sealed
+// version. Callers run it inside their publish transaction so the checks and
+// the pointer switch commit together.
 func EnsurePublishableVersionTx(ctx context.Context, tx pgx.Tx, organizationID, versionID string, policy PublishingPolicy) error {
 	var facts publishGateFacts
+	var fieldsRaw []byte
 	err := tx.QueryRow(ctx, `
 		SELECT
 		  COALESCE((SELECT confirmation_status = 'human_confirmed' FROM asset.asset_versions
@@ -783,10 +834,18 @@ func EnsurePublishableVersionTx(ctx context.Context, tx pgx.Tx, organizationID, 
 		  (SELECT count(*) FROM asset.asset_version_attachments lva
 		   JOIN asset.attachments att ON att.organization_id = lva.organization_id AND att.id = lva.attachment_id
 		   WHERE lva.organization_id = $1::uuid AND lva.asset_version_id = $2::uuid
-		     AND (att.status <> 'clean' OR att.deleted_at IS NOT NULL))
-	`, organizationID, versionID).Scan(&facts.HumanConfirmed, &facts.UncleanAttachments)
+		     AND (att.status <> 'clean' OR att.deleted_at IS NOT NULL)),
+		  COALESCE((SELECT fields FROM asset.asset_versions
+		   WHERE organization_id = $1::uuid AND id = $2::uuid), '{}'::jsonb)
+	`, organizationID, versionID).Scan(&facts.HumanConfirmed, &facts.UncleanAttachments, &fieldsRaw)
 	if err != nil {
 		return fmt.Errorf("load publish gate facts: %w", err)
+	}
+	facts.Fields = map[string]any{}
+	if len(fieldsRaw) > 0 {
+		if err := json.Unmarshal(fieldsRaw, &facts.Fields); err != nil {
+			return fmt.Errorf("decode publish gate fields: %w", err)
+		}
 	}
 	return policy.gate(facts)
 }
@@ -1023,15 +1082,23 @@ func (s MemberService) ConfirmVersion(ctx context.Context, principal auth.Princi
 	if err != nil {
 		return MemberAssetVersion{}, err
 	}
+	// The derived snapshot binds the model head's current version; its field
+	// schema gates the carried-over fields inside the same transaction.
 	var modelVersionID string
+	var schemaBytes []byte
 	if err := tx.QueryRow(ctx, `
-		SELECT COALESCE(m.current_version_id::text, '') FROM model.resource_models m
+		SELECT COALESCE(m.current_version_id::text, ''), COALESCE(v.field_schema, '{}'::jsonb)
+		FROM model.resource_models m
+		LEFT JOIN model.resource_model_versions v ON v.organization_id = m.organization_id AND v.id = m.current_version_id
 		WHERE m.organization_id = $1::uuid AND m.id = $2::uuid
-	`, organizationID, modelID).Scan(&modelVersionID); err != nil {
+	`, organizationID, modelID).Scan(&modelVersionID, &schemaBytes); err != nil {
 		return MemberAssetVersion{}, err
 	}
 	decodedFields := map[string]any{}
 	_ = json.Unmarshal(fields, &decodedFields)
+	if err := ValidateFields(schemaBytes, decodedFields); err != nil {
+		return MemberAssetVersion{}, ErrInvalidInput
+	}
 	newVersionID, _, err := CreateVersionTx(ctx, tx, VersionMaterial{
 		OrganizationID:         organizationID,
 		WorkspaceID:            workspaceID,
@@ -1139,6 +1206,9 @@ func normalizeAssetPredicate(field string, rawOperations any) ([]fieldPredicate,
 var (
 	ErrApprovalRequired     = errors.New("publication requires approval")
 	ErrConfirmationRequired = errors.New("version requires human confirmation")
+	// ErrRequiredFieldMissing reports a version whose fields lack a non-empty
+	// value for a field the publishing policy declares required.
+	ErrRequiredFieldMissing = errors.New("version is missing a policy-required field")
 	// ErrUnknownTagKey reports a tag filter key that resolves to no tag in the
 	// workspace: misspellings fail loudly instead of silently matching nothing.
 	ErrUnknownTagKey = errors.New("unknown tag key")

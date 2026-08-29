@@ -88,7 +88,7 @@ type Summary struct {
 type Member struct {
 	ID          string `json:"id"`
 	DisplayName string `json:"display_name"`
-	LoginName   string `json:"login_name,omitempty"`
+	Email       string `json:"email,omitempty"`
 	Role        string `json:"role"`
 }
 
@@ -245,11 +245,11 @@ func (s Service) Member(ctx context.Context, principal auth.Principal, workspace
 	}
 	var item Member
 	err := s.Store.Pool.QueryRow(ctx, `
-		SELECT u.id::text, u.display_name, COALESCE(u.login_name, ''), wm.role
+		SELECT u.id::text, u.display_name, COALESCE(u.email, ''), wm.role
 		FROM content.workspace_members wm
 		JOIN identity.users u ON u.id = wm.user_id
 		WHERE wm.organization_id = $1::uuid AND wm.workspace_id = $2::uuid AND wm.user_id = $3::uuid
-	`, principal.OrganizationID, workspaceID, principal.UserID).Scan(&item.ID, &item.DisplayName, &item.LoginName, &item.Role)
+	`, principal.OrganizationID, workspaceID, principal.UserID).Scan(&item.ID, &item.DisplayName, &item.Email, &item.Role)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Member{}, ErrNotFound
 	}

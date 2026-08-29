@@ -10,8 +10,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -109,7 +111,17 @@ func frontendIdempotency(deps Dependencies, next http.Handler) http.Handler {
 			return
 		}
 		if replay != nil {
+			// Replay the persisted response verbatim, but keep the current
+			// request's correlation id: the stored headers deliberately do
+			// not carry X-Request-Id (see completeHTTPIdempotency).
+			requestID := w.Header().Get("X-Request-Id")
+			if requestID == "" {
+				requestID = RequestIDFromContext(r.Context())
+			}
 			copyHTTPHeader(w.Header(), replay.Headers)
+			if requestID != "" {
+				w.Header().Set("X-Request-Id", requestID)
+			}
 			w.Header().Set("Idempotency-Replayed", "true")
 			w.WriteHeader(replay.Status)
 			_, _ = w.Write(replay.Body)
@@ -121,14 +133,31 @@ func frontendIdempotency(deps Dependencies, next http.Handler) http.Handler {
 		}
 
 		capture := newBufferedResponseWriter(w.Header())
-		next.ServeHTTP(capture, r)
+		panicked := executeWithRecover(func() {
+			next.ServeHTTP(capture, r)
+		}, operation, key)
+		if panicked {
+			// The handler blew up: release the reservation so the same key is
+			// not pinned until its TTL, and answer with the standard 500
+			// envelope instead of letting the panic kill the process.
+			_ = releaseHTTPIdempotency(r.Context(), deps.Store, principal, operation, key, requestHash)
+			writeError(w, http.StatusInternalServerError, "internal_panic")
+			return
+		}
 		if capture.status == 0 {
 			capture.status = http.StatusOK
 		}
 		if capture.status >= 200 && capture.status < 300 {
 			if err := completeHTTPIdempotency(r.Context(), deps.Store, principal, operation, key, requestHash, capture.status, capture.header, capture.body.Bytes()); err != nil {
-				writeError(w, http.StatusInternalServerError, "idempotency_save_failed")
-				return
+				// The business transaction already committed and the success
+				// response is captured: persisting it for replay failed, but
+				// the caller must still get the successful response, not a
+				// 500. Degrade to "no idempotency protection for this
+				// request" — releasing lets a retry with the same key execute
+				// the business operation again.
+				idempotencyLogf("idempotency response persist failed org=%s subject=%s operation=%s key=%s: %v",
+					principal.OrganizationID, principal.UserID, operation, key, err)
+				_ = releaseHTTPIdempotency(r.Context(), deps.Store, principal, operation, key, requestHash)
 			}
 		} else {
 			_ = releaseHTTPIdempotency(r.Context(), deps.Store, principal, operation, key, requestHash)
@@ -139,12 +168,42 @@ func frontendIdempotency(deps Dependencies, next http.Handler) http.Handler {
 	})
 }
 
+// idempotencyLogf reports middleware degradation (persist failures, handler
+// panics) that does not change the HTTP answer. It defaults to the standard
+// library logger and is swapped in tests.
+var idempotencyLogf = log.Printf
+
+// executeWithRecover runs next and converts a panic into a logged, flagged
+// failure so one broken handler cannot take down the worker process while an
+// idempotency reservation is still open.
+func executeWithRecover(next func(), operation, key string) (panicked bool) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			panicked = true
+			idempotencyLogf("handler panic recovered under idempotency operation=%s key=%s: %v\n%s",
+				operation, key, recovered, debug.Stack())
+		}
+	}()
+	next()
+	return false
+}
+
 func requiresHTTPIdempotency(r *http.Request) bool {
 	path := r.URL.Path
 	// Member frontend (legacy), v2 member routes and the open v2 technical
 	// surface share the replay contract. Public v2 stays excluded: anonymous
 	// flows have no subject row, and their one-time tokens are the idempotency
 	// boundary.
+	//
+	// Webhook double-layer replay semantics (/api/open/v2/hooks/*): when a
+	// retried webhook hits this middleware with the same Idempotency-Key, the
+	// stored response is replayed verbatim (original status plus the
+	// Idempotency-Replayed: true header). When the request passes through to
+	// the business layer instead (e.g. the middleware reservation was released
+	// after a non-2xx), the hook handler's own external_ref idempotency
+	// applies and answers 200 with a "replayed": true field. The two layers
+	// never combine: a middleware replay short-circuits before the business
+	// layer runs, so at most one of the two replay markers is ever produced.
 	covered := strings.HasPrefix(path, "/api/frontend/") ||
 		strings.HasPrefix(path, "/api/v2/") ||
 		strings.HasPrefix(path, "/api/open/v2/")
@@ -315,7 +374,7 @@ func reserveHTTPIdempotency(ctx context.Context, database *store.Store, principa
 }
 
 func completeHTTPIdempotency(ctx context.Context, database *store.Store, principal auth.Principal, operation, key, requestHash string, status int, headers http.Header, body []byte) error {
-	rawHeaders, err := json.Marshal(headers)
+	rawHeaders, err := json.Marshal(persistableResponseHeaders(headers))
 	if err != nil {
 		return err
 	}
@@ -337,6 +396,21 @@ func completeHTTPIdempotency(ctx context.Context, database *store.Store, princip
 func releaseHTTPIdempotency(ctx context.Context, database *store.Store, principal auth.Principal, operation, key, requestHash string) error {
 	_, err := database.Pool.Exec(ctx, `DELETE FROM system.idempotency_keys WHERE organization_id=$1::uuid AND subject_id=$2::uuid AND operation=$3 AND idempotency_key=$4 AND request_hash=$5 AND response_status IS NULL`, principal.OrganizationID, principal.UserID, operation, key, requestHash)
 	return err
+}
+
+// persistableResponseHeaders copies the captured headers minus the correlation
+// id. X-Request-Id identifies the original HTTP exchange, not the operation:
+// a replay keeps the id its own request generated, so the stored header set
+// must not override it (case-insensitive because decoded header maps keep the
+// exact keys that were persisted).
+func persistableResponseHeaders(headers http.Header) http.Header {
+	sanitized := headers.Clone()
+	for key := range sanitized {
+		if strings.EqualFold(key, "X-Request-Id") {
+			sanitized.Del(key)
+		}
+	}
+	return sanitized
 }
 
 func copyHTTPHeader(destination, source http.Header) {

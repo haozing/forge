@@ -2,7 +2,6 @@
 -- Outbox, delivery tracking, audit log, HTTP idempotency and worker
 -- heartbeats. Event envelope carries workspace_id when applicable and a
 -- payload_version; the unique envelope is internal/eventing.Event.
-BEGIN;
 
 CREATE TABLE audit.outbox_events (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -111,4 +110,3 @@ CREATE TABLE system.worker_heartbeats (
 CREATE INDEX worker_heartbeats_seen_idx
     ON system.worker_heartbeats (role, last_seen_at DESC);
 
-COMMIT;

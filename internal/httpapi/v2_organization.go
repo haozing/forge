@@ -60,7 +60,9 @@ func v2PatchOrganization(deps Dependencies) http.HandlerFunc {
 			v2DomainError(w, err)
 			return
 		}
-		if strings.Trim(expected, "\"") != strconv.FormatInt(current.Revision, 10) {
+		// If-Match "*" only demands the organization exists (proven by the read
+		// above); any concrete revision must match exactly.
+		if !ifMatchWildcard(expected) && strings.Trim(expected, "\"") != strconv.FormatInt(current.Revision, 10) {
 			writeError(w, http.StatusPreconditionFailed, "revision_mismatch")
 			return
 		}
@@ -143,7 +145,9 @@ func v2PatchOrganizationMember(deps Dependencies) http.HandlerFunc {
 			v2DomainError(w, err)
 			return
 		}
-		if strings.Trim(expected, "\"") != strconv.FormatInt(current.Revision, 10) {
+		// If-Match "*" only demands the member exists (proven by the read
+		// above); any concrete revision must match exactly.
+		if !ifMatchWildcard(expected) && strings.Trim(expected, "\"") != strconv.FormatInt(current.Revision, 10) {
 			writeError(w, http.StatusPreconditionFailed, "revision_mismatch")
 			return
 		}

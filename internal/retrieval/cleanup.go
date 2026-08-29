@@ -23,8 +23,9 @@ type CleanupOptions struct {
 }
 
 // CleanupExpired performs one bounded pass of the cleanup order:
-// session items -> sessions -> stale/retired run data (grace) ->
-// interrupted executions -> audit retention -> rebuild retention.
+// session items -> sessions -> stale/retired run data (grace) -> runs of
+// soft-deleted assets -> interrupted executions -> audit retention ->
+// rebuild retention.
 func CleanupExpired(ctx context.Context, st *store.Store, opts CleanupOptions) error {
 	if st == nil || st.Pool == nil {
 		return errors.New("database store is not initialized")
@@ -91,7 +92,23 @@ func CleanupExpired(ctx context.Context, st *store.Store, opts CleanupOptions) e
 		return fmt.Errorf("cleanup grace-expired retrieval runs: %w", err)
 	}
 
-	// 4. Long-running query executions become interrupted.
+	// 4. Projection data of soft-deleted assets: runs (chunks and embeddings
+	// cascade from them) leave with the asset so queries stop matching it.
+	if _, err := st.Pool.Exec(ctx, `
+		DELETE FROM retrieval.projection_runs
+		WHERE id IN (
+		    SELECT run.id FROM retrieval.projection_runs run
+		    JOIN asset.assets a
+		        ON a.organization_id = run.organization_id AND a.id = run.asset_id
+		    WHERE a.deleted_at IS NOT NULL
+		    ORDER BY run.updated_at
+		    LIMIT $1
+		)
+	`, opts.BatchSize); err != nil {
+		return fmt.Errorf("cleanup projection runs of deleted assets: %w", err)
+	}
+
+	// 5. Long-running query executions become interrupted.
 	if _, err := st.Pool.Exec(ctx, `
 		UPDATE retrieval.query_executions
 		SET status = 'interrupted', completed_at = now()
@@ -105,7 +122,7 @@ func CleanupExpired(ctx context.Context, st *store.Store, opts CleanupOptions) e
 		return fmt.Errorf("interrupt stale retrieval query executions: %w", err)
 	}
 
-	// 5. Query execution audit retention.
+	// 6. Query execution audit retention.
 	if _, err := st.Pool.Exec(ctx, `
 		DELETE FROM retrieval.query_executions
 		WHERE id IN (
@@ -118,7 +135,7 @@ func CleanupExpired(ctx context.Context, st *store.Store, opts CleanupOptions) e
 		return fmt.Errorf("cleanup expired retrieval query executions: %w", err)
 	}
 
-	// 6. Rebuild batch summary retention.
+	// 7. Rebuild batch summary retention.
 	if _, err := st.Pool.Exec(ctx, `
 		DELETE FROM retrieval.projection_rebuilds
 		WHERE id IN (

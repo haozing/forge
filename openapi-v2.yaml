@@ -246,6 +246,21 @@ paths:
                   - $ref: '#/components/schemas/PublicationBatchResult'
                   - $ref: '#/components/schemas/Envelope'
   /api/v2/assets/{assetId}/draft:
+    get:
+      tags: [assets]
+      operationId: getAssetDraft
+      description: 读取当前 AssetDraft（含标签 summaries）；响应含 ETag，作为后续 PATCH If-Match 基线
+      parameters:
+        - $ref: '#/components/parameters/AssetId'
+      responses:
+        '200':
+          description: 当前草稿
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/AssetDraft'
+                  - $ref: '#/components/schemas/Envelope'
     patch:
       tags: [assets]
       operationId: autosaveAssetDraft
@@ -2526,7 +2541,7 @@ components:
       properties:
         id: { type: string, format: uuid }
         display_name: { type: string }
-        login_name: { type: string }
+        email: { type: string }
         role: { type: string }
         status: { type: string }
         joined_at: { type: string, format: date-time }

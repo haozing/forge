@@ -76,7 +76,9 @@ func LoadDraftTx(ctx context.Context, tx pgx.Tx, organizationID, assetID, expect
 		draft.UpdatedBy = *updatedBy
 	}
 	draft.Dirty = draft.Revision != draft.CommittedRevision
-	if expectedRevision != "" {
+	// An empty expected revision or the If-Match wildcard "*" only demands the
+	// draft exists; any concrete revision must match exactly.
+	if expectedRevision != "" && !ifMatchAnyRevision(expectedRevision) {
 		var expected int64
 		if _, err := fmt.Sscanf(expectedRevision, "%d", &expected); err != nil || expected != draft.Revision {
 			return draft, ErrDraftRevisionMismatch
@@ -86,6 +88,13 @@ func LoadDraftTx(ctx context.Context, tx pgx.Tx, organizationID, assetID, expect
 }
 
 var ErrDraftRevisionMismatch = errors.New("draft revision mismatch")
+
+// ifMatchAnyRevision reports whether an expected-revision token is the If-Match
+// wildcard "*" (bare or ETag-quoted): the optimistic revision equality check is
+// then skipped because the precondition only requires the row to exist.
+func ifMatchAnyRevision(expectedRevision string) bool {
+	return strings.Trim(expectedRevision, "\"") == "*"
+}
 
 // DraftPatch is an autosave payload. Omitted fields keep their values.
 type DraftPatch struct {
@@ -136,6 +145,21 @@ func (s MemberService) AutosaveDraft(ctx context.Context, principal auth.Princip
 	if err != nil {
 		return Draft{}, err
 	}
+	if patch.Visibility != nil {
+		// An explicit visibility must pass the contract and the bound model
+		// policy's allow-list; invalid values fail loudly instead of being
+		// silently dropped by the update guard below.
+		if !access.Valid(*patch.Visibility) {
+			return Draft{}, ErrInvalidVisibility
+		}
+		policyRaw, err := loadModelPolicyTx(ctx, tx, principal.OrganizationID, row.ResourceModelID)
+		if err != nil {
+			return Draft{}, err
+		}
+		if _, err := memberAssetVisibility(policyRaw, *patch.Visibility); err != nil {
+			return Draft{}, ErrInvalidVisibility
+		}
+	}
 	if patch.Title != nil {
 		draft.Title = strings.TrimSpace(*patch.Title)
 	}
@@ -151,7 +175,7 @@ func (s MemberService) AutosaveDraft(ctx context.Context, principal auth.Princip
 	if err := persistDraftPatch(ctx, tx, principal.OrganizationID, draft, principal.UserID); err != nil {
 		return Draft{}, err
 	}
-	if patch.Visibility != nil && access.Valid(*patch.Visibility) && *patch.Visibility != row.Visibility {
+	if patch.Visibility != nil && *patch.Visibility != row.Visibility {
 		if _, err := tx.Exec(ctx, `
 			UPDATE asset.assets SET visibility = $3, revision = revision + 1, updated_at = now()
 			WHERE organization_id = $1::uuid AND id = $2::uuid
@@ -403,6 +427,12 @@ func (s MemberService) CommitDraft(ctx context.Context, principal auth.Principal
 	if err != nil {
 		return CommitResult{}, err
 	}
+	// The routed workspace must own the asset: the require() call above only
+	// judged membership in the routed workspace, so a cross-workspace asset id
+	// must hide as NotFound instead of leaking existence.
+	if row.WorkspaceID != workspaceID {
+		return CommitResult{}, ErrNotFound
+	}
 	if row.PublicationStatus == PublicationArchived {
 		return CommitResult{}, ErrAssetArchived
 	}
@@ -455,15 +485,22 @@ func commitDraftTx(ctx context.Context, tx pgx.Tx, events *eventing.EventStore, 
 		AttachmentIDs:   attachmentIDs,
 		CreatedBy:       principal.UserID,
 	}
-	// The bound immutable model version is the model head at commit time.
+	// The bound immutable model version is the model head at commit time; its
+	// field schema gates the snapshot inside the same transaction.
+	var schemaBytes []byte
 	if err := tx.QueryRow(ctx, `
-		SELECT COALESCE(current_version_id::text, '') FROM model.resource_models
-		WHERE organization_id = $1::uuid AND id = $2::uuid
-	`, row.OrganizationID, row.ResourceModelID).Scan(&material.ResourceModelVersionID); err != nil {
+		SELECT COALESCE(m.current_version_id::text, ''), COALESCE(v.field_schema, '{}'::jsonb)
+		FROM model.resource_models m
+		LEFT JOIN model.resource_model_versions v ON v.organization_id = m.organization_id AND v.id = m.current_version_id
+		WHERE m.organization_id = $1::uuid AND m.id = $2::uuid
+	`, row.OrganizationID, row.ResourceModelID).Scan(&material.ResourceModelVersionID, &schemaBytes); err != nil {
 		return CommitResult{}, fmt.Errorf("resolve model version: %w", err)
 	}
 	if material.ResourceModelVersionID == "" {
 		return CommitResult{}, ErrConflict
+	}
+	if err := ValidateFields(schemaBytes, material.Fields); err != nil {
+		return CommitResult{}, ErrInvalidInput
 	}
 	// Confirmation never inherits from the base version: a new snapshot is
 	// judged afresh.

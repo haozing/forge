@@ -134,8 +134,10 @@ func (c ScopeCompiler) ForOrganizationMember(ctx context.Context, principal auth
 
 // ForAgent intersects the agent identity with its access policies:
 // AgentAccessPolicy.workspaces ∩ resource_models ∩ actions contains
-// query.execute (doc §5.4). The channel and retrieval-mode policies narrow
-// further inside the planner and final authorizer.
+// query.execute (doc §5.4). Models must be active with the agent channel
+// enabled on their current published version — the same conditions the member
+// compilers apply. The channel and retrieval-mode policies narrow further
+// inside the planner and final authorizer.
 func (c ScopeCompiler) ForAgent(ctx context.Context, principal auth.Principal, requestedModelIDs []string) (QueryAccessScope, error) {
 	if c.Store == nil || c.Store.Pool == nil {
 		return QueryAccessScope{}, errors.New("database store is not initialized")
@@ -146,9 +148,15 @@ func (c ScopeCompiler) ForAgent(ctx context.Context, principal auth.Principal, r
 	rows, err := c.Store.Pool.Query(ctx, `
 		SELECT DISTINCT COALESCE(ap.workspace_id::text, ''), ap.resource_model_id::text
 		FROM content.agent_access_policies ap
+		JOIN model.resource_models rm
+		  ON rm.organization_id = ap.organization_id AND rm.id = ap.resource_model_id
+		 AND rm.status = 'active'
+		JOIN model.resource_model_versions v
+		  ON v.organization_id = rm.organization_id AND v.id = rm.current_version_id
 		WHERE ap.organization_id = $1::uuid AND ap.agent_user_id = $2::uuid
 		  AND 'query.execute' = ANY(ap.actions)
-	`, principal.OrganizationID, principal.UserID)
+		  AND COALESCE(NULLIF(v.policy #>> ('{channels,'||$3||',enabled}')::text, '')::boolean, false)
+	`, principal.OrganizationID, principal.UserID, string(ChannelAgent))
 	if err != nil {
 		return QueryAccessScope{}, fmt.Errorf("load agent access policies: %w", err)
 	}

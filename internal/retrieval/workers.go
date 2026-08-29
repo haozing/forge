@@ -193,42 +193,53 @@ func RunBuildProjection(ctx context.Context, engine Engine, queue QueueInserter,
 	if err != nil {
 		return err
 	}
-	build, err := repo.LoadBuildContext(ctx, run.ID)
-	if errors.Is(err, ErrRunNotFound) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
+	buildErr := func() error {
+		build, err := repo.LoadBuildContext(ctx, run.ID)
+		if errors.Is(err, ErrRunNotFound) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
 
-	// The published pointer and bound policy decide before work is spent.
-	current, err := checkPublishedEligibility(ctx, engine.Store, run.OrganizationID, run.AssetID, run.AssetVersionID)
-	if err != nil {
-		return err
-	}
-	if !current {
-		return repo.MarkRunStale(ctx, run.ID)
-	}
+		// The published pointer and bound policy decide before work is spent.
+		current, err := checkPublishedEligibility(ctx, engine.Store, run.OrganizationID, run.AssetID, run.AssetVersionID)
+		if err != nil {
+			return err
+		}
+		if !current {
+			return repo.MarkRunStale(ctx, run.ID)
+		}
 
-	// Canonicalize + chunk fully in memory, no transaction held.
-	segments := Canonicalize(CanonicalizeInput{
-		Title: build.Title, Summary: build.Summary, Markdown: build.Markdown,
-		Fields: build.Fields, FieldSchema: build.FieldSchema, Tags: build.Tags,
-	})
-	checksum := CanonicalChecksum(segments)
-	chunks := ChunkSegments(segments, engineTokenizer(engine))
+		// Canonicalize + chunk fully in memory, no transaction held.
+		segments := Canonicalize(CanonicalizeInput{
+			Title: build.Title, Summary: build.Summary, Markdown: build.Markdown,
+			Fields: build.Fields, FieldSchema: build.FieldSchema, Tags: build.Tags,
+		})
+		checksum := CanonicalChecksum(segments)
+		chunks := ChunkSegments(segments, engineTokenizer(engine))
 
-	// Terminal semantic gaps (manifest unavailable) degrade the run without
-	// touching the lexical projection.
-	semanticFailure := ""
-	if build.SemanticEnabled && engine.Embeddings == nil {
-		semanticFailure = FailureCodeSemanticMissing
-	}
+		// Terminal semantic gaps (manifest unavailable) degrade the run without
+		// touching the lexical projection.
+		semanticFailure := ""
+		if build.SemanticEnabled && engine.Embeddings == nil {
+			semanticFailure = FailureCodeSemanticMissing
+		}
 
-	if err := writeChunks(ctx, engine, run.ID, build, chunks, checksum, semanticFailure); err != nil {
-		return err
+		if err := writeChunks(ctx, engine, run.ID, build, chunks, checksum, semanticFailure); err != nil {
+			return err
+		}
+		return enqueueEmbedAndFinalize(ctx, queue, run, build, len(chunks))
+	}()
+	if buildErr != nil {
+		// Every failed build burns one attempt; once build_attempts reaches
+		// the reconciler cap the run is failed for good instead of looping.
+		if noteErr := repo.NoteBuildAttempt(ctx, run.ID); noteErr != nil {
+			return noteErr
+		}
+		return buildErr
 	}
-	return enqueueEmbedAndFinalize(ctx, queue, run, build, len(chunks))
+	return nil
 }
 
 // checkPublishedEligibility verifies the current published pointer and the

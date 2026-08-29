@@ -37,14 +37,14 @@ func TestPermissionScopesIntegration(t *testing.T) {
 		displayName string
 		memberRole  *string
 	}{
-		{&adminID, "member", "scope-admin", "Scope Admin", stringPointer("admin")},
-		{&editorID, "member", "scope-editor", "Scope Editor", stringPointer("editor")},
-		{&outsiderID, "member", "scope-outsider", "Scope Outsider", stringPointer("editor")},
-		{&agentID, "agent", "", "Scope Agent", stringPointer("editor")},
+		{&adminID, "member", "scope-admin@example.invalid", "Scope Admin", stringPointer("admin")},
+		{&editorID, "member", "scope-editor@example.invalid", "Scope Editor", stringPointer("editor")},
+		{&outsiderID, "member", "scope-outsider@example.invalid", "Scope Outsider", stringPointer("editor")},
+		{&agentID, "agent", "scope-agent@example.invalid", "Scope Agent", stringPointer("editor")},
 	} {
 		if err := db.Pool.QueryRow(ctx, `
-			INSERT INTO identity.users (organization_id, user_type, login_name, display_name, member_role)
-			VALUES ($1::uuid, $2, NULLIF($3, ''), $4, $5) RETURNING id::text
+			INSERT INTO identity.users (organization_id, user_type, email, display_name, organization_role)
+			VALUES ($1::uuid, $2, $3, $4, $5) RETURNING id::text
 		`, orgID, user.userType, user.login, user.displayName, user.memberRole).Scan(user.id); err != nil {
 			t.Fatalf("create %s: %v", user.displayName, err)
 		}

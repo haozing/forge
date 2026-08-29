@@ -17,6 +17,25 @@ type ProfileService struct {
 	Manifests map[string]EmbeddingManifest
 	// DefaultManifestKey is used by EnsureProfilesForOrganization.
 	DefaultManifestKey string
+	// Queue, when set, receives the profile-warming backfill job after a new
+	// warming profile is created; nil leaves the backfill to manual rebuilds.
+	Queue QueueInserter
+}
+
+// startWarmingBackfill opens an organization-wide profile-warming rebuild for
+// a freshly created warming profile, mirroring the manual rebuild trigger
+// (rebuild row plus one BackfillProfile job).
+func (s ProfileService) startWarmingBackfill(ctx context.Context, organizationID, requestedBy string) error {
+	if s.Queue == nil {
+		return nil
+	}
+	rebuilds := RebuildService{Store: s.Store, Queue: s.Queue}
+	_, err := rebuilds.StartRebuild(ctx, organizationID, ScopeOrganization, "", "", "",
+		ReasonProfileWarming, requestedBy, "")
+	if err != nil {
+		return fmt.Errorf("start profile warming backfill: %w", err)
+	}
+	return nil
 }
 
 // Coverage reports the backfill state of one profile.
@@ -51,6 +70,11 @@ func (s ProfileService) Create(ctx context.Context, organizationID, manifestKey,
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return Profile{}, fmt.Errorf("commit profile create: %w", err)
+	}
+	// A new warming profile is useless without its backfill: enqueue it the
+	// moment a queue is available (bootstrap semantics).
+	if err := s.startWarmingBackfill(ctx, organizationID, createdBy); err != nil {
+		return Profile{}, err
 	}
 	return profile, nil
 }
@@ -217,6 +241,11 @@ func (s ProfileService) EnsureProfilesForOrganization(ctx context.Context, organ
 	if !activated {
 		profile, err = repo.GetProfile(ctx, organizationID, profile.ID)
 		if err != nil {
+			return Profile{}, false, err
+		}
+		// The bootstrap profile stays warming because eligible assets exist;
+		// queue its backfill so the coverage gate can eventually pass.
+		if err := s.startWarmingBackfill(ctx, organizationID, ""); err != nil {
 			return Profile{}, false, err
 		}
 	}

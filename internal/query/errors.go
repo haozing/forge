@@ -1,6 +1,10 @@
 package query
 
-import "errors"
+import (
+	"errors"
+	"log"
+	"sync"
+)
 
 // HTTP error contract (doc §11.5). Every domain failure carries one fixed
 // status/code pair; provider details never reach the wire.
@@ -89,4 +93,17 @@ func HTTPStatus(err error) (int, string) {
 		return 422, "invalid_query_request"
 	}
 	return 503, "retrieval_unavailable"
+}
+
+// fallbackSecretWarned keeps one warning line per missing secret per process
+// so unconfigured deployments stay visible without flooding the logs.
+var fallbackSecretWarned sync.Map
+
+// warnFallbackSecret reports that a signing secret fell back to its
+// development default; it logs at most once per secret name.
+func warnFallbackSecret(env, use string) {
+	if _, loaded := fallbackSecretWarned.LoadOrStore(env, struct{}{}); loaded {
+		return
+	}
+	log.Printf("WARNING: %s is not configured; %s falls back to the development default secret", env, use)
 }

@@ -16,6 +16,7 @@ import (
 	"agentchunzhi/internal/store"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/riverqueue/river"
 )
 
@@ -343,4 +344,103 @@ func (w *RecoverPendingDeliveriesWorker) Work(ctx context.Context, _ *river.Job[
 		}
 	}
 	return nil
+}
+
+// CleanupExpiredRowsArgs triggers the retention sweep for tables without an
+// application-level expiry path: replay reservations, dead sessions and auth
+// rate-limit buckets.
+type CleanupExpiredRowsArgs struct{}
+
+func (CleanupExpiredRowsArgs) Kind() string { return "maintenance.cleanup_expired_rows" }
+
+func (CleanupExpiredRowsArgs) InsertOpts() river.InsertOpts {
+	return river.InsertOpts{MaxAttempts: 3, Queue: eventing.QueueMaintenance}
+}
+
+// retentionSweepBatchSize bounds each DELETE statement so the sweep holds
+// short lock queues even against large backlogs.
+const retentionSweepBatchSize = 500
+
+// ExpiredRowsWorker is the periodic retention sweep. It deletes:
+//   - system.idempotency_keys rows past expires_at (replay is impossible
+//     after the 24h TTL),
+//   - identity.sessions rows whose absolute lifetime ended more than 7 days
+//     ago (retention window for revoked/expired sessions; a row this old can
+//     never authenticate again),
+//   - security.auth_rate_limits buckets from windows older than 1 day, unless
+//     a block started in that window is still in force.
+//
+// Each table is drained in batches of at most retentionSweepBatchSize rows.
+type ExpiredRowsWorker struct {
+	river.WorkerDefaults[CleanupExpiredRowsArgs]
+	Store *store.Store
+	Logf  func(string, ...any)
+}
+
+func (w *ExpiredRowsWorker) Work(ctx context.Context, _ *river.Job[CleanupExpiredRowsArgs]) error {
+	if w.Store == nil || w.Store.Pool == nil {
+		return errors.New("database store is not initialized")
+	}
+	swept, err := SweepExpiredRows(ctx, w.Store)
+	if err != nil {
+		return err
+	}
+	if w.Logf != nil && (swept[0] > 0 || swept[1] > 0 || swept[2] > 0) {
+		w.Logf("retention sweep removed idempotency_keys=%d sessions=%d auth_rate_limits=%d", swept[0], swept[1], swept[2])
+	}
+	return nil
+}
+
+// SweepExpiredRows drains all expired retention tables and returns the total
+// deleted rows per table (idempotency_keys, sessions, auth_rate_limits).
+func SweepExpiredRows(ctx context.Context, database *store.Store) ([3]int, error) {
+	if database == nil || database.Pool == nil {
+		return [3]int{}, errors.New("database store is not initialized")
+	}
+	var swept [3]int
+	var err error
+	if swept[0], err = deleteInBatches(ctx, database.Pool, `
+		DELETE FROM system.idempotency_keys
+		WHERE id IN (SELECT id FROM system.idempotency_keys WHERE expires_at <= now() LIMIT $1)
+	`); err != nil {
+		return swept, fmt.Errorf("sweep idempotency keys: %w", err)
+	}
+	if swept[1], err = deleteInBatches(ctx, database.Pool, `
+		DELETE FROM identity.sessions
+		WHERE id IN (
+			SELECT id FROM identity.sessions
+			WHERE absolute_expires_at < now() - interval '7 days' LIMIT $1
+		)
+	`); err != nil {
+		return swept, fmt.Errorf("sweep sessions: %w", err)
+	}
+	if swept[2], err = deleteInBatches(ctx, database.Pool, `
+		DELETE FROM security.auth_rate_limits
+		WHERE (bucket_type, key_hash) IN (
+			SELECT bucket_type, key_hash FROM security.auth_rate_limits
+			WHERE window_started_at < now() - interval '1 day'
+			  AND (blocked_until IS NULL OR blocked_until <= now())
+			LIMIT $1
+		)
+	`); err != nil {
+		return swept, fmt.Errorf("sweep auth rate limits: %w", err)
+	}
+	return swept, nil
+}
+
+// deleteInBatches repeats the batched DELETE until fewer than the batch size
+// rows remain to delete.
+func deleteInBatches(ctx context.Context, pool *pgxpool.Pool, statement string) (int, error) {
+	total := 0
+	for {
+		command, err := pool.Exec(ctx, statement, retentionSweepBatchSize)
+		if err != nil {
+			return total, err
+		}
+		deleted := int(command.RowsAffected())
+		total += deleted
+		if deleted < retentionSweepBatchSize {
+			return total, nil
+		}
+	}
 }

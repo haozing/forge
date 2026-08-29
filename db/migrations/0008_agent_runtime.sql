@@ -1,7 +1,6 @@
 -- 0008_agent_runtime.sql
 -- Integration domain (agent applications, model endpoints) and automation
 -- runtime, folded at their current field set.
-BEGIN;
 
 CREATE TABLE integration.model_endpoints (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -289,4 +288,3 @@ CREATE UNIQUE INDEX automation_interactions_interrupt_idx
     ON automation.interactions (run_id, interrupt_id)
     WHERE interrupt_id IS NOT NULL;
 
-COMMIT;

@@ -159,3 +159,30 @@ func TestDraftPatchRequiresIfMatch(t *testing.T) {
 		t.Fatalf("body = %s", recorder.Body.String())
 	}
 }
+
+// TestAtoiDefaultFallsBackAndClamps: invalid and non-positive limits fall
+// back to the default, oversized values are clamped instead of overflowing.
+func TestAtoiDefaultFallsBackAndClamps(t *testing.T) {
+	cases := []struct {
+		value string
+		want  int
+	}{
+		{"", 20},
+		{"abc", 20},
+		{"0", 20},
+		{"-5", 20},
+		{" 7", 20},
+		{"7x", 20},
+		{"007", 7},
+		{"50", 50},
+		{"200", 200},
+		{"201", 200},
+		{"100000", 200},
+		{"99999999999999999999", 20},
+	}
+	for _, tc := range cases {
+		if got := atoiDefault(tc.value, 20); got != tc.want {
+			t.Fatalf("atoiDefault(%q) = %d, want %d", tc.value, got, tc.want)
+		}
+	}
+}

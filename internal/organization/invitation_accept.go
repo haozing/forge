@@ -163,6 +163,7 @@ func (s InvitationService) Accept(ctx context.Context, input AcceptInput) (Accep
 		return AcceptResult{}, fmt.Errorf("create invited user: %w", err)
 	}
 	workspaceIDs := []string{}
+	grants := []eventing.WorkspaceMembershipChangedPayload{}
 	rows, err := tx.Query(ctx, `
 		INSERT INTO content.workspace_members (organization_id, workspace_id, user_id, role, granted_by)
 		SELECT g.organization_id, g.workspace_id, $2::uuid, g.role, i.invited_by
@@ -170,18 +171,23 @@ func (s InvitationService) Accept(ctx context.Context, input AcceptInput) (Accep
 		JOIN organization.member_invitations i ON i.id = g.invitation_id
 		WHERE g.invitation_id = $1::uuid
 		ON CONFLICT (workspace_id, user_id) DO NOTHING
-		RETURNING workspace_id::text
+		RETURNING workspace_id::text, role
 	`, invitationID, userID)
 	if err != nil {
 		return AcceptResult{}, err
 	}
+	// Rows are drained and closed before any further statement runs on the
+	// connection; membership facts are emitted afterwards from memory.
 	for rows.Next() {
-		var workspaceID string
-		if err := rows.Scan(&workspaceID); err != nil {
+		var payload eventing.WorkspaceMembershipChangedPayload
+		if err := rows.Scan(&payload.WorkspaceID, &payload.Role); err != nil {
 			rows.Close()
 			return AcceptResult{}, err
 		}
-		workspaceIDs = append(workspaceIDs, workspaceID)
+		payload.UserID = userID
+		payload.Operation = "granted"
+		grants = append(grants, payload)
+		workspaceIDs = append(workspaceIDs, payload.WorkspaceID)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
@@ -213,10 +219,39 @@ func (s InvitationService) Accept(ctx context.Context, input AcceptInput) (Accep
 			return AcceptResult{}, err
 		}
 	}
+	// Every granted membership is a workspace fact and must ride the same
+	// transaction as the membership write.
+	acceptor := auth.Principal{OrganizationID: organizationID, UserID: userID, UserType: auth.UserTypeMember}
+	for _, grant := range grants {
+		if err := s.appendMembershipGrantedTx(ctx, tx, acceptor, grant); err != nil {
+			return AcceptResult{}, err
+		}
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return AcceptResult{}, err
 	}
 	return AcceptResult{UserID: userID, Email: email, OrganizationID: organizationID, WorkspaceIDs: workspaceIDs}, nil
+}
+
+// appendMembershipGrantedTx emits one workspace.membership_changed fact inside
+// the caller's transaction. A missing event store is an error: silently
+// dropping membership facts would desynchronize workspace consumers.
+func (s InvitationService) appendMembershipGrantedTx(ctx context.Context, tx pgx.Tx, acceptor auth.Principal, payload eventing.WorkspaceMembershipChangedPayload) error {
+	if s.Events == nil {
+		return errors.New("event store is not initialized: workspace membership facts would be lost")
+	}
+	_, err := s.Events.AppendTx(ctx, tx, eventing.Event{
+		OrganizationID:   acceptor.OrganizationID,
+		WorkspaceID:      payload.WorkspaceID,
+		EventType:        eventing.EventWorkspaceMembershipChanged,
+		AggregateType:    "workspace",
+		AggregateID:      payload.WorkspaceID,
+		AggregateVersion: 1,
+		PayloadVersion:   eventing.PayloadVersionV1,
+		Actor:            eventing.ActorFromPrincipal(acceptor),
+		Payload:          payload,
+	})
+	return err
 }
 
 // CreateSessionFor starts the second transaction: an initial session for the

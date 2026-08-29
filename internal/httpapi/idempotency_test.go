@@ -56,3 +56,47 @@ func TestSnapshotIdempotentRequestPreservesBody(t *testing.T) {
 		t.Fatalf("equal requests must hash equally: %s %s", firstHash, secondHash)
 	}
 }
+
+// TestPersistableResponseHeadersStripsRequestID: the stored header set must
+// not carry the original exchange's correlation id, whatever case it was
+// persisted with, and must not mutate the captured headers.
+func TestPersistableResponseHeadersStripsRequestID(t *testing.T) {
+	headers := http.Header{}
+	headers.Set("X-Request-Id", "req-original")
+	headers.Set("Content-Type", "application/json")
+	sanitized := persistableResponseHeaders(headers)
+	if sanitized.Get("X-Request-Id") != "" {
+		t.Fatalf("canonical X-Request-Id must be stripped: %v", sanitized)
+	}
+	if sanitized.Get("Content-Type") != "application/json" {
+		t.Fatalf("other headers must survive: %v", sanitized)
+	}
+	if headers.Get("X-Request-Id") != "req-original" {
+		t.Fatalf("captured headers must stay untouched: %v", headers)
+	}
+
+	lowercase := http.Header{}
+	lowercase["x-request-id"] = []string{"req-original"}
+	if persistableResponseHeaders(lowercase).Get("X-Request-Id") != "" {
+		t.Fatal("lowercase x-request-id must be stripped too")
+	}
+}
+
+// TestExecuteWithRecoverFlagsPanic: a panicking handler is flagged, not
+// propagated, and the middleware's log surface stays swappable.
+func TestExecuteWithRecoverFlagsPanic(t *testing.T) {
+	saved := idempotencyLogf
+	idempotencyLogf = func(string, ...any) {}
+	defer func() { idempotencyLogf = saved }()
+
+	called := false
+	if !executeWithRecover(func() { called = true; panic("boom") }, "operation", "key") {
+		t.Fatal("panicking handler must be flagged")
+	}
+	if !called {
+		t.Fatal("handler must have run")
+	}
+	if executeWithRecover(func() {}, "operation", "key") {
+		t.Fatal("calm handler must not be flagged")
+	}
+}

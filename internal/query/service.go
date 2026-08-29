@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"agentchunzhi/internal/access"
 	"agentchunzhi/internal/auth"
 	"agentchunzhi/internal/retrieval"
 	"agentchunzhi/internal/store"
@@ -917,13 +918,16 @@ func (s Service) validateCitationRef(ctx context.Context, principal auth.Princip
 		sourceChecksum != payload.SourceChecksum || chunkChecksum != payload.ChunkChecksum {
 		return nil, nil
 	}
-	// The current published pointer must still be the cited version.
-	var current string
+	// The current published pointer must still be the cited version, and the
+	// asset must still be visible to the caller: workspace-private assets
+	// require an active membership in the owning workspace at validation time.
+	var current, visibility, workspaceID string
 	err = s.Store.Pool.QueryRow(ctx, `
-		SELECT current_published_version_id::text FROM asset.assets
-		WHERE organization_id = $1::uuid AND id = $2::uuid
-		  AND publication_status = 'published' AND deleted_at IS NULL
-	`, principal.OrganizationID, assetID).Scan(&current)
+		SELECT a.current_published_version_id::text, a.visibility, a.workspace_id::text
+		FROM asset.assets a
+		WHERE a.organization_id = $1::uuid AND a.id = $2::uuid
+		  AND a.publication_status = 'published' AND a.deleted_at IS NULL
+	`, principal.OrganizationID, assetID).Scan(&current, &visibility, &workspaceID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -932,6 +936,27 @@ func (s Service) validateCitationRef(ctx context.Context, principal auth.Princip
 	}
 	if current != versionID {
 		return nil, nil
+	}
+	if visibility == access.VisibilityWorkspace {
+		var member bool
+		err = s.Store.Pool.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1
+				FROM content.workspace_members wm
+				JOIN content.workspaces w ON w.organization_id = wm.organization_id
+				  AND w.id = wm.workspace_id AND w.status = 'active'
+				JOIN identity.users u ON u.id = wm.user_id AND u.user_type = 'member'
+				  AND u.status = 'active'
+				WHERE wm.organization_id = $1::uuid AND wm.workspace_id = $2::uuid
+				  AND wm.user_id = $3::uuid
+			)
+		`, principal.OrganizationID, workspaceID, principal.UserID).Scan(&member)
+		if err != nil {
+			return nil, fmt.Errorf("load cited asset membership: %w", err)
+		}
+		if !member {
+			return nil, nil
+		}
 	}
 	return &ValidatedReference{CitationRef: ref, AssetID: assetID, AssetVersionID: versionID}, nil
 }

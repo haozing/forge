@@ -125,7 +125,8 @@ func v2MemberSession(w http.ResponseWriter, r *http.Request, deps Dependencies) 
 }
 
 // requireIfMatchV2 enforces the If-Match precondition on PATCH/PUT: missing
-// answers 428 precondition_required.
+// answers 428 precondition_required. The value is returned verbatim (quotes
+// included); comparison sites use ifMatchWildcard to honor the "*" wildcard.
 func requireIfMatchV2(w http.ResponseWriter, r *http.Request) (string, bool) {
 	value := strings.TrimSpace(r.Header.Get("If-Match"))
 	if value == "" {
@@ -133,6 +134,13 @@ func requireIfMatchV2(w http.ResponseWriter, r *http.Request) (string, bool) {
 		return "", false
 	}
 	return value, true
+}
+
+// ifMatchWildcard reports whether a (possibly ETag-quoted) If-Match value is
+// the "*" wildcard: the precondition then only demands that the resource
+// exists, so revision equality checks are skipped.
+func ifMatchWildcard(value string) bool {
+	return strings.Trim(value, "\"") == "*"
 }
 
 func writeNoContent(w http.ResponseWriter) {
@@ -421,6 +429,16 @@ func v2PatchMe(deps Dependencies) http.HandlerFunc {
 		if !ok {
 			return
 		}
+		if ifMatchWildcard(expected) {
+			// If-Match "*" only demands the profile exists; resolve the current
+			// revision so the optimistic check inside the service passes.
+			current, err := deps.IdentityService.Me(r.Context(), principal.UserID)
+			if err != nil {
+				v2DomainError(w, err)
+				return
+			}
+			expected = current.ETag
+		}
 		var input v2PatchMeRequest
 		if !decodeV2Body(w, r, &input, 16*1024) {
 			return
@@ -511,6 +529,16 @@ func v2PatchPreferences(deps Dependencies) http.HandlerFunc {
 		expected, ok := requireIfMatchV2(w, r)
 		if !ok {
 			return
+		}
+		if ifMatchWildcard(expected) {
+			// If-Match "*" only demands the preferences row exists; resolve the
+			// current revision so the optimistic check inside the service passes.
+			current, err := deps.IdentityService.Preferences(r.Context(), principal.UserID)
+			if err != nil {
+				v2DomainError(w, err)
+				return
+			}
+			expected = strconv.FormatInt(current.Revision, 10)
 		}
 		var input v2PatchPreferencesRequest
 		if !decodeV2Body(w, r, &input, 16*1024) {
