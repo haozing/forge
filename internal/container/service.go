@@ -121,7 +121,8 @@ func (s Service) Create(ctx context.Context, principal auth.Principal, workspace
 	if input.Visibility == "" {
 		input.Visibility = "workspace"
 	}
-	if input.Visibility != "public" && input.Visibility != "login" && input.Visibility != "private" && input.Visibility != "workspace" && input.Visibility != "internal" {
+	// The v2 visibility vocabulary is exactly workspace/organization/public.
+	if input.Visibility != "workspace" && input.Visibility != "organization" && input.Visibility != "public" {
 		return Item{}, ErrInvalidInput
 	}
 	if input.ParentID != nil && !validID(*input.ParentID) {

@@ -1,9 +1,7 @@
 package httpapi
 
 import (
-	"encoding/json"
 	"net/http"
-	"strings"
 
 	assetservice "agentchunzhi/internal/asset"
 	"agentchunzhi/internal/deletion"
@@ -59,37 +57,16 @@ func assetVersionCollectionFinal(deps Dependencies) http.HandlerFunc {
 			return
 		}
 		assetID := r.PathValue("assetId")
-		switch r.Method {
-		case http.MethodGet:
-			items, err := deps.MemberAssetService.ListVersions(r.Context(), principal, assetID)
-			if err != nil {
-				writeMemberAssetError(w, err, "asset_versions_failed")
-				return
-			}
-			writeJSON(w, http.StatusOK, map[string]any{"items": items, "has_more": false})
-		case http.MethodPost:
-			key, ok := requestIdempotencyKey(w, r)
-			if !ok {
-				writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
-				return
-			}
-			var input assetservice.MemberAssetVersionInput
-			decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 2*1024*1024))
-			decoder.DisallowUnknownFields()
-			if err := decoder.Decode(&input); err != nil {
-				writeError(w, http.StatusUnprocessableEntity, "validation_failed")
-				return
-			}
-			item, err := deps.MemberAssetService.CreateVersion(r.Context(), principal, assetID, key, input)
-			if err != nil {
-				writeMemberAssetError(w, err, "asset_version_create_failed")
-				return
-			}
-			writeETag(w, item.ETag)
-			writeJSON(w, http.StatusCreated, item)
-		default:
+		if r.Method != http.MethodGet {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
+			return
 		}
+		items, err := deps.MemberAssetService.ListVersions(r.Context(), principal, assetID)
+		if err != nil {
+			writeMemberAssetError(w, err, "asset_versions_failed")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"items": items, "has_more": false})
 	}
 }
 
@@ -100,39 +77,13 @@ func assetVersionResourceFinal(deps Dependencies) http.HandlerFunc {
 			return
 		}
 		versionID := r.PathValue("versionId")
-		if r.Method == http.MethodGet {
-			item, err := deps.MemberAssetService.GetVersion(r.Context(), principal, versionID)
-			if err != nil {
-				writeMemberAssetError(w, err, "asset_version_load_failed")
-				return
-			}
-			writeETag(w, item.ETag)
-			writeJSON(w, http.StatusOK, item)
-			return
-		}
-		if r.Method != http.MethodPatch {
+		if r.Method != http.MethodGet {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
 			return
 		}
-		key, ok := requestIdempotencyKey(w, r)
-		if !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
-			return
-		}
-		if strings.TrimSpace(r.Header.Get("If-Match")) == "" {
-			writeError(w, http.StatusPreconditionRequired, "if_match_required")
-			return
-		}
-		var input assetservice.MemberAssetVersionInput
-		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 2*1024*1024))
-		decoder.DisallowUnknownFields()
-		if err := decoder.Decode(&input); err != nil {
-			writeError(w, http.StatusUnprocessableEntity, "validation_failed")
-			return
-		}
-		item, err := deps.MemberAssetService.UpdateVersion(r.Context(), principal, versionID, r.Header.Get("If-Match"), key, input)
+		item, err := deps.MemberAssetService.GetVersion(r.Context(), principal, versionID)
 		if err != nil {
-			writeMemberAssetError(w, err, "asset_version_update_failed")
+			writeMemberAssetError(w, err, "asset_version_load_failed")
 			return
 		}
 		writeETag(w, item.ETag)
@@ -197,7 +148,7 @@ func duplicateAssetFinal(deps Dependencies) http.HandlerFunc {
 			writeMemberAssetError(w, err, "asset_load_failed")
 			return
 		}
-		input := assetservice.MemberAssetInput{ResourceModelID: original.ResourceModelID, Title: original.Title, Markdown: original.Markdown, Fields: original.Fields, Tags: original.Tags, Source: original.Source, Visibility: original.Visibility}
+		input := assetservice.MemberAssetInput{ResourceModelID: original.ResourceModelID, Title: original.Title, Markdown: original.Markdown, Fields: original.Fields, Visibility: original.Visibility}
 		result, err := deps.MemberAssetService.Create(r.Context(), principal, original.WorkspaceID, key, input)
 		if err != nil {
 			writeMemberAssetError(w, err, "asset_duplicate_failed")

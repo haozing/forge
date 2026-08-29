@@ -1,5 +1,11 @@
 package asset
 
+// write.go — the Agent/OpenAPI write channel. Create materializes the asset,
+// its first sealed version and the clean shared draft in one transaction;
+// Update is a draft autosave (revision bump only, never a version — commits
+// go through the draft commit path). Idempotency, field validation and
+// reference checks are shared with the webhook and import channels.
+
 import (
 	"context"
 	"crypto/sha256"
@@ -7,11 +13,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
 	"agentchunzhi/internal/auth"
-	"agentchunzhi/internal/retrieval"
+	"agentchunzhi/internal/eventing"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -24,8 +31,6 @@ type AssetResult struct {
 	CurrentWorkingVersionID   string         `json:"current_working_version_id"`
 	CurrentPublishedVersionID *string        `json:"current_published_version_id"`
 	PublicationStatus         string         `json:"publication_status"`
-	WorkflowStatus            string         `json:"workflow_status"`
-	Quality                   string         `json:"quality"`
 	Title                     *string        `json:"title"`
 	Markdown                  *string        `json:"markdown,omitempty"`
 	Fields                    map[string]any `json:"fields"`
@@ -37,13 +42,9 @@ type CreateInput struct {
 	Title           *string
 	Markdown        *string
 	Fields          map[string]any
-	Source          map[string]any
-	// Tags is optional; channel integrations (import/webhook) seed the
-	// version-level tag list, plain API creates leave it empty.
-	Tags []string
-	// VersionSource is written to asset_versions.source when set. It records
-	// channel provenance such as webhook received_at or import row numbers.
-	VersionSource map[string]any
+	// Source carries optional channel provenance. It is preserved in the
+	// raw_inputs payload only; version snapshots record no channel JSON.
+	Source map[string]any
 }
 
 type UpdateInput struct {
@@ -88,16 +89,13 @@ func (s Service) Create(ctx context.Context, principal auth.Principal, allowedMo
 		Markdown *string        `json:"markdown"`
 		Fields   map[string]any `json:"fields"`
 	}{input.Title, input.Markdown, fields})
-	sourcePayload, _ := json.Marshal(input)
-	var rawInputID string
-	if err := tx.QueryRow(ctx, `
-		INSERT INTO asset.raw_inputs
-			(organization_id, submitted_by, source_type, content_type, payload, content_checksum)
-		VALUES ($1::uuid, $2::uuid, 'api', 'application/json', $3::jsonb, $4)
-		RETURNING id::text
-	`, principal.OrganizationID, principal.UserID, string(sourcePayload), contentChecksum).Scan(&rawInputID); err != nil {
-		return AssetResult{}, fmt.Errorf("record raw input: %w", err)
-	}
+	rawPayload, _ := json.Marshal(struct {
+		Channel  string         `json:"channel"`
+		Title    *string        `json:"title"`
+		Markdown *string        `json:"markdown"`
+		Fields   map[string]any `json:"fields"`
+		Source   map[string]any `json:"source,omitempty"`
+	}{"api", input.Title, input.Markdown, fields, input.Source})
 	var modelVersionID, workspaceID string
 	var fieldSchema []byte
 	if err := tx.QueryRow(ctx, `
@@ -120,43 +118,39 @@ func (s Service) Create(ctx context.Context, principal auth.Principal, allowedMo
 	if err := validateAssetReferences(ctx, tx, principal, workspaceID, fieldSchema, fields); err != nil {
 		return AssetResult{}, err
 	}
-	var assetID, versionID string
+	var rawInputID string
 	if err := tx.QueryRow(ctx, `
-		INSERT INTO asset.assets (organization_id, workspace_id, resource_model_id, created_by)
-		VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid)
+		INSERT INTO asset.raw_inputs
+			(organization_id, workspace_id, submitted_by, source_type, content_type, payload, content_checksum)
+		VALUES ($1::uuid, $2::uuid, $3::uuid, 'api', 'application/json', $4::jsonb, $5)
 		RETURNING id::text
-	`, principal.OrganizationID, workspaceID, input.ResourceModelID, principal.UserID).Scan(&assetID); err != nil {
-		return AssetResult{}, fmt.Errorf("create asset: %w", err)
+	`, principal.OrganizationID, workspaceID, principal.UserID, string(rawPayload), contentChecksum).Scan(&rawInputID); err != nil {
+		return AssetResult{}, fmt.Errorf("record raw input: %w", err)
 	}
-	tagsArg := "[]"
-	if len(input.Tags) > 0 {
-		tagsArg = string(mustJSON(input.Tags))
+	assetID, versionID, versionNo, err := createAssetWithFirstVersionTx(ctx, tx,
+		principal.OrganizationID, workspaceID, input.ResourceModelID, modelVersionID,
+		rawInputID, OriginHuman, derefString(input.Title), "", derefString(input.Markdown),
+		fields, principal.UserID)
+	if err != nil {
+		return AssetResult{}, err
 	}
-	versionSourceArg := "{}"
-	if input.VersionSource != nil {
-		versionSourceArg = string(mustJSON(input.VersionSource))
+	row, err := LoadLifecycleTx(ctx, tx, principal.OrganizationID, assetID)
+	if err != nil {
+		return AssetResult{}, err
 	}
-	if err := tx.QueryRow(ctx, `
-		INSERT INTO asset.asset_versions
-			(organization_id, workspace_id, asset_id, resource_model_id, resource_model_version_id, version_no,
-			 workflow_status, quality, title, markdown, fields, source_raw_input_id, content_checksum, created_by,
-			 tags, source)
-		VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid, 1, 'draft', 'raw', $6, $7, $8::jsonb, $9::uuid, $10, $11::uuid, $12::jsonb, $13::jsonb)
-		RETURNING id::text
-	`, principal.OrganizationID, workspaceID, assetID, input.ResourceModelID, modelVersionID, input.Title, input.Markdown, string(mustJSON(fields)), rawInputID, contentChecksum, principal.UserID, tagsArg, versionSourceArg).Scan(&versionID); err != nil {
-		return AssetResult{}, fmt.Errorf("create asset version: %w", err)
+	if err := AppendAssetEventTx(ctx, tx, s.Events, row, principal, eventing.EventAssetVersionCreated, eventing.PayloadVersionV1, eventing.AssetVersionCreatedPayload{
+		AssetID:     assetID,
+		VersionID:   versionID,
+		VersionNo:   versionNo,
+		WorkspaceID: workspaceID,
+	}); err != nil {
+		return AssetResult{}, err
 	}
-	if _, err := tx.Exec(ctx, `
-		UPDATE asset.assets
-		SET current_working_version_id = $2::uuid, updated_at = now()
-		WHERE id = $1::uuid
-	`, assetID, versionID); err != nil {
-		return AssetResult{}, fmt.Errorf("set working asset version: %w", err)
-	}
-	if err := retrieval.EnqueueProjectionTx(ctx, tx, s.Events, principal.OrganizationID, versionID, retrieval.ProjectionRebuild); err != nil {
-		return AssetResult{}, fmt.Errorf("enqueue asset projection: %w", err)
-	}
-	result, err := loadAssetTx(ctx, tx, assetID)
+	RecordAssetAuditTx(ctx, tx, principal.OrganizationID, workspaceID, principal, "asset.create", assetID, map[string]any{
+		"workspace_id": workspaceID,
+		"version_id":   versionID,
+	})
+	result, err := loadAssetTx(ctx, tx, principal.OrganizationID, assetID)
 	if err != nil {
 		return AssetResult{}, err
 	}
@@ -169,8 +163,66 @@ func (s Service) Create(ctx context.Context, principal auth.Principal, allowedMo
 	return result, nil
 }
 
-func (s Service) Update(ctx context.Context, principal auth.Principal, allowedModelIDs []string, idempotencyKey, assetID, expectedVersionID string, input UpdateInput) (AssetResult, error) {
-	if len(allowedModelIDs) == 0 || !validID(assetID) || !validID(expectedVersionID) || !validIdempotencyKey(idempotencyKey) {
+// createAssetWithFirstVersionTx is the shared tail of every "new asset"
+// pipeline (API create, webhook intake, import row): it inserts the asset
+// (pointers NULL, the deferred triggers tolerate this inside the create
+// transaction), appends the first sealed version through CreateVersionTx,
+// inserts the clean shared draft at revision 1 and links both pointers.
+// Callers own validation, idempotency, events and audit.
+func createAssetWithFirstVersionTx(ctx context.Context, tx pgx.Tx, organizationID, workspaceID, resourceModelID, resourceModelVersionID, rawInputID, origin, title, summary, markdown string, fields map[string]any, actorID string) (string, string, int64, error) {
+	var assetID string
+	if err := tx.QueryRow(ctx, `
+		INSERT INTO asset.assets (organization_id, workspace_id, resource_model_id, created_by)
+		VALUES ($1::uuid, $2::uuid, $3::uuid, NULLIF($4,'')::uuid)
+		RETURNING id::text
+	`, organizationID, workspaceID, resourceModelID, actorID).Scan(&assetID); err != nil {
+		return "", "", 0, fmt.Errorf("insert asset: %w", err)
+	}
+	versionID, versionNo, err := CreateVersionTx(ctx, tx, VersionMaterial{
+		OrganizationID:         organizationID,
+		WorkspaceID:            workspaceID,
+		AssetID:                assetID,
+		ResourceModelID:        resourceModelID,
+		ResourceModelVersionID: resourceModelVersionID,
+		Origin:                 origin,
+		ConfirmationStatus:     ConfirmationUnconfirmed,
+		Title:                  title,
+		Summary:                summary,
+		Markdown:               markdown,
+		Fields:                 fields,
+		SourceRawInputID:       rawInputID,
+		CreatedBy:              actorID,
+	})
+	if err != nil {
+		return "", "", 0, err
+	}
+	var draftID string
+	if err := tx.QueryRow(ctx, `
+		INSERT INTO asset.asset_drafts
+			(organization_id, workspace_id, asset_id, base_version_id, revision, committed_revision,
+			 title, summary, markdown, fields, origin, updated_by)
+		VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, 1, 1, $5, $6, $7, $8::jsonb, $9, NULLIF($10,'')::uuid)
+		RETURNING id::text
+	`, organizationID, workspaceID, assetID, versionID, title, summary, markdown,
+		string(mustJSON(fields)), origin, actorID).Scan(&draftID); err != nil {
+		return "", "", 0, fmt.Errorf("insert draft: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE asset.assets
+		SET current_working_version_id = $3::uuid, draft_id = $4::uuid
+		WHERE organization_id = $1::uuid AND id = $2::uuid
+	`, organizationID, assetID, versionID, draftID); err != nil {
+		return "", "", 0, fmt.Errorf("link asset pointers: %w", err)
+	}
+	return assetID, versionID, versionNo, nil
+}
+
+// Update autosaves the shared draft of an asset: it patches asset_drafts and
+// bumps the draft revision; no AssetVersion is created. expectedRevision is
+// the optimistic draft revision (If-Match); a mismatch returns
+// ErrDraftRevisionMismatch.
+func (s Service) Update(ctx context.Context, principal auth.Principal, allowedModelIDs []string, idempotencyKey, assetID, expectedRevision string, input UpdateInput) (AssetResult, error) {
+	if len(allowedModelIDs) == 0 || !validID(assetID) || !validDraftRevision(expectedRevision) || !validIdempotencyKey(idempotencyKey) {
 		return AssetResult{}, ErrInvalidInput
 	}
 	if input.Title == nil && input.Markdown == nil && input.Fields == nil {
@@ -183,10 +235,10 @@ func (s Service) Update(ctx context.Context, principal auth.Principal, allowedMo
 		return AssetResult{}, errors.New("database store is not initialized")
 	}
 	requestHash := hashRequest("asset.update", struct {
-		AssetID string
-		Version string
-		Input   UpdateInput
-	}{assetID, expectedVersionID, input})
+		AssetID  string
+		Revision string
+		Input    UpdateInput
+	}{assetID, expectedRevision, input})
 	tx, err := s.Store.Pool.Begin(ctx)
 	if err != nil {
 		return AssetResult{}, fmt.Errorf("begin asset update: %w", err)
@@ -203,82 +255,58 @@ func (s Service) Update(ctx context.Context, principal auth.Principal, allowedMo
 		}
 		return result, nil
 	}
-	var currentVersion, workspaceID, modelID, modelVersionID string
-	var fieldSchema []byte
-	var versionNo int
-	var workflow string
-	var title, markdown *string
-	var fields map[string]any
+	var workspaceID, modelID, publicationStatus string
 	err = tx.QueryRow(ctx, `
-		SELECT v.id::text, a.workspace_id::text, v.resource_model_id::text, v.resource_model_version_id::text,
-		       v.version_no, v.workflow_status, v.title, v.markdown, v.fields
+		SELECT a.workspace_id::text, a.resource_model_id::text, a.publication_status
 		FROM asset.assets a
-		JOIN asset.asset_versions v ON v.id = a.current_working_version_id
-		JOIN model.resource_model_versions mv ON mv.id = v.resource_model_version_id
 		WHERE a.id = $1::uuid
 		  AND a.organization_id = $2::uuid
 		  AND a.resource_model_id::text = ANY($3::text[])
-		FOR UPDATE OF a, v
-	`, assetID, principal.OrganizationID, allowedModelIDs).Scan(&currentVersion, &workspaceID, &modelID, &modelVersionID, &versionNo, &workflow, &title, &markdown, &fields)
+		FOR UPDATE
+	`, assetID, principal.OrganizationID, allowedModelIDs).Scan(&workspaceID, &modelID, &publicationStatus)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return AssetResult{}, ErrNotFound
 	}
 	if err != nil {
 		return AssetResult{}, fmt.Errorf("load asset for update: %w", err)
 	}
-	if currentVersion != expectedVersionID {
-		return AssetResult{}, fmt.Errorf("%w: working version changed", ErrConflict)
+	if publicationStatus == PublicationArchived {
+		return AssetResult{}, ErrAssetArchived
 	}
-	if workflow != "draft" {
-		return AssetResult{}, fmt.Errorf("%w: version is not editable", ErrConflict)
+	draft, err := LoadDraftTx(ctx, tx, principal.OrganizationID, assetID, expectedRevision)
+	if err != nil {
+		return AssetResult{}, err
 	}
 	if input.Title != nil {
-		title = input.Title
+		draft.Title = strings.TrimSpace(*input.Title)
 	}
 	if input.Markdown != nil {
-		markdown = input.Markdown
+		draft.Markdown = *input.Markdown
 	}
 	if input.Fields != nil {
-		fields = *input.Fields
+		draft.Fields = *input.Fields
 	}
-	if fields == nil {
-		fields = map[string]any{}
+	if draft.Fields == nil {
+		draft.Fields = map[string]any{}
 	}
-	if err := tx.QueryRow(ctx, `SELECT field_schema FROM model.resource_model_versions WHERE id = $1::uuid`, modelVersionID).Scan(&fieldSchema); err != nil {
+	var fieldSchema []byte
+	if err := tx.QueryRow(ctx, `
+		SELECT v.field_schema FROM model.resource_models m
+		JOIN model.resource_model_versions v ON v.organization_id = m.organization_id AND v.id = m.current_version_id
+		WHERE m.organization_id = $1::uuid AND m.id = $2::uuid
+	`, principal.OrganizationID, modelID).Scan(&fieldSchema); err != nil {
 		return AssetResult{}, fmt.Errorf("load resource model field schema: %w", err)
 	}
-	if err := validateFields(fieldSchema, fields); err != nil {
+	if err := validateFields(fieldSchema, draft.Fields); err != nil {
 		return AssetResult{}, err
 	}
-	if err := validateAssetReferences(ctx, tx, principal, workspaceID, fieldSchema, fields); err != nil {
+	if err := validateAssetReferences(ctx, tx, principal, workspaceID, fieldSchema, draft.Fields); err != nil {
 		return AssetResult{}, err
 	}
-	contentChecksum := hashRequest("asset.content", struct {
-		Title    *string        `json:"title"`
-		Markdown *string        `json:"markdown"`
-		Fields   map[string]any `json:"fields"`
-	}{title, markdown, fields})
-	var newVersionID string
-	if err := tx.QueryRow(ctx, `
-		INSERT INTO asset.asset_versions
-			(organization_id, workspace_id, asset_id, resource_model_id, resource_model_version_id, version_no,
-			 workflow_status, quality, title, markdown, fields, parent_version_id, content_checksum, created_by)
-		VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6, 'draft', 'raw', $7, $8, $9::jsonb, $10::uuid, $11, $12::uuid)
-		RETURNING id::text
-	`, principal.OrganizationID, workspaceID, assetID, modelID, modelVersionID, versionNo+1, title, markdown, string(mustJSON(fields)), currentVersion, contentChecksum, principal.UserID).Scan(&newVersionID); err != nil {
-		return AssetResult{}, fmt.Errorf("create updated asset version: %w", err)
+	if err := persistDraftPatch(ctx, tx, principal.OrganizationID, draft, principal.UserID); err != nil {
+		return AssetResult{}, err
 	}
-	if _, err := tx.Exec(ctx, `
-		UPDATE asset.assets
-		SET current_working_version_id = $2::uuid, updated_at = now()
-		WHERE id = $1::uuid
-	`, assetID, newVersionID); err != nil {
-		return AssetResult{}, fmt.Errorf("set updated working version: %w", err)
-	}
-	if err := retrieval.EnqueueProjectionTx(ctx, tx, s.Events, principal.OrganizationID, newVersionID, retrieval.ProjectionRebuild); err != nil {
-		return AssetResult{}, fmt.Errorf("enqueue updated asset projection: %w", err)
-	}
-	result, err := loadAssetTx(ctx, tx, assetID)
+	result, err := loadAssetTx(ctx, tx, principal.OrganizationID, assetID)
 	if err != nil {
 		return AssetResult{}, err
 	}
@@ -289,6 +317,21 @@ func (s Service) Update(ctx context.Context, principal auth.Principal, allowedMo
 		return AssetResult{}, fmt.Errorf("commit asset update: %w", err)
 	}
 	return result, nil
+}
+
+// validDraftRevision reports whether value is a positive decimal draft
+// revision — the If-Match token for autosave writes.
+func validDraftRevision(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, r := range value {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	_, err := strconv.ParseInt(value, 10, 63)
+	return err == nil
 }
 
 type idempotencyState struct {
@@ -352,22 +395,28 @@ func saveIdempotency(ctx context.Context, tx pgx.Tx, principal auth.Principal, o
 	return nil
 }
 
-func loadAssetTx(ctx context.Context, tx pgx.Tx, assetID string) (AssetResult, error) {
+// loadAssetTx reads the agent-facing asset projection. Content columns come
+// from the shared draft; publication facts come from the asset row.
+func loadAssetTx(ctx context.Context, tx pgx.Tx, organizationID, assetID string) (AssetResult, error) {
 	var result AssetResult
 	err := tx.QueryRow(ctx, `
 		SELECT a.id::text, a.resource_model_id::text,
-		       a.current_working_version_id::text, a.current_published_version_id,
-		       a.publication_status, v.workflow_status, v.quality, v.title, v.markdown,
-		       v.fields, a.updated_at
+		       a.current_working_version_id::text, a.current_published_version_id::text,
+		       a.publication_status, d.title, d.markdown, d.fields, a.updated_at
 		FROM asset.assets a
-		JOIN asset.asset_versions v ON v.id = a.current_working_version_id
-		WHERE a.id = $1::uuid
-	`, assetID).Scan(&result.ID, &result.ResourceModelID, &result.CurrentWorkingVersionID, &result.CurrentPublishedVersionID, &result.PublicationStatus, &result.WorkflowStatus, &result.Quality, &result.Title, &result.Markdown, &result.Fields, &result.UpdatedAt)
+		JOIN asset.asset_drafts d ON d.organization_id = a.organization_id AND d.asset_id = a.id
+		WHERE a.organization_id = $1::uuid AND a.id = $2::uuid
+	`, organizationID, assetID).Scan(&result.ID, &result.ResourceModelID,
+		&result.CurrentWorkingVersionID, &result.CurrentPublishedVersionID,
+		&result.PublicationStatus, &result.Title, &result.Markdown, &result.Fields, &result.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return AssetResult{}, ErrNotFound
 	}
 	if err != nil {
 		return AssetResult{}, fmt.Errorf("load asset result: %w", err)
+	}
+	if result.Fields == nil {
+		result.Fields = map[string]any{}
 	}
 	return result, nil
 }
@@ -615,17 +664,12 @@ func validateAssetReferences(ctx context.Context, tx pgx.Tx, principal auth.Prin
 			SELECT EXISTS (
 				SELECT 1
 				FROM asset.assets a
-				JOIN asset.asset_versions av ON av.organization_id = a.organization_id AND av.asset_id = a.id
+				JOIN asset.asset_versions av ON av.organization_id = a.organization_id
+				  AND av.asset_id = a.id AND av.id = $4::uuid
 				WHERE a.organization_id = $1::uuid AND a.workspace_id = $2::uuid
-				  AND a.id = $3::uuid AND av.id = $4::uuid AND a.deleted_at IS NULL
+				  AND a.id = $3::uuid AND a.deleted_at IS NULL
 				  AND (
-					($5 = 'member' AND (
-						a.visibility <> 'private' OR a.created_by = $6::uuid OR EXISTS (
-							SELECT 1 FROM content.workspace_members wm
-							WHERE wm.organization_id = a.organization_id AND wm.workspace_id = a.workspace_id
-							  AND wm.user_id = $6::uuid AND wm.role IN ('owner', 'admin')
-						)
-					))
+					($5 = 'member')
 					OR ($5 = 'agent' AND EXISTS (
 						SELECT 1 FROM content.agent_access_policies ap
 						WHERE ap.organization_id = a.organization_id AND ap.workspace_id = a.workspace_id

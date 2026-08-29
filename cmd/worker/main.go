@@ -43,21 +43,10 @@ func main() {
 		startupCancel()
 		log.Fatalf("worker database startup failed: %v", err)
 	}
-	if err := store.ApplyMigration(startupCtx, db, cfg.MigrationPath); err != nil {
+	if err := store.VerifySchemaContract(startupCtx, db, cfg.MigrationPath); err != nil {
 		db.Close()
 		startupCancel()
-		log.Fatalf("worker database migration failed: %v", err)
-	}
-
-	// 0043 is self-idempotent (ON CONFLICT DO NOTHING): replaying it on boot
-	// seeds organizations created after its checksum was first recorded.
-	if err := store.ReplayIdempotentSeed(startupCtx, db, cfg.MigrationPath, "0043_builtin_resource_model_seeds.sql"); err != nil {
-		log.Fatalf("replay builtin resource model seed: %v", err)
-	}
-	if err := eventing.Migrate(startupCtx, db.Pool); err != nil {
-		db.Close()
-		startupCancel()
-		log.Fatalf("worker River migration failed: %v", err)
+		log.Fatalf("worker schema contract verification failed: %v", err)
 	}
 	startupCancel()
 	defer db.Close()

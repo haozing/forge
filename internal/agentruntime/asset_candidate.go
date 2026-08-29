@@ -109,7 +109,9 @@ func decodeCandidateObject(value string) (map[string]any, error) {
 	if wrapped, ok := decoded["fields"].(map[string]any); ok && len(decoded) == 1 {
 		decoded = wrapped
 	}
-	for _, forbidden := range []string{"organization_id", "workspace_id", "agent_user_id", "agent_application_id", "publication_status", "workflow_status"} {
+	// System keys can never be shadowed by model output; the reserved list is
+	// the authoritative source.
+	for _, forbidden := range reservedSystemKeys {
 		delete(decoded, forbidden)
 	}
 	return decoded, nil
@@ -216,3 +218,11 @@ func candidateFieldResponseSchema(field map[string]any) map[string]any {
 }
 
 var _ workflows.CandidateExtractor = AssetCandidateExtractor{}
+
+// reservedSystemKeys are stripped from model output so dynamic fields can
+// never shadow system identity columns.
+var reservedSystemKeys = []string{
+	"organization_id", "workspace_id", "agent_user_id",
+	"agent_application_id", "publication_status", "visibility",
+	"resource_model_id", "created_by", "updated_by",
+}

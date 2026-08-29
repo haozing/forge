@@ -37,13 +37,15 @@ func TestWriteAutomationErrorMapsPreciseSentinels(t *testing.T) {
 				t.Fatalf("status = %d, want %d", recorder.Code, tc.wantStatus)
 			}
 			var body struct {
-				Code string `json:"code"`
+				Error struct {
+					Code string `json:"code"`
+				} `json:"error"`
 			}
 			if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
 				t.Fatalf("decode body %q: %v", recorder.Body.String(), err)
 			}
-			if body.Code != tc.wantCode {
-				t.Fatalf("code = %q, want %q", body.Code, tc.wantCode)
+			if body.Error.Code != tc.wantCode {
+				t.Fatalf("code = %q, want %q", body.Error.Code, tc.wantCode)
 			}
 		})
 	}
@@ -56,10 +58,12 @@ func TestWriteAutomationErrorUnknownErrorKeepsFallback(t *testing.T) {
 		t.Fatalf("status = %d, want 500", recorder.Code)
 	}
 	var body struct {
-		Code string `json:"code"`
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
 	}
 	_ = json.Unmarshal(recorder.Body.Bytes(), &body)
-	if body.Code != "automation_job_create_failed" {
-		t.Fatalf("fallback code = %q", body.Code)
+	if body.Error.Code != "automation_job_create_failed" {
+		t.Fatalf("fallback code = %q", body.Error.Code)
 	}
 }

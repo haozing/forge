@@ -42,28 +42,11 @@ func (s *Store) Close() {
 	}
 }
 
-// ReplayIdempotentSeed re-executes a self-idempotent seed migration file
-// (e.g. 0043 builtin resource models) after schema migrations have run.
-// Schema migrations are tracked by checksum and therefore skip already-applied
-// files; a data seed embedded in one would never reach organizations created
-// after registration. Replay relies on the file's ON CONFLICT guards instead,
-// so boot-time invocation keeps every existing organization covered.
-func ReplayIdempotentSeed(ctx context.Context, s *Store, path, filename string) error {
-	if s == nil || s.Pool == nil {
-		return errors.New("database store is not initialized")
-	}
-	target := filepath.Join(filepath.Clean(path), filename)
-	body, err := os.ReadFile(target)
-	if err != nil {
-		return fmt.Errorf("read idempotent seed %s: %w", filename, err)
-	}
-	if _, err := s.Pool.Exec(ctx, string(body)); err != nil {
-		return fmt.Errorf("replay idempotent seed %s: %w", filename, err)
-	}
-	return nil
-}
-
-func ApplyMigration(ctx context.Context, s *Store, path string) error {
+// VerifySchemaContract is the only schema interaction allowed for runtime
+// processes: every migration file in the baseline root must be recorded in
+// system.schema_migrations with a matching checksum. Mismatch means the
+// process is pointed at a foreign or stale database and startup must fail.
+func VerifySchemaContract(ctx context.Context, s *Store, path string) error {
 	if s == nil || s.Pool == nil {
 		return errors.New("database store is not initialized")
 	}
@@ -72,92 +55,52 @@ func ApplyMigration(ctx context.Context, s *Store, path string) error {
 		return fmt.Errorf("stat migration path: %w", err)
 	}
 	if !info.IsDir() {
-		return applyMigrationFile(ctx, s, path)
+		return errors.New("migration path must be the migration root directory")
 	}
 	entries, err := os.ReadDir(filepath.Clean(path))
 	if err != nil {
 		return fmt.Errorf("read migration directory: %w", err)
 	}
-	paths := make([]string, 0, len(entries))
+	files := make([]string, 0, len(entries))
 	for _, entry := range entries {
-		if !entry.IsDir() && strings.EqualFold(filepath.Ext(entry.Name()), ".sql") {
-			paths = append(paths, filepath.Join(path, entry.Name()))
+		if entry.IsDir() {
+			return fmt.Errorf("migration subdirectories are not allowed: %s", entry.Name())
+		}
+		if strings.EqualFold(filepath.Ext(entry.Name()), ".sql") {
+			files = append(files, entry.Name())
 		}
 	}
-	sort.Strings(paths)
-	if len(paths) == 0 {
+	sort.Strings(files)
+	if len(files) == 0 {
 		return errors.New("migration directory contains no SQL files")
 	}
-	for _, migrationPath := range paths {
-		if err := applyMigrationFile(ctx, s, migrationPath); err != nil {
-			return err
-		}
-	}
-	return nil
-}
 
-func applyMigrationFile(ctx context.Context, s *Store, path string) error {
-	sql, err := os.ReadFile(filepath.Clean(path))
-	if err != nil {
-		return fmt.Errorf("read migration: %w", err)
-	}
-	conn, err := s.Pool.Acquire(ctx)
-	if err != nil {
-		return fmt.Errorf("acquire migration connection: %w", err)
-	}
-	defer conn.Release()
-	if _, err := conn.Exec(ctx, `CREATE SCHEMA IF NOT EXISTS system`); err != nil {
-		return fmt.Errorf("prepare migration schema: %w", err)
-	}
-	if _, err := conn.Exec(ctx, `
-		CREATE TABLE IF NOT EXISTS system.schema_migrations (
-			version text PRIMARY KEY,
-			checksum text NOT NULL,
-			applied_at timestamptz NOT NULL DEFAULT now()
-		)
-	`); err != nil {
-		return fmt.Errorf("prepare migration table: %w", err)
-	}
-	version := filepath.Base(path)
-	checksum := sha256.Sum256(sql)
-	checksumHex := hex.EncodeToString(checksum[:])
-	if _, err := conn.Exec(ctx, `SELECT pg_advisory_lock(hashtext('agentchunzhi:migrations'))`); err != nil {
-		return fmt.Errorf("lock migrations: %w", err)
-	}
-	defer func() {
-		_, _ = conn.Exec(context.Background(), `SELECT pg_advisory_unlock(hashtext('agentchunzhi:migrations'))`)
-	}()
-	var appliedChecksum string
-	err = conn.QueryRow(ctx, `SELECT checksum FROM system.schema_migrations WHERE version = $1`, version).Scan(&appliedChecksum)
-	if err == nil {
-		if appliedChecksum == "managed-by-migration-runner" {
-			if _, updateErr := conn.Exec(ctx, `UPDATE system.schema_migrations SET checksum = $2, applied_at = now() WHERE version = $1`, version, checksumHex); updateErr != nil {
-				return fmt.Errorf("update migration checksum %s: %w", version, updateErr)
-			}
-			return nil
+	for _, name := range files {
+		body, err := os.ReadFile(filepath.Join(path, name))
+		if err != nil {
+			return fmt.Errorf("read migration %s: %w", name, err)
 		}
-		if appliedChecksum != checksumHex {
-			return fmt.Errorf("migration %s checksum changed", version)
+		sum := sha256.Sum256(body)
+		var applied string
+		err = s.Pool.QueryRow(ctx,
+			`SELECT checksum FROM system.schema_migrations WHERE version = $1`, name).Scan(&applied)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("schema contract violation: migration %s has not been applied; run cmd/migrate with DATABASE_MIGRATION_URL", name)
 		}
-		return nil
+		if err != nil {
+			return fmt.Errorf("check migration %s: %w", name, err)
+		}
+		if applied != hex.EncodeToString(sum[:]) {
+			return fmt.Errorf("schema contract violation: migration %s checksum mismatch; rebuild the development database from the empty baseline", name)
+		}
 	}
-	if !errors.Is(err, pgx.ErrNoRows) {
-		return fmt.Errorf("check migration %s: %w", version, err)
+	var extra int
+	if err := s.Pool.QueryRow(ctx,
+		`SELECT count(*) FROM system.schema_migrations WHERE version <> ALL($1::text[])`, files).Scan(&extra); err != nil {
+		return fmt.Errorf("count recorded migrations: %w", err)
 	}
-	// pgx can execute a migration as one simple-protocol statement. Splitting
-	// on semicolons corrupts dollar-quoted functions and procedural blocks.
-	if _, err = conn.Exec(ctx, string(sql)); err != nil {
-		_, _ = conn.Exec(context.Background(), `ROLLBACK`)
-		return fmt.Errorf("apply migration: %w", err)
-	}
-	_, err = conn.Exec(ctx, `
-		INSERT INTO system.schema_migrations (version, checksum)
-		VALUES ($1, $2)
-		ON CONFLICT (version) DO UPDATE
-		SET checksum = EXCLUDED.checksum, applied_at = now()
-	`, version, checksumHex)
-	if err != nil {
-		return fmt.Errorf("record migration: %w", err)
+	if extra > 0 {
+		return fmt.Errorf("schema contract violation: database contains %d migrations outside the baseline", extra)
 	}
 	return nil
 }

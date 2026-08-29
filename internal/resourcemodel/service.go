@@ -10,6 +10,7 @@ import (
 
 	"agentchunzhi/internal/auth"
 	"agentchunzhi/internal/authz"
+	"agentchunzhi/internal/eventing"
 	"agentchunzhi/internal/store"
 
 	"github.com/jackc/pgx/v5"
@@ -25,6 +26,7 @@ var (
 type Service struct {
 	Store  *store.Store
 	Policy authz.WorkspacePolicy
+	Events *eventing.EventStore
 }
 
 type Model struct {
@@ -129,7 +131,7 @@ func (s Service) List(ctx context.Context, principal auth.Principal, workspaceID
 		       mv.id::text, mv.version_no, mv.status, mv.field_schema, mv.form_schema,
 		       mv.list_schema, mv.policy, mv.schema_checksum, mv.validated_at, mv.published_at, mv.retired_at, mv.created_at
 		FROM model.resource_models rm
-		LEFT JOIN model.resource_model_versions mv ON mv.id = rm.current_version_id
+		LEFT JOIN model.resource_model_versions mv ON mv.organization_id = rm.organization_id AND mv.id = rm.current_version_id
 		WHERE rm.organization_id = $1::uuid AND rm.workspace_id = $2::uuid AND rm.status <> 'archived'
 		ORDER BY rm.updated_at DESC, rm.id
 	`, principal.OrganizationID, scope.WorkspaceID)
@@ -178,7 +180,7 @@ func (s Service) Get(ctx context.Context, principal auth.Principal, modelID stri
 		       mv.id::text, mv.version_no, mv.status, mv.field_schema, mv.form_schema,
 		       mv.list_schema, mv.policy, mv.schema_checksum, mv.validated_at, mv.published_at, mv.retired_at, mv.created_at
 		FROM model.resource_models rm
-		LEFT JOIN model.resource_model_versions mv ON mv.id = rm.current_version_id
+		LEFT JOIN model.resource_model_versions mv ON mv.organization_id = rm.organization_id AND mv.id = rm.current_version_id
 		WHERE rm.organization_id = $1::uuid AND rm.id = $2::uuid AND rm.workspace_id = $3::uuid
 	`, principal.OrganizationID, modelID, workspaceID)
 	item, err := scanModel(row, scope)
@@ -198,10 +200,6 @@ func (s Service) Create(ctx context.Context, principal auth.Principal, workspace
 	input.Description = strings.TrimSpace(input.Description)
 	if !validModelKey(input.ModelKey) || input.Name == "" {
 		return Model{}, ErrInvalidInput
-	}
-	input.InitialVersion.Policy, err = NormalizePolicy(input.InitialVersion.Policy)
-	if err != nil {
-		return Model{}, err
 	}
 	checksum, err := SchemaChecksum(input.ContentKind, input.InitialVersion.FieldSchema, input.InitialVersion.FormSchema, input.InitialVersion.ListSchema, input.InitialVersion.Policy)
 	if err != nil {
@@ -225,13 +223,13 @@ func (s Service) Create(ctx context.Context, principal auth.Principal, workspace
 	}
 	if err := tx.QueryRow(ctx, `
 		INSERT INTO model.resource_model_versions
-			(resource_model_id, version_no, status, field_schema, form_schema, list_schema, policy, schema_checksum, created_by)
-		VALUES ($1::uuid, 1, 'draft', $2::jsonb, $3::jsonb, $4::jsonb, $5::jsonb, $6, $7::uuid)
+			(organization_id, resource_model_id, version_no, status, field_schema, form_schema, list_schema, policy, schema_checksum, created_by)
+		VALUES ($1::uuid, $2::uuid, 1, 'draft', $3::jsonb, $4::jsonb, $5::jsonb, $6::jsonb, $7, $8::uuid)
 		RETURNING id::text
-	`, modelID, mustJSON(input.InitialVersion.FieldSchema), mustJSON(input.InitialVersion.FormSchema), mustJSON(input.InitialVersion.ListSchema), mustJSON(input.InitialVersion.Policy), checksum, principal.UserID).Scan(&versionID); err != nil {
+	`, principal.OrganizationID, modelID, mustJSON(input.InitialVersion.FieldSchema), mustJSON(input.InitialVersion.FormSchema), mustJSON(input.InitialVersion.ListSchema), mustJSON(input.InitialVersion.Policy), checksum, principal.UserID).Scan(&versionID); err != nil {
 		return Model{}, fmt.Errorf("create resource model version: %w", err)
 	}
-	if _, err := tx.Exec(ctx, `UPDATE model.resource_models SET current_version_id = $2::uuid WHERE id = $1::uuid`, modelID, versionID); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE model.resource_models SET current_version_id = $3::uuid WHERE organization_id = $1::uuid AND id = $2::uuid`, principal.OrganizationID, modelID, versionID); err != nil {
 		return Model{}, fmt.Errorf("set resource model current version: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -284,8 +282,8 @@ func (s Service) Versions(ctx context.Context, principal auth.Principal, modelID
 	rows, err := s.Store.Pool.Query(ctx, `
 		SELECT id::text, resource_model_id::text, version_no, status, field_schema, form_schema, list_schema, policy,
 		       schema_checksum, validated_at, published_at, retired_at, created_at
-		FROM model.resource_model_versions WHERE resource_model_id = $1::uuid ORDER BY version_no DESC
-	`, modelID)
+		FROM model.resource_model_versions WHERE organization_id = $1::uuid AND resource_model_id = $2::uuid ORDER BY version_no DESC
+	`, principal.OrganizationID, modelID)
 	if err != nil {
 		return nil, fmt.Errorf("list resource model versions: %w", err)
 	}
@@ -309,10 +307,6 @@ func (s Service) CreateVersion(ctx context.Context, principal auth.Principal, mo
 	if _, err := s.require(ctx, principal, model.WorkspaceID, modelID, "model.manage"); err != nil {
 		return Version{}, err
 	}
-	input.Policy, err = NormalizePolicy(input.Policy)
-	if err != nil {
-		return Version{}, err
-	}
 	checksum, err := SchemaChecksum(model.ContentKind, input.FieldSchema, input.FormSchema, input.ListSchema, input.Policy)
 	if err != nil {
 		return Version{}, err
@@ -320,11 +314,11 @@ func (s Service) CreateVersion(ctx context.Context, principal auth.Principal, mo
 	var result Version
 	var fieldSchema, formSchema, listSchema, policy []byte
 	err = s.Store.Pool.QueryRow(ctx, `
-		WITH next_version AS (SELECT COALESCE(max(version_no), 0) + 1 AS version_no FROM model.resource_model_versions WHERE resource_model_id = $1::uuid)
-		INSERT INTO model.resource_model_versions (resource_model_id, version_no, status, field_schema, form_schema, list_schema, policy, schema_checksum, created_by)
-		SELECT $1::uuid, version_no, 'draft', $2::jsonb, $3::jsonb, $4::jsonb, $5::jsonb, $6, $7::uuid FROM next_version
+		WITH next_version AS (SELECT COALESCE(max(version_no), 0) + 1 AS version_no FROM model.resource_model_versions WHERE organization_id = $1::uuid AND resource_model_id = $2::uuid)
+		INSERT INTO model.resource_model_versions (organization_id, resource_model_id, version_no, status, field_schema, form_schema, list_schema, policy, schema_checksum, created_by)
+		SELECT $1::uuid, $2::uuid, version_no, 'draft', $3::jsonb, $4::jsonb, $5::jsonb, $6::jsonb, $7, $8::uuid FROM next_version
 		RETURNING id::text, resource_model_id::text, version_no, status, field_schema, form_schema, list_schema, policy, schema_checksum, validated_at, published_at, retired_at, created_at
-	`, modelID, mustJSON(input.FieldSchema), mustJSON(input.FormSchema), mustJSON(input.ListSchema), mustJSON(input.Policy), checksum, principal.UserID).Scan(&result.ID, &result.ResourceModelID, &result.VersionNo, &result.Status, &fieldSchema, &formSchema, &listSchema, &policy, &result.SchemaChecksum, &result.ValidatedAt, &result.PublishedAt, &result.RetiredAt, &result.CreatedAt)
+	`, principal.OrganizationID, modelID, mustJSON(input.FieldSchema), mustJSON(input.FormSchema), mustJSON(input.ListSchema), mustJSON(input.Policy), checksum, principal.UserID).Scan(&result.ID, &result.ResourceModelID, &result.VersionNo, &result.Status, &fieldSchema, &formSchema, &listSchema, &policy, &result.SchemaChecksum, &result.ValidatedAt, &result.PublishedAt, &result.RetiredAt, &result.CreatedAt)
 	if err != nil {
 		return Version{}, fmt.Errorf("create resource model version: %w", err)
 	}
@@ -363,15 +357,11 @@ func (s Service) PatchVersion(ctx context.Context, principal auth.Principal, ver
 	if input.Policy != nil {
 		policy = *input.Policy
 	}
-	policy, err = NormalizePolicy(policy)
-	if err != nil {
-		return Version{}, err
-	}
 	checksum, err := SchemaChecksum(model.ContentKind, fieldSchema, formSchema, listSchema, policy)
 	if err != nil {
 		return Version{}, err
 	}
-	if _, err := s.Store.Pool.Exec(ctx, `UPDATE model.resource_model_versions SET field_schema = $2::jsonb, form_schema = $3::jsonb, list_schema = $4::jsonb, policy = $5::jsonb, schema_checksum = $6, validated_at = NULL WHERE id = $1::uuid AND status = 'draft'`, versionID, mustJSON(fieldSchema), mustJSON(formSchema), mustJSON(listSchema), mustJSON(policy), checksum); err != nil {
+	if _, err := s.Store.Pool.Exec(ctx, `UPDATE model.resource_model_versions SET field_schema = $3::jsonb, form_schema = $4::jsonb, list_schema = $5::jsonb, policy = $6::jsonb, schema_checksum = $7, validated_at = NULL WHERE organization_id = $1::uuid AND id = $2::uuid AND status = 'draft'`, principal.OrganizationID, versionID, mustJSON(fieldSchema), mustJSON(formSchema), mustJSON(listSchema), mustJSON(policy), checksum); err != nil {
 		return Version{}, fmt.Errorf("patch resource model version: %w", err)
 	}
 	return s.GetVersion(ctx, principal, versionID)
@@ -382,7 +372,7 @@ func (s Service) GetVersion(ctx context.Context, principal auth.Principal, versi
 		return Version{}, ErrInvalidInput
 	}
 	var modelID, workspaceID string
-	err := s.Store.Pool.QueryRow(ctx, `SELECT rm.id::text, COALESCE(rm.workspace_id::text, '') FROM model.resource_model_versions mv JOIN model.resource_models rm ON rm.id = mv.resource_model_id WHERE mv.id = $1::uuid AND rm.organization_id = $2::uuid`, versionID, principal.OrganizationID).Scan(&modelID, &workspaceID)
+	err := s.Store.Pool.QueryRow(ctx, `SELECT rm.id::text, COALESCE(rm.workspace_id::text, '') FROM model.resource_model_versions mv JOIN model.resource_models rm ON rm.organization_id = mv.organization_id AND rm.id = mv.resource_model_id WHERE mv.id = $1::uuid AND mv.organization_id = $2::uuid`, versionID, principal.OrganizationID).Scan(&modelID, &workspaceID)
 	if errors.Is(err, pgx.ErrNoRows) || workspaceID == "" {
 		return Version{}, ErrNotFound
 	}
@@ -392,7 +382,7 @@ func (s Service) GetVersion(ctx context.Context, principal auth.Principal, versi
 	if _, err := s.require(ctx, principal, workspaceID, modelID, "model.read"); err != nil {
 		return Version{}, err
 	}
-	row := s.Store.Pool.QueryRow(ctx, `SELECT id::text, resource_model_id::text, version_no, status, field_schema, form_schema, list_schema, policy, schema_checksum, validated_at, published_at, retired_at, created_at FROM model.resource_model_versions WHERE id = $1::uuid`, versionID)
+	row := s.Store.Pool.QueryRow(ctx, `SELECT id::text, resource_model_id::text, version_no, status, field_schema, form_schema, list_schema, policy, schema_checksum, validated_at, published_at, retired_at, created_at FROM model.resource_model_versions WHERE organization_id = $1::uuid AND id = $2::uuid`, principal.OrganizationID, versionID)
 	return scanVersion(row)
 }
 
@@ -412,7 +402,7 @@ func (s Service) ValidateVersion(ctx context.Context, principal auth.Principal, 
 	if err != nil {
 		return Version{}, err
 	}
-	if _, err := s.Store.Pool.Exec(ctx, `UPDATE model.resource_model_versions SET schema_checksum = $2, validated_at = now() WHERE id = $1::uuid AND status = 'draft'`, versionID, checksum); err != nil {
+	if _, err := s.Store.Pool.Exec(ctx, `UPDATE model.resource_model_versions SET schema_checksum = $3, validated_at = now() WHERE organization_id = $1::uuid AND id = $2::uuid AND status = 'draft'`, principal.OrganizationID, versionID, checksum); err != nil {
 		return Version{}, fmt.Errorf("validate resource model version: %w", err)
 	}
 	return s.GetVersion(ctx, principal, versionID)
@@ -436,20 +426,40 @@ func (s Service) PublishVersion(ctx context.Context, principal auth.Principal, v
 	}
 	defer tx.Rollback(ctx)
 	var validatedAt *time.Time
-	if err := tx.QueryRow(ctx, `SELECT validated_at FROM model.resource_model_versions WHERE id = $1::uuid FOR UPDATE`, versionID).Scan(&validatedAt); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT validated_at FROM model.resource_model_versions WHERE organization_id = $1::uuid AND id = $2::uuid FOR UPDATE`, principal.OrganizationID, versionID).Scan(&validatedAt); err != nil {
 		return Version{}, fmt.Errorf("lock resource model version: %w", err)
 	}
 	if validatedAt == nil {
 		return Version{}, fmt.Errorf("%w: version must be validated", ErrConflict)
 	}
-	if _, err := tx.Exec(ctx, `UPDATE model.resource_model_versions SET status = 'retired', retired_at = now() WHERE resource_model_id = $1::uuid AND status = 'published' AND id <> $2::uuid`, model.ID, versionID); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE model.resource_model_versions SET status = 'retired', retired_at = now() WHERE organization_id = $1::uuid AND resource_model_id = $2::uuid AND status = 'published' AND id <> $3::uuid`, principal.OrganizationID, model.ID, versionID); err != nil {
 		return Version{}, fmt.Errorf("retire previous resource model version: %w", err)
 	}
-	if _, err := tx.Exec(ctx, `UPDATE model.resource_model_versions SET status = 'published', published_at = now() WHERE id = $1::uuid`, versionID); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE model.resource_model_versions SET status = 'published', published_at = now() WHERE organization_id = $1::uuid AND id = $2::uuid`, principal.OrganizationID, versionID); err != nil {
 		return Version{}, fmt.Errorf("publish resource model version: %w", err)
 	}
-	if _, err := tx.Exec(ctx, `UPDATE model.resource_models SET current_version_id = $2::uuid, status = 'active', updated_at = now() WHERE id = $1::uuid AND workspace_id = $3::uuid`, model.ID, versionID, model.WorkspaceID); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE model.resource_models SET current_version_id = $3::uuid, status = 'active', updated_at = now() WHERE organization_id = $1::uuid AND id = $2::uuid AND workspace_id = $4::uuid`, principal.OrganizationID, model.ID, versionID, model.WorkspaceID); err != nil {
 		return Version{}, fmt.Errorf("set current resource model version: %w", err)
+	}
+	if s.Events == nil {
+		return Version{}, errors.New("event store is not initialized")
+	}
+	if _, err := s.Events.AppendTx(ctx, tx, eventing.Event{
+		OrganizationID:   principal.OrganizationID,
+		WorkspaceID:      model.WorkspaceID,
+		EventType:        eventing.EventResourceModelPolicyPublished,
+		AggregateType:    "resource_model",
+		AggregateID:      model.ID,
+		AggregateVersion: 1,
+		PayloadVersion:   eventing.PayloadVersionV1,
+		Actor:            eventing.ActorFromPrincipal(principal),
+		Payload: eventing.ResourceModelPolicyPublishedPayload{
+			ResourceModelID: model.ID,
+			VersionID:       versionID,
+			WorkspaceID:     model.WorkspaceID,
+		},
+	}); err != nil {
+		return Version{}, fmt.Errorf("record resource model policy published event: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return Version{}, fmt.Errorf("commit resource model publish: %w", err)
@@ -475,15 +485,15 @@ func (s Service) RetireVersion(ctx context.Context, principal auth.Principal, ve
 	if _, err := s.Store.Pool.Exec(ctx, `
 		UPDATE model.resource_model_versions
 		SET status = 'retired', retired_at = now()
-		WHERE id = $1::uuid AND status = 'published'
-	`, versionID); err != nil {
+		WHERE organization_id = $1::uuid AND id = $2::uuid AND status = 'published'
+	`, principal.OrganizationID, versionID); err != nil {
 		return Version{}, fmt.Errorf("retire resource model version: %w", err)
 	}
 	if _, err := s.Store.Pool.Exec(ctx, `
 		UPDATE model.resource_models
 		SET current_version_id = NULL, status = 'draft', updated_at = now()
-		WHERE id = $1::uuid AND current_version_id = $2::uuid
-	`, model.ID, versionID); err != nil {
+		WHERE organization_id = $1::uuid AND id = $2::uuid AND current_version_id = $3::uuid
+	`, principal.OrganizationID, model.ID, versionID); err != nil {
 		return Version{}, fmt.Errorf("clear retired resource model current version: %w", err)
 	}
 	return s.GetVersion(ctx, principal, versionID)

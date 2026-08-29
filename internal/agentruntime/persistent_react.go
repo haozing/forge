@@ -205,7 +205,7 @@ func (s PersistentReActService) persistEvent(ctx context.Context, scope ReActToo
 		payload["tool_name"], payload["tool_call_id"], payload["arguments_hash"] = event.ToolName, event.ToolCallID, event.ArgumentsHash
 		result, err := s.Store.Pool.Exec(ctx, `
 			WITH inserted AS (
-				INSERT INTO integration.agent_tool_calls
+				INSERT INTO integration.agent_tool_invocations
 					(organization_id, run_id, session_id, tool_call_id, tool_name, arguments_summary, status)
 				VALUES ($1::uuid, $2::uuid, NULLIF($3, '')::uuid, $4, $5,
 				        jsonb_build_object('sha256', $6::text), 'started')
@@ -221,7 +221,7 @@ func (s PersistentReActService) persistEvent(ctx context.Context, scope ReActToo
 	case "tool_finished":
 		payload["tool_name"], payload["tool_call_id"] = event.ToolName, event.ToolCallID
 		if _, err := s.Store.Pool.Exec(ctx, `
-			UPDATE integration.agent_tool_calls
+			UPDATE integration.agent_tool_invocations
 			SET status = CASE WHEN $3 LIKE '%\"ok\":false%' THEN 'failed' ELSE 'succeeded' END,
 				result_summary = jsonb_build_object('summary', $3::text),
 				duration_ms = (EXTRACT(EPOCH FROM (now() - created_at)) * 1000)::bigint,

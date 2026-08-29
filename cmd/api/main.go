@@ -44,21 +44,10 @@ func main() {
 		startupCancel()
 		log.Fatalf("database startup failed: %v", err)
 	}
-	if err := store.ApplyMigration(startupCtx, db, cfg.MigrationPath); err != nil {
+	if err := store.VerifySchemaContract(startupCtx, db, cfg.MigrationPath); err != nil {
 		db.Close()
 		startupCancel()
-		log.Fatalf("database migration failed: %v", err)
-	}
-
-	// 0043 is self-idempotent (ON CONFLICT DO NOTHING): replaying it on boot
-	// seeds organizations created after its checksum was first recorded.
-	if err := store.ReplayIdempotentSeed(startupCtx, db, cfg.MigrationPath, "0043_builtin_resource_model_seeds.sql"); err != nil {
-		log.Fatalf("replay builtin resource model seed: %v", err)
-	}
-	if err := eventing.Migrate(startupCtx, db.Pool); err != nil {
-		db.Close()
-		startupCancel()
-		log.Fatalf("River migration failed: %v", err)
+		log.Fatalf("schema contract verification failed: %v", err)
 	}
 	startupCancel()
 	defer db.Close()
@@ -116,6 +105,7 @@ func main() {
 			Query: queryService,
 		},
 	}
+	memberAssetService := assetservice.MemberService{Store: db, Events: &events, Policy: authz.WorkspacePolicyService{Store: db}}
 	deps := httpapi.Dependencies{
 		Store:           db,
 		Authenticator:   auth.APIKeyAuthenticator{Store: db},
@@ -125,12 +115,12 @@ func main() {
 		QueryService:    queryService,
 		AttachmentService: attachment.Service{
 			Store:        db,
-			Events:       events,
+			Events:       &events,
 			Objects:      objects,
 			ObjectPrefix: cfg.OSSPrefix,
 			MaxBytes:     cfg.AttachmentMaxBytes,
 		},
-		AssetService:     assetservice.Service{Store: db, Events: events},
+		AssetService:     assetservice.Service{Store: db, Events: &events},
 		AgentAppService:  agentapp.Service{Store: db},
 		AgentRuntime:     ragRuntime,
 		AgentTaskService: agenttask.Service{Store: db},
@@ -141,9 +131,9 @@ func main() {
 		AdminService:         adminservice.Service{Store: db},
 		WorkspaceService:     workspace.Service{Store: db},
 		ResourceModelService: resourcemodel.Service{Store: db, Policy: authz.WorkspacePolicyService{Store: db}},
-		MemberAssetService:   assetservice.MemberService{Store: db, Events: events, Policy: authz.WorkspacePolicyService{Store: db}},
+		MemberAssetService:   memberAssetService,
 		TransferService:      assetservice.TransferService{Store: db, Policy: authz.WorkspacePolicyService{Store: db}},
-		ReviewService:        review.Service{Store: db, Policy: authz.WorkspacePolicyService{Store: db}},
+		ReviewService:        review.Service{Store: db, Policy: authz.WorkspacePolicyService{Store: db}, Events: &events, Committer: memberAssetService},
 		ContainerService:     container.Service{Store: db, Policy: authz.WorkspacePolicyService{Store: db}},
 		ConversationService:  conversation.Service{Store: db, Policy: authz.WorkspacePolicyService{Store: db}, Content: contentservice.Service{Store: db, Events: events}},
 		AutomationService:    automation.Service{Store: db, Policy: authz.WorkspacePolicyService{Store: db}},

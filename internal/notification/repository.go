@@ -1,0 +1,234 @@
+package notification
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"time"
+
+	"agentchunzhi/internal/store"
+
+	"github.com/jackc/pgx/v5"
+)
+
+// Enqueue persists a delivery inside the caller's business transaction. The
+// payload must already be encrypted by the Cipher; raw tokens never touch the
+// database in plaintext.
+func Enqueue(ctx context.Context, tx pgx.Tx, organizationID, template, recipientEmail string, keyVersion int32, ciphertext []byte) (string, error) {
+	var id string
+	err := tx.QueryRow(ctx, `
+		INSERT INTO notification.email_deliveries
+			(organization_id, template, recipient_email, key_version, encrypted_payload, status)
+		VALUES ($1::uuid, $2, $3, $4, $5, 'pending')
+		RETURNING id::text
+	`, organizationID, template, recipientEmail, keyVersion, ciphertext).Scan(&id)
+	if err != nil {
+		return "", fmt.Errorf("enqueue email delivery: %w", err)
+	}
+	return id, nil
+}
+
+// CancelPending marks unsent deliveries for one template/recipient as
+// cancelled (invitation revoked or resent).
+func CancelPending(ctx context.Context, tx pgx.Tx, organizationID, template, recipientEmail string) error {
+	_, err := tx.Exec(ctx, `
+		UPDATE notification.email_deliveries
+		SET status = 'cancelled', encrypted_payload = '' , updated_at = now()
+		WHERE organization_id = $1::uuid AND template = $2 AND recipient_email = $3
+		  AND status IN ('pending', 'sending')
+	`, organizationID, template, recipientEmail)
+	return err
+}
+
+// ClaimedDelivery is one leased row handed to the worker.
+type ClaimedDelivery struct {
+	ID             string
+	OrganizationID string
+	Template       string
+	Recipient      string
+	KeyVersion     int32
+	Ciphertext     []byte
+	Attempt        int
+	LeaseToken     string
+}
+
+// Claim leases one due delivery with FOR UPDATE SKIP LOCKED in a short
+// transaction. Crashed workers' leases are reclaimable after the lease period.
+func Claim(ctx context.Context, db *store.Store, workerID string) (ClaimedDelivery, error) {
+	if db == nil || db.Pool == nil {
+		return ClaimedDelivery{}, errors.New("database store is not initialized")
+	}
+	tx, err := db.Pool.Begin(ctx)
+	if err != nil {
+		return ClaimedDelivery{}, err
+	}
+	defer tx.Rollback(ctx)
+	token := LeaseToken(workerID)
+	var claim ClaimedDelivery
+	err = tx.QueryRow(ctx, `
+		UPDATE notification.email_deliveries d
+		SET status = 'sending', locked_by = $2, locked_until = now() + make_interval(secs => $3),
+		    attempt_count = d.attempt_count + 1, updated_at = now()
+		WHERE d.id = (
+			SELECT id FROM notification.email_deliveries
+			WHERE status = 'pending' AND next_attempt_at <= now()
+			ORDER BY next_attempt_at, id
+			LIMIT 1
+			FOR UPDATE SKIP LOCKED
+		)
+		RETURNING d.id::text, d.organization_id::text, d.template, d.recipient_email,
+		          d.key_version, d.encrypted_payload, d.attempt_count, d.locked_by
+	`, workerID, token, LeasePeriod.Seconds()).Scan(
+		&claim.ID, &claim.OrganizationID, &claim.Template, &claim.Recipient,
+		&claim.KeyVersion, &claim.Ciphertext, &claim.Attempt, &claim.LeaseToken)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ClaimedDelivery{}, ErrNoPendingDelivery
+	}
+	if err != nil {
+		return ClaimedDelivery{}, fmt.Errorf("claim email delivery: %w", err)
+	}
+	return claim, tx.Commit(ctx)
+}
+
+// ReclaimExpired returns abandoned 'sending' rows to the pending queue.
+func ReclaimExpired(ctx context.Context, db *store.Store, limit int) (int64, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	commandTag, err := db.Pool.Exec(ctx, `
+		UPDATE notification.email_deliveries
+		SET status = 'pending', locked_by = NULL, locked_until = NULL, updated_at = now()
+		WHERE id IN (
+			SELECT id FROM notification.email_deliveries
+			WHERE status = 'sending' AND locked_until < now()
+			ORDER BY locked_until
+			LIMIT $1
+			FOR UPDATE SKIP LOCKED
+		)
+	`, limit)
+	if err != nil {
+		return 0, fmt.Errorf("reclaim expired deliveries: %w", err)
+	}
+	return commandTag.RowsAffected(), nil
+}
+
+// Complete marks a delivery as sent and clears the ciphertext: terminal rows
+// never retain sensitive payloads.
+func Complete(ctx context.Context, db *store.Store, claim ClaimedDelivery, providerMessageID string) error {
+	_, err := db.Pool.Exec(ctx, `
+		UPDATE notification.email_deliveries
+		SET status = 'sent', sent_at = now(), provider_message_id = NULLIF($2, ''),
+		    encrypted_payload = '', locked_by = NULL, locked_until = NULL, updated_at = now()
+		WHERE id = $1::uuid AND locked_by = $3 AND status = 'sending'
+	`, claim.ID, providerMessageID, claim.LeaseToken)
+	return err
+}
+
+// Fail schedules the next attempt or reaches a terminal failed state; both
+// clear the lease and terminal clears the ciphertext.
+func Fail(ctx context.Context, db *store.Store, claim ClaimedDelivery, errorCode, summary string) error {
+	summary = truncateSummary(summary)
+	if claim.Attempt >= MaxAttempts {
+		_, err := db.Pool.Exec(ctx, `
+			UPDATE notification.email_deliveries
+			SET status = 'failed', last_error_code = $2, encrypted_payload = '',
+			    locked_by = NULL, locked_until = NULL, updated_at = now()
+			WHERE id = $1::uuid AND locked_by = $3 AND status = 'sending'
+		`, claim.ID, errorCode, claim.LeaseToken)
+		return err
+	}
+	_, err := db.Pool.Exec(ctx, `
+		UPDATE notification.email_deliveries
+		SET status = 'pending', last_error_code = $2,
+		    next_attempt_at = now() + make_interval(secs => $3),
+		    locked_by = NULL, locked_until = NULL, updated_at = now()
+		WHERE id = $1::uuid AND locked_by = $4 AND status = 'sending'
+	`, claim.ID, errorCode, RetryBackoff(claim.Attempt).Seconds(), claim.LeaseToken)
+	return err
+}
+
+func truncateSummary(value string) string {
+	if len(value) > 500 {
+		return value[:500]
+	}
+	return value
+}
+
+// Worker drains due deliveries. Provider calls happen strictly outside
+// database transactions.
+type Worker struct {
+	Store    *store.Store
+	Cipher   *Cipher
+	Mailer   Mailer
+	Renderer TemplateRenderer
+	WorkerID string
+}
+
+// TemplateRenderer turns the decrypted payload into a sendable message using
+// the trusted base URL.
+type TemplateRenderer interface {
+	Render(template, organizationName string, payload map[string]any) (Message, error)
+}
+
+// ProcessOnce claims and sends at most one delivery.
+func (w Worker) ProcessOnce(ctx context.Context) error {
+	claim, err := Claim(ctx, w.Store, w.WorkerID)
+	if errors.Is(err, ErrNoPendingDelivery) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	plaintext, err := w.Cipher.Decrypt(fmt.Sprint(claim.KeyVersion), claim.ID, claim.Template, claim.Ciphertext)
+	if err != nil {
+		// Undecryptable payloads can never be delivered; fail terminally.
+		_ = Fail(ctx, w.Store, claim, "payload_undecryptable", err.Error())
+		return nil
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(plaintext, &payload); err != nil {
+		_ = Fail(ctx, w.Store, claim, "payload_invalid", err.Error())
+		return nil
+	}
+	message, err := w.Renderer.Render(claim.Template, stringFrom(payload["organization_name"]), payload)
+	if err != nil {
+		_ = Fail(ctx, w.Store, claim, "template_invalid", err.Error())
+		return nil
+	}
+	message.DeliveryID = claim.ID
+	message.To = claim.Recipient
+	sendCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	providerID, sendErr := w.Mailer.Send(sendCtx, message)
+	if sendErr != nil {
+		_ = Fail(ctx, w.Store, claim, ClassifyProviderError(sendErr), sendErr.Error())
+		return nil
+	}
+	return Complete(ctx, w.Store, claim, providerID)
+}
+
+func stringFrom(value any) string {
+	if text, ok := value.(string); ok {
+		return text
+	}
+	return ""
+}
+
+// Run loops until the context is cancelled.
+func (w Worker) Run(ctx context.Context, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			for {
+				if err := w.ProcessOnce(ctx); err != nil {
+					break
+				}
+			}
+		}
+	}
+}

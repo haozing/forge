@@ -12,7 +12,7 @@ import (
 func TestAssetCursorRoundTrip(t *testing.T) {
 	updated := time.Date(2026, 8, 25, 8, 0, 0, 123000000, time.UTC)
 	id := "00000000-0000-4000-8000-000000000001"
-	cursor := encodeAssetCursor("updated_at:desc", MemberAsset{ID: id, UpdatedAt: updated, sortValue: updated.String()})
+	cursor := encodeAssetCursor("updated_at:desc", MemberAsset{ID: id, UpdatedAt: updated})
 	got, err := decodeAssetCursor(cursor, "updated_at:desc")
 	if err != nil || got.ID != id || got.UpdatedAt == "" {
 		t.Fatalf("cursor round trip failed: cursor=%#v err=%v", got, err)
@@ -48,15 +48,21 @@ func TestValidateFieldsArraySchema(t *testing.T) {
 	}
 }
 
-func TestMemberAssetVisibilityDefaultsWhenPolicyOmitsVisibility(t *testing.T) {
-	if got, err := memberAssetVisibility([]byte(`{"outlets":{}}`), ""); err != nil || got != "workspace" {
+func TestMemberAssetVisibilityContractLegacyRejected(t *testing.T) {
+	if got, err := memberAssetVisibility(nil, ""); err != nil || got != "workspace" {
 		t.Fatalf("expected default workspace visibility, got %q err=%v", got, err)
 	}
-	if got, err := memberAssetVisibility([]byte(`{"outlets":{}}`), "private"); err != nil || got != "private" {
-		t.Fatalf("expected requested private visibility, got %q err=%v", got, err)
+	for _, legacy := range []string{"private", "login", "internal"} {
+		if _, err := memberAssetVisibility(nil, legacy); err == nil {
+			t.Fatalf("legacy visibility %q must be rejected", legacy)
+		}
 	}
-	if got, err := memberAssetVisibility([]byte(`{"outlets":{}}`), "public"); err != nil || got != "public" {
+	if got, err := memberAssetVisibility(nil, "public"); err != nil || got != "public" {
 		t.Fatalf("expected public visibility, got %q err=%v", got, err)
+	}
+	policy := []byte(`{"visibility":{"allowed":["workspace"]}}`)
+	if _, err := memberAssetVisibility(policy, "public"); err == nil {
+		t.Fatal("policy allowed-set must narrow requests")
 	}
 }
 

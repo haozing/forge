@@ -152,7 +152,6 @@ func getWorkspaceCounts(deps Dependencies) http.HandlerFunc {
 type workspaceSettingsPatch struct {
 	Name                   *string `json:"name"`
 	Description            *string `json:"description"`
-	DefaultVisibility      *string `json:"default_visibility"`
 	DefaultResourceModelID *string `json:"default_resource_model_id"`
 }
 
@@ -174,7 +173,7 @@ func getWorkspaceSettings(deps Dependencies) http.HandlerFunc {
 			writeWorkspaceError(w, err, "workspace_settings_load_failed")
 			return
 		}
-		writeETag(w, representationETag(settings.Name, settings.Description, settings.DefaultVisibility, settings.DefaultResourceModelID))
+		writeETag(w, representationETag(settings.Name, settings.Description, settings.DefaultResourceModelID))
 		writeJSON(w, http.StatusOK, settings)
 	}
 }
@@ -205,7 +204,7 @@ func updateWorkspaceSettings(deps Dependencies) http.HandlerFunc {
 			writeWorkspaceError(w, err, "workspace_settings_load_failed")
 			return
 		}
-		currentETag := representationETag(current.Name, current.Description, current.DefaultVisibility, current.DefaultResourceModelID)
+		currentETag := representationETag(current.Name, current.Description, current.DefaultResourceModelID)
 		if r.Header.Get("If-Match") != "" && !ifMatchMatches(r, currentETag) {
 			writeError(w, http.StatusConflict, "version_conflict")
 			return
@@ -216,9 +215,6 @@ func updateWorkspaceSettings(deps Dependencies) http.HandlerFunc {
 		if patch.Description != nil {
 			current.Description = *patch.Description
 		}
-		if patch.DefaultVisibility != nil {
-			current.DefaultVisibility = strings.TrimSpace(*patch.DefaultVisibility)
-		}
 		if patch.DefaultResourceModelID != nil {
 			current.DefaultResourceModelID = strings.TrimSpace(*patch.DefaultResourceModelID)
 		}
@@ -227,7 +223,7 @@ func updateWorkspaceSettings(deps Dependencies) http.HandlerFunc {
 			writeWorkspaceError(w, err, "workspace_settings_update_failed")
 			return
 		}
-		writeETag(w, representationETag(result.Name, result.Description, result.DefaultVisibility, result.DefaultResourceModelID))
+		writeETag(w, representationETag(result.Name, result.Description, result.DefaultResourceModelID))
 		writeJSON(w, http.StatusOK, result)
 	}
 }

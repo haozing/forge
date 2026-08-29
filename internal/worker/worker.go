@@ -54,11 +54,6 @@ type Dispatcher struct {
 	Logf             func(string, ...any)
 }
 
-type fulltextEvent struct {
-	AssetVersionID string `json:"asset_version_id"`
-	Operation      string `json:"operation"`
-}
-
 type transcriptionEvent struct {
 	JobID   string `json:"job_id"`
 	MediaID string `json:"media_id"`
@@ -98,26 +93,48 @@ func (d Dispatcher) ProcessEvent(ctx context.Context, eventID string, maxAttempt
 
 func (d Dispatcher) processDelivery(ctx context.Context, delivery store.Delivery, maxAttempts int) (bool, error) {
 	if delivery.ConsumerKey == ProjectionConsumer {
-		var event fulltextEvent
-		if err := json.Unmarshal(delivery.Payload, &event); err != nil || event.AssetVersionID == "" {
-			return false, d.finish(ctx, delivery, true, "invalid_payload", "fulltext projection payload is invalid")
-		}
-		if d.Projection == nil {
-			return d.fail(ctx, delivery, delivery.AttemptNo >= maxAttempts, "processor_unavailable", "retrieval projector is not configured")
-		}
-		var processErr error
-		switch event.Operation {
-		case retrieval.ProjectionRebuild:
-			processErr = d.Projection.Rebuild(ctx, event.AssetVersionID)
-		case retrieval.ProjectionDelete:
-			processErr = d.Projection.Delete(ctx, event.AssetVersionID)
-		default:
-			return false, d.finish(ctx, delivery, true, "invalid_operation", "fulltext projection operation is invalid")
-		}
-		if processErr == nil {
+		// Phase 0 fact consumer: the projector reacts to asset domain facts
+		// instead of receiving downstream commands from the asset service.
+		switch delivery.EventType {
+		case eventing.EventAssetPublished:
+			var payload eventing.AssetPublishedPayload
+			if err := json.Unmarshal(delivery.Payload, &payload); err != nil || payload.VersionID == "" {
+				return false, d.finish(ctx, delivery, true, "invalid_payload", "asset.published payload is invalid")
+			}
+			if d.Projection == nil {
+				return d.fail(ctx, delivery, delivery.AttemptNo >= maxAttempts, "processor_unavailable", "retrieval projector is not configured")
+			}
+			if payload.PreviousVersionID != "" && payload.PreviousVersionID != payload.VersionID {
+				if err := d.Projection.Delete(ctx, payload.PreviousVersionID); err != nil {
+					return d.fail(ctx, delivery, delivery.AttemptNo >= maxAttempts, "processor_error", err.Error())
+				}
+			}
+			if err := d.Projection.Rebuild(ctx, payload.VersionID); err != nil {
+				return d.fail(ctx, delivery, delivery.AttemptNo >= maxAttempts, "processor_error", err.Error())
+			}
 			return false, d.finish(ctx, delivery, false, "", "")
+		case eventing.EventAssetArchived:
+			var payload eventing.AssetArchivedPayload
+			if err := json.Unmarshal(delivery.Payload, &payload); err != nil {
+				return false, d.finish(ctx, delivery, true, "invalid_payload", "asset.archived payload is invalid")
+			}
+			if d.Projection == nil {
+				return d.fail(ctx, delivery, delivery.AttemptNo >= maxAttempts, "processor_unavailable", "retrieval projector is not configured")
+			}
+			if payload.PreviousVersionID != "" {
+				if err := d.Projection.Delete(ctx, payload.PreviousVersionID); err != nil {
+					return d.fail(ctx, delivery, delivery.AttemptNo >= maxAttempts, "processor_error", err.Error())
+				}
+			}
+			return false, d.finish(ctx, delivery, false, "", "")
+		case eventing.EventAssetVisibilityChanged, eventing.EventTagUpdated, eventing.EventResourceModelPolicyPublished:
+			// Visibility is re-checked against primary data at query time and
+			// tag/policy-driven canonical rebuilds arrive with phase 3; the
+			// fact itself is consumed successfully here.
+			return false, d.finish(ctx, delivery, false, "", "")
+		default:
+			return false, d.finish(ctx, delivery, true, "unsupported_event", fmt.Sprintf("projection consumer does not handle %q", delivery.EventType))
 		}
-		return d.fail(ctx, delivery, delivery.AttemptNo >= maxAttempts, "processor_error", processErr.Error())
 	}
 
 	if delivery.ConsumerKey == TranscriptionConsumer {

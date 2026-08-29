@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	"agentchunzhi/internal/auth"
@@ -23,6 +24,7 @@ type TransferService struct {
 type ImportInput struct {
 	ResourceModelID        string           `json:"resource_model_id"`
 	ResourceModelVersionID string           `json:"resource_model_version_id"`
+	WorkspaceID            string           `json:"workspace_id"`
 	Rows                   []map[string]any `json:"rows"`
 	SourceName             string           `json:"source_name"`
 }
@@ -73,6 +75,9 @@ func (s TransferService) StartImport(ctx context.Context, principal auth.Princip
 	if err := s.require(ctx, principal, workspaceID, "asset.write"); err != nil {
 		return ImportJob{}, err
 	}
+	if input.WorkspaceID != "" && input.WorkspaceID != workspaceID {
+		return ImportJob{}, ErrForbidden
+	}
 	if !validIdempotencyKey(idempotencyKey) || !validID(input.ResourceModelID) || !validID(input.ResourceModelVersionID) || len(input.Rows) == 0 || len(input.Rows) > 10000 {
 		return ImportJob{}, ErrInvalidInput
 	}
@@ -109,13 +114,13 @@ func (s TransferService) StartImport(ctx context.Context, principal auth.Princip
 	var id string
 	err = tx.QueryRow(ctx, `
                 INSERT INTO asset.import_batches
-                        (organization_id, resource_model_id, resource_model_version_id, submitted_by,
+                        (organization_id, workspace_id, resource_model_id, resource_model_version_id, submitted_by,
                          source_checksum, source_name, idempotency_key, status, summary)
-                VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6, $7, 'queued', $8::jsonb)
+                VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6, $7, $8, 'queued', $9::jsonb)
                 ON CONFLICT (organization_id, submitted_by, idempotency_key)
                 WHERE idempotency_key IS NOT NULL DO NOTHING
                 RETURNING id::text
-        `, principal.OrganizationID, input.ResourceModelID, input.ResourceModelVersionID,
+        `, principal.OrganizationID, workspaceID, input.ResourceModelID, input.ResourceModelVersionID,
 		principal.UserID, hex.EncodeToString(checksum[:]), input.SourceName, idempotencyKey,
 		mustJSON(map[string]any{"rows_total": len(input.Rows), "rows_accepted": 0, "rows_rejected": 0})).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -135,10 +140,13 @@ func (s TransferService) StartImport(ctx context.Context, principal auth.Princip
 				return ImportJob{}, fmt.Errorf("encode import row %d: %w", index+1, marshalErr)
 			}
 			rowChecksum := sha256.Sum256(rowPayload)
+			// Deterministic per-row key derived from the batch id and row
+			// number so replayed batches cannot duplicate a row insert.
+			keySum := sha256.Sum256([]byte(id + ":" + strconv.Itoa(index+1)))
 			if _, execErr := tx.Exec(ctx, `
-                                INSERT INTO asset.import_rows (import_batch_id, row_number, source_row, row_checksum)
-                                VALUES ($1::uuid, $2, $3::jsonb, $4)
-                        `, id, index+1, string(rowPayload), hex.EncodeToString(rowChecksum[:])); execErr != nil {
+                                INSERT INTO asset.import_rows (import_batch_id, row_number, source_row, row_checksum, idempotency_key)
+                                VALUES ($1::uuid, $2, $3::jsonb, $4, $5)
+                        `, id, index+1, string(rowPayload), hex.EncodeToString(rowChecksum[:]), hex.EncodeToString(keySum[:])[:32]); execErr != nil {
 				return ImportJob{}, fmt.Errorf("persist import row %d: %w", index+1, execErr)
 			}
 		}
@@ -155,7 +163,7 @@ func (s TransferService) GetImport(ctx context.Context, principal auth.Principal
 	}
 	var item ImportJob
 	var summary []byte
-	err := s.Store.Pool.QueryRow(ctx, `SELECT ib.id::text, rm.workspace_id::text, ib.resource_model_id::text, ib.resource_model_version_id::text, ib.status, ib.summary, ib.source_name, ib.created_at, ib.completed_at FROM asset.import_batches ib JOIN model.resource_models rm ON rm.id = ib.resource_model_id WHERE ib.organization_id = $1::uuid AND ib.id = $2::uuid`, principal.OrganizationID, jobID).Scan(&item.ID, &item.WorkspaceID, &item.ResourceModelID, &item.VersionID, &item.Status, &summary, &item.SourceName, &item.CreatedAt, &item.CompletedAt)
+	err := s.Store.Pool.QueryRow(ctx, `SELECT ib.id::text, ib.workspace_id::text, ib.resource_model_id::text, ib.resource_model_version_id::text, ib.status, ib.summary, ib.source_name, ib.created_at, ib.completed_at FROM asset.import_batches ib WHERE ib.organization_id = $1::uuid AND ib.id = $2::uuid`, principal.OrganizationID, jobID).Scan(&item.ID, &item.WorkspaceID, &item.ResourceModelID, &item.VersionID, &item.Status, &summary, &item.SourceName, &item.CreatedAt, &item.CompletedAt)
 	item.Summary = decodeJSONMap(summary)
 	return item, err
 }
@@ -168,7 +176,7 @@ func (s TransferService) authorizeImportRead(ctx context.Context, principal auth
 		return ErrInvalidInput
 	}
 	var workspaceID string
-	if err := s.Store.Pool.QueryRow(ctx, `SELECT rm.workspace_id::text FROM asset.import_batches ib JOIN model.resource_models rm ON rm.id = ib.resource_model_id WHERE ib.organization_id = $1::uuid AND ib.id = $2::uuid`, principal.OrganizationID, jobID).Scan(&workspaceID); err != nil {
+	if err := s.Store.Pool.QueryRow(ctx, `SELECT ib.workspace_id::text FROM asset.import_batches ib WHERE ib.organization_id = $1::uuid AND ib.id = $2::uuid`, principal.OrganizationID, jobID).Scan(&workspaceID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrNotFound
 		}
@@ -213,7 +221,6 @@ type ImportErrorRow struct {
 const importRowsJoinClause = `
 	FROM asset.import_rows r
 	JOIN asset.import_batches b ON b.id = r.import_batch_id
-	JOIN model.resource_models rm ON rm.id = b.resource_model_id
 	WHERE b.organization_id = $1::uuid AND b.id = $2::uuid`
 
 // ListImportRows returns a page of import_rows entries for an import batch,
@@ -308,6 +315,14 @@ func decodeImportRowErrors(raw []byte) []map[string]any {
 	return result
 }
 
+func decodeJSONMap(raw []byte) map[string]any {
+	result := map[string]any{}
+	if len(raw) > 0 {
+		_ = json.Unmarshal(raw, &result)
+	}
+	return result
+}
+
 func (s TransferService) StartExport(ctx context.Context, principal auth.Principal, workspaceID, idempotencyKey string, input ExportInput) (ExportJob, error) {
 	if err := s.require(ctx, principal, workspaceID, "asset.read"); err != nil {
 		return ExportJob{}, err
@@ -341,12 +356,12 @@ func (s TransferService) StartExport(ctx context.Context, principal auth.Princip
 	var id string
 	err = tx.QueryRow(ctx, `
                 INSERT INTO asset.export_jobs
-                        (organization_id, resource_model_id, submitted_by, idempotency_key, status, query_snapshot, permission_scope)
-                VALUES ($1::uuid, $2::uuid, $3::uuid, $4, 'queued', $5::jsonb, $6::jsonb)
+                        (organization_id, workspace_id, resource_model_id, submitted_by, idempotency_key, status, query_snapshot, permission_scope, format)
+                VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, 'queued', $6::jsonb, $7::jsonb, $8)
                 ON CONFLICT (organization_id, submitted_by, idempotency_key)
                 WHERE idempotency_key IS NOT NULL DO NOTHING
                 RETURNING id::text
-        `, principal.OrganizationID, input.ResourceModelID, principal.UserID, idempotencyKey, string(snapshot), string(scope)).Scan(&id)
+        `, principal.OrganizationID, workspaceID, input.ResourceModelID, principal.UserID, idempotencyKey, string(snapshot), string(scope), input.Format).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		var storedSnapshot []byte
 		if err := tx.QueryRow(ctx, `SELECT id::text, query_snapshot FROM asset.export_jobs WHERE organization_id = $1::uuid AND submitted_by = $2::uuid AND idempotency_key = $3`, principal.OrganizationID, principal.UserID, idempotencyKey).Scan(&id, &storedSnapshot); err != nil {
@@ -369,7 +384,7 @@ func (s TransferService) GetExport(ctx context.Context, principal auth.Principal
 		return ExportJob{}, ErrInvalidInput
 	}
 	var workspaceID string
-	if err := s.Store.Pool.QueryRow(ctx, `SELECT rm.workspace_id::text FROM asset.export_jobs ej JOIN model.resource_models rm ON rm.id = ej.resource_model_id WHERE ej.organization_id = $1::uuid AND ej.id = $2::uuid`, principal.OrganizationID, jobID).Scan(&workspaceID); err != nil {
+	if err := s.Store.Pool.QueryRow(ctx, `SELECT ej.workspace_id::text FROM asset.export_jobs ej WHERE ej.organization_id = $1::uuid AND ej.id = $2::uuid`, principal.OrganizationID, jobID).Scan(&workspaceID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ExportJob{}, ErrNotFound
 		}
@@ -379,8 +394,6 @@ func (s TransferService) GetExport(ctx context.Context, principal auth.Principal
 		return ExportJob{}, err
 	}
 	var item ExportJob
-	var snapshot []byte
-	err := s.Store.Pool.QueryRow(ctx, `SELECT ej.id::text, rm.workspace_id::text, ej.resource_model_id::text, ej.status, ej.query_snapshot, COALESCE(ej.output_object_key, ''), ej.output_size, COALESCE(ej.output_checksum, ''), ej.created_at, ej.completed_at FROM asset.export_jobs ej JOIN model.resource_models rm ON rm.id = ej.resource_model_id WHERE ej.organization_id = $1::uuid AND ej.id = $2::uuid`, principal.OrganizationID, jobID).Scan(&item.ID, &item.WorkspaceID, &item.ResourceModelID, &item.Status, &snapshot, &item.OutputObjectKey, &item.OutputSize, &item.OutputChecksum, &item.CreatedAt, &item.CompletedAt)
-	item.Format, _ = decodeJSONMap(snapshot)["format"].(string)
+	err := s.Store.Pool.QueryRow(ctx, `SELECT ej.id::text, ej.workspace_id::text, ej.resource_model_id::text, ej.status, COALESCE(ej.format, 'jsonl'), COALESCE(ej.output_object_key, ''), ej.output_size, COALESCE(ej.output_checksum, ''), ej.created_at, ej.completed_at FROM asset.export_jobs ej WHERE ej.organization_id = $1::uuid AND ej.id = $2::uuid`, principal.OrganizationID, jobID).Scan(&item.ID, &item.WorkspaceID, &item.ResourceModelID, &item.Status, &item.Format, &item.OutputObjectKey, &item.OutputSize, &item.OutputChecksum, &item.CreatedAt, &item.CompletedAt)
 	return item, err
 }

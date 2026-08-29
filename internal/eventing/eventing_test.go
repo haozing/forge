@@ -11,9 +11,12 @@ func TestDefaultRegistryMatchesDeclaredConsumers(t *testing.T) {
 	if len(consumers) != 0 {
 		t.Fatalf("agent.task.prepare_requested consumers = %#v", consumers)
 	}
-	consumers = registry.ConsumersFor("asset.retrieval_projection_requested", 1)
+	consumers = registry.ConsumersFor("asset.published", 1)
 	if len(consumers) != 1 || consumers[0].Key != "retrieval.projection" {
 		t.Fatalf("projection consumers = %#v", consumers)
+	}
+	if consumers := registry.ConsumersFor("asset.retrieval_projection_requested", 1); len(consumers) != 0 {
+		t.Fatalf("retired command event must have no consumers, got %#v", consumers)
 	}
 	consumers = registry.ConsumersFor("attachment.created", 1)
 	if len(consumers) != 1 || consumers[0].Key != "attachment.scan" {

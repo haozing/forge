@@ -25,7 +25,7 @@ type Scope struct {
 }
 
 // WorkspacePolicy is the single authorization boundary for member and agent
-// operations that carry a workspace. Transport handlers should not duplicate
+// operations that carry a workspace. Transport handlers must not duplicate
 // role checks or infer permissions from organization-level membership.
 type WorkspacePolicy interface {
 	Require(ctx context.Context, principal auth.Principal, workspaceID, resourceModelID, action string) (Scope, error)
@@ -45,7 +45,7 @@ func (p WorkspacePolicyService) Require(ctx context.Context, principal auth.Prin
 	if workspaceID == "" || action == "" {
 		return Scope{}, ErrWorkspaceNotFound
 	}
-	if principal.UserType == "member" {
+	if principal.UserType == auth.UserTypeMember {
 		var role string
 		err := p.Store.Pool.QueryRow(ctx, `
 			SELECT wm.role
@@ -72,13 +72,13 @@ func (p WorkspacePolicyService) Require(ctx context.Context, principal auth.Prin
 		if err != nil {
 			return Scope{}, fmt.Errorf("load workspace policy: %w", err)
 		}
-		allowed := memberActions(role)
+		allowed := MemberRoleActions(role)
 		if !containsAction(allowed, action) {
 			return Scope{}, ErrWorkspaceForbidden
 		}
 		return Scope{WorkspaceID: workspaceID, ResourceModelID: resourceModelID, Role: role, AllowedActions: allowed}, nil
 	}
-	if principal.UserType == "agent" {
+	if principal.UserType == auth.UserTypeAgent {
 		var allowed []string
 		err := p.Store.Pool.QueryRow(ctx, `
 			SELECT COALESCE(ap.actions, '{}'::text[])
@@ -92,24 +92,12 @@ func (p WorkspacePolicyService) Require(ctx context.Context, principal auth.Prin
 		if errors.Is(err, pgx.ErrNoRows) || (!containsAction(allowed, action) && !containsAction(principal.Capabilities, action)) {
 			return Scope{}, ErrWorkspaceForbidden
 		}
+		if !AgentActionAllowed(action) {
+			return Scope{}, ErrWorkspaceForbidden
+		}
 		return Scope{WorkspaceID: workspaceID, ResourceModelID: resourceModelID, Role: "agent", AllowedActions: allowed}, nil
 	}
 	return Scope{}, ErrWorkspaceForbidden
-}
-
-func memberActions(role string) []string {
-	switch role {
-	case "owner", "admin":
-		return []string{"workspace.read", "workspace.manage", "model.read", "model.manage", "asset.read", "asset.write", "asset.review", "asset.publish", "asset.archive", "container.manage", "conversation.use", "automation.read", "automation.write", "automation.run", "attachment.read", "attachment.write", "stats.read", "audit.read"}
-	case "reviewer":
-		return []string{"workspace.read", "model.read", "asset.read", "asset.review", "asset.publish", "container.manage", "conversation.use", "attachment.read", "attachment.write", "stats.read"}
-	case "editor":
-		return []string{"workspace.read", "model.read", "asset.read", "asset.write", "container.manage", "conversation.use", "attachment.read", "attachment.write", "stats.read", "audit.read"}
-	case "member":
-		return []string{"workspace.read", "model.read", "asset.read", "asset.write", "conversation.use", "attachment.read", "attachment.write", "stats.read"}
-	default:
-		return []string{"workspace.read", "model.read", "asset.read", "conversation.use", "attachment.read", "stats.read"}
-	}
 }
 
 func containsAction(values []string, target string) bool {

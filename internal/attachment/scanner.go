@@ -106,7 +106,7 @@ func (p ScanProcessor) Process(ctx context.Context, organizationID, attachmentID
 	var objectKey, expectedChecksum, status string
 	var expectedSize int64
 	err := p.Store.Pool.QueryRow(ctx, `
-		SELECT object_key, byte_size, sha256, scan_status
+		SELECT object_key, byte_size, sha256, status
 		FROM asset.attachments
 		WHERE organization_id = $1::uuid AND id = $2::uuid AND deleted_at IS NULL
 	`, organizationID, attachmentID).Scan(&objectKey, &expectedSize, &expectedChecksum, &status)
@@ -147,10 +147,65 @@ func (p ScanProcessor) Fail(ctx context.Context, organizationID, attachmentID st
 	return p.setStatus(ctx, organizationID, attachmentID, "failed")
 }
 
+// CleanupExpired soft-deletes expired attachments that are not referenced by
+// any draft or sealed version and removes their objects. Attachments bound to
+// a draft or version survive regardless of their expiry stamp.
+func (p ScanProcessor) CleanupExpired(ctx context.Context) (int, error) {
+	if p.Store == nil || p.Store.Pool == nil {
+		return 0, errors.New("database store is not initialized")
+	}
+	rows, err := p.Store.Pool.Query(ctx, `
+		SELECT at.organization_id::text, at.id::text, at.object_key
+		FROM asset.attachments at
+		WHERE at.expires_at IS NOT NULL AND at.expires_at <= now()
+		  AND at.deleted_at IS NULL
+		  AND NOT EXISTS (SELECT 1 FROM asset.asset_draft_attachments lda WHERE lda.attachment_id = at.id)
+		  AND NOT EXISTS (SELECT 1 FROM asset.asset_version_attachments lva WHERE lva.attachment_id = at.id)
+	`)
+	if err != nil {
+		return 0, fmt.Errorf("list expired attachments: %w", err)
+	}
+	type expired struct{ orgID, id, objectKey string }
+	items := []expired{}
+	for rows.Next() {
+		var item expired
+		if err := rows.Scan(&item.orgID, &item.id, &item.objectKey); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, err
+	}
+	rows.Close()
+	deleted := 0
+	for _, item := range items {
+		tag, err := p.Store.Pool.Exec(ctx, `
+			UPDATE asset.attachments SET deleted_at = now(), updated_at = now()
+			WHERE organization_id = $1::uuid AND id = $2::uuid AND deleted_at IS NULL
+		`, item.orgID, item.id)
+		if err != nil {
+			return deleted, fmt.Errorf("expire attachment: %w", err)
+		}
+		if tag.RowsAffected() == 0 {
+			continue
+		}
+		deleted++
+		if p.Objects != nil && item.objectKey != "" {
+			if err := p.Objects.Delete(ctx, objectstore.ObjectRef{Key: item.objectKey}); err != nil {
+				return deleted, fmt.Errorf("delete expired attachment object: %w", err)
+			}
+		}
+	}
+	return deleted, nil
+}
+
 func (p ScanProcessor) setStatus(ctx context.Context, organizationID, attachmentID, status string) error {
 	tag, err := p.Store.Pool.Exec(ctx, `
 		UPDATE asset.attachments
-		SET scan_status = $3
+		SET status = $3, updated_at = now()
 		WHERE organization_id = $1::uuid AND id = $2::uuid AND deleted_at IS NULL
 	`, organizationID, attachmentID, status)
 	if err != nil {

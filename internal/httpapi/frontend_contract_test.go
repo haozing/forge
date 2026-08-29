@@ -26,8 +26,6 @@ func TestFrontendContractRoutesRequireSession(t *testing.T) {
 		{"asset versions attachments", http.MethodGet, "/api/frontend/asset-versions/00000000-0000-4000-8000-000000000001/attachments"},
 		{"attachment", http.MethodGet, "/api/frontend/attachments/00000000-0000-4000-8000-000000000001"},
 		{"patch attachment", http.MethodPatch, "/api/frontend/attachments/00000000-0000-4000-8000-000000000001"},
-		{"reviews", http.MethodGet, "/api/frontend/workspaces/00000000-0000-4000-8000-000000000001/reviews"},
-		{"review", http.MethodGet, "/api/frontend/reviews/00000000-0000-4000-8000-000000000001"},
 		{"container tree", http.MethodGet, "/api/frontend/workspaces/00000000-0000-4000-8000-000000000001/containers/tree"},
 		{"container", http.MethodGet, "/api/frontend/containers/00000000-0000-4000-8000-000000000001"},
 		{"automation jobs", http.MethodGet, "/api/frontend/workspaces/00000000-0000-4000-8000-000000000001/automation-jobs"},

@@ -1,0 +1,563 @@
+package httpapi
+
+// v2_handlers.go — the /api/v2 vertical slice of phase 0: publication
+// requests (review), asset draft autosave, commit and lifecycle commands.
+// Handlers only authenticate, parse, call domain services and map errors.
+
+import (
+	"encoding/json"
+	"errors"
+	"net/http"
+	"strings"
+
+	"agentchunzhi/internal/asset"
+	"agentchunzhi/internal/auth"
+	"agentchunzhi/internal/authz"
+	"agentchunzhi/internal/review"
+)
+
+// requireIdempotencyKeyV2 enforces the mandatory Idempotency-Key contract on
+// v2 write commands: missing returns 428.
+func requireIdempotencyKeyV2(w http.ResponseWriter, r *http.Request) (string, bool) {
+	key := r.Header.Get("Idempotency-Key")
+	if key == "" {
+		writeError(w, http.StatusPreconditionRequired, "idempotency_key_required")
+		return "", false
+	}
+	if len(key) > 200 {
+		writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
+		return "", false
+	}
+	return key, true
+}
+
+func v2Principal(w http.ResponseWriter, r *http.Request, deps Dependencies) (auth.Principal, bool) {
+	principal, err := deps.SessionService.Authenticate(r.Context(), r)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "authentication_required")
+		return auth.Principal{}, false
+	}
+	if principal.UserType != auth.UserTypeMember {
+		writeError(w, http.StatusForbidden, "member_session_required")
+		return auth.Principal{}, false
+	}
+	return principal, true
+}
+
+// v2ServiceError maps domain errors onto the v2 status/code contract.
+func v2ServiceError(w http.ResponseWriter, err error) {
+	switch {
+	case err == nil:
+		return
+	case errors.Is(err, asset.ErrNotFound), errors.Is(err, review.ErrNotFound):
+		writeError(w, http.StatusNotFound, "resource_not_found")
+	case errors.Is(err, asset.ErrInvalidInput), errors.Is(err, review.ErrInvalidInput),
+		errors.Is(err, asset.ErrInvalidVisibility), errors.Is(err, asset.ErrInvalidOrigin),
+		errors.Is(err, asset.ErrInvalidConfirmation):
+		writeError(w, http.StatusUnprocessableEntity, "validation_failed")
+	case errors.Is(err, asset.ErrDraftRevisionMismatch):
+		writeError(w, http.StatusPreconditionFailed, "draft_revision_mismatch")
+	case errors.Is(err, asset.ErrAssetArchived), errors.Is(err, asset.ErrConflict),
+		errors.Is(err, review.ErrConflict), errors.Is(err, review.ErrVersionSuperseded):
+		writeError(w, http.StatusConflict, "state_conflict")
+	case errors.Is(err, review.ErrSelfApproval):
+		writeError(w, http.StatusConflict, "self_approval_not_allowed")
+	case errors.Is(err, asset.ErrApprovalRequired), errors.Is(err, review.ErrForbidden):
+		writeError(w, http.StatusForbidden, "action_not_allowed")
+	case errors.Is(err, asset.ErrConfirmationRequired):
+		writeError(w, http.StatusConflict, "human_confirmation_required")
+	case errors.Is(err, asset.ErrAttachmentNotClean):
+		writeError(w, http.StatusConflict, "attachments_not_clean")
+	case errors.Is(err, asset.ErrTagArchived):
+		writeError(w, http.StatusConflict, "tag_archived")
+	case errors.Is(err, asset.ErrTooManyTags):
+		writeError(w, http.StatusUnprocessableEntity, "too_many_tags")
+	case errors.Is(err, authz.ErrWorkspaceForbidden):
+		writeError(w, http.StatusForbidden, "action_not_allowed")
+	case errors.Is(err, authz.ErrWorkspaceNotFound):
+		writeError(w, http.StatusNotFound, "resource_not_found")
+	default:
+		writeError(w, http.StatusInternalServerError, "internal_error")
+	}
+}
+
+func decodeV2Body(w http.ResponseWriter, r *http.Request, target any, maxBytes int64) bool {
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBytes))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "validation_failed")
+		return false
+	}
+	return true
+}
+
+// ---------- publication requests ----------
+
+type v2SubmitRequest struct {
+	AssetID       string `json:"asset_id"`
+	DraftRevision string `json:"draft_revision"`
+	Comment       string `json:"comment"`
+}
+
+func v2PublicationRequests(deps Dependencies) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		principal, ok := v2Principal(w, r, deps)
+		if !ok {
+			return
+		}
+		workspaceID := r.PathValue("workspaceId")
+		if !requirePathUUID(w, workspaceID) {
+			return
+		}
+		switch r.Method {
+		case http.MethodGet:
+			page, err := deps.ReviewService.ListPage(r.Context(), principal, workspaceID, review.ListInput{
+				Status:      r.URL.Query().Get("status"),
+				SubmittedBy: r.URL.Query().Get("submitted_by"),
+				Limit:       atoiDefault(r.URL.Query().Get("limit"), 20),
+				Cursor:      r.URL.Query().Get("cursor"),
+			})
+			if err != nil {
+				v2ServiceError(w, err)
+				return
+			}
+			writeData(w, r, http.StatusOK, map[string]any{
+				"items": page.Items,
+				"page":  pageFrom(len(page.Items), atoiDefault(r.URL.Query().Get("limit"), 20), page.NextCursor),
+			})
+		case http.MethodPost:
+			key, ok := requireIdempotencyKeyV2(w, r)
+			if !ok {
+				return
+			}
+			var input v2SubmitRequest
+			if !decodeV2Body(w, r, &input, 64*1024) {
+				return
+			}
+			request, err := deps.ReviewService.Submit(r.Context(), principal, workspaceID, input.AssetID, input.DraftRevision, key, input.Comment)
+			if err != nil {
+				v2ServiceError(w, err)
+				return
+			}
+			writeData(w, r, http.StatusCreated, request)
+		default:
+			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
+		}
+	}
+}
+
+func v2PublicationRequest(deps Dependencies) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		principal, ok := v2Principal(w, r, deps)
+		if !ok {
+			return
+		}
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
+			return
+		}
+		request, err := deps.ReviewService.Get(r.Context(), principal, r.PathValue("workspaceId"), r.PathValue("requestId"))
+		if err != nil {
+			v2ServiceError(w, err)
+			return
+		}
+		writeETag(w, request.ETag)
+		writeData(w, r, http.StatusOK, request)
+	}
+}
+
+type v2DecisionBody struct {
+	Comment string `json:"comment"`
+}
+
+func v2PublicationDecide(deps Dependencies, decision string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		principal, ok := v2Principal(w, r, deps)
+		if !ok {
+			return
+		}
+		if r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
+			return
+		}
+		if _, ok := requireIdempotencyKeyV2(w, r); !ok {
+			return
+		}
+		var body v2DecisionBody
+		if r.ContentLength != 0 {
+			if !decodeV2Body(w, r, &body, 64*1024) {
+				return
+			}
+		}
+		var (
+			request review.Request
+			err     error
+		)
+		if decision == "approve" {
+			request, err = deps.ReviewService.Approve(r.Context(), principal, r.PathValue("workspaceId"), r.PathValue("requestId"), body.Comment)
+		} else {
+			request, err = deps.ReviewService.Reject(r.Context(), principal, r.PathValue("workspaceId"), r.PathValue("requestId"), body.Comment)
+		}
+		if err != nil {
+			v2ServiceError(w, err)
+			return
+		}
+		writeETag(w, request.ETag)
+		writeData(w, r, http.StatusOK, request)
+	}
+}
+
+type v2CancelBody struct {
+	Reason string `json:"reason"`
+}
+
+func v2PublicationCancel(deps Dependencies) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		principal, ok := v2Principal(w, r, deps)
+		if !ok {
+			return
+		}
+		if r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
+			return
+		}
+		if _, ok := requireIdempotencyKeyV2(w, r); !ok {
+			return
+		}
+		var body v2CancelBody
+		if r.ContentLength != 0 {
+			if !decodeV2Body(w, r, &body, 16*1024) {
+				return
+			}
+		}
+		request, err := deps.ReviewService.Cancel(r.Context(), principal, r.PathValue("workspaceId"), r.PathValue("requestId"), body.Reason)
+		if err != nil {
+			v2ServiceError(w, err)
+			return
+		}
+		writeETag(w, request.ETag)
+		writeData(w, r, http.StatusOK, request)
+	}
+}
+
+type v2BatchBody struct {
+	Decision string             `json:"decision"`
+	Items    []review.BatchItem `json:"items"`
+}
+
+func v2PublicationBatch(deps Dependencies) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		principal, ok := v2Principal(w, r, deps)
+		if !ok {
+			return
+		}
+		if r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
+			return
+		}
+		if _, ok := requireIdempotencyKeyV2(w, r); !ok {
+			return
+		}
+		var body v2BatchBody
+		if !decodeV2Body(w, r, &body, 256*1024) {
+			return
+		}
+		if len(body.Items) == 0 || len(body.Items) > 100 {
+			writeError(w, http.StatusUnprocessableEntity, "validation_failed")
+			return
+		}
+		result, err := deps.ReviewService.Batch(r.Context(), principal, r.PathValue("workspaceId"), body.Decision, body.Items)
+		if err != nil {
+			v2ServiceError(w, err)
+			return
+		}
+		writeData(w, r, http.StatusOK, result)
+	}
+}
+
+func v2PublicationComments(deps Dependencies) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		principal, ok := v2Principal(w, r, deps)
+		if !ok {
+			return
+		}
+		workspaceID := r.PathValue("workspaceId")
+		requestID := r.PathValue("requestId")
+		switch r.Method {
+		case http.MethodGet:
+			comments, _, err := deps.ReviewService.ListComments(r.Context(), principal, workspaceID, requestID, "", 100)
+			if err != nil {
+				v2ServiceError(w, err)
+				return
+			}
+			writeData(w, r, http.StatusOK, map[string]any{"items": comments, "page": CursorPage{NextCursor: nil, HasMore: false}})
+		case http.MethodPost:
+			if _, ok := requireIdempotencyKeyV2(w, r); !ok {
+				return
+			}
+			var body struct {
+				Body string `json:"body"`
+			}
+			if !decodeV2Body(w, r, &body, 64*1024) {
+				return
+			}
+			comment, err := deps.ReviewService.AddComment(r.Context(), principal, workspaceID, requestID, body.Body)
+			if err != nil {
+				v2ServiceError(w, err)
+				return
+			}
+			writeData(w, r, http.StatusCreated, comment)
+		default:
+			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
+		}
+	}
+}
+
+// ---------- asset draft + lifecycle ----------
+
+func v2AssetDraft(deps Dependencies) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		principal, ok := v2Principal(w, r, deps)
+		if !ok {
+			return
+		}
+		assetID := r.PathValue("assetId")
+		if !requirePathUUID(w, assetID) {
+			return
+		}
+		switch r.Method {
+		case http.MethodGet:
+			draft, err := deps.MemberAssetService.GetDraft(r.Context(), principal, assetID)
+			if err != nil {
+				v2ServiceError(w, err)
+				return
+			}
+			writeETag(w, `"`+itoa(draft.Revision)+`"`)
+			writeData(w, r, http.StatusOK, draft)
+		case http.MethodPatch:
+			expected := expectedRevisionFromIfMatch(r)
+			var patch asset.DraftPatch
+			if !decodeV2Body(w, r, &patch, 4<<20) {
+				return
+			}
+			draft, err := deps.MemberAssetService.AutosaveDraft(r.Context(), principal, assetID, expected, patch)
+			if err != nil {
+				v2ServiceError(w, err)
+				return
+			}
+			writeETag(w, `"`+itoa(draft.Revision)+`"`)
+			writeData(w, r, http.StatusOK, draft)
+		default:
+			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
+		}
+	}
+}
+
+type v2CommitBody struct {
+	DraftRevision string `json:"draft_revision"`
+}
+
+func v2CommitDraft(deps Dependencies) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		principal, ok := v2Principal(w, r, deps)
+		if !ok {
+			return
+		}
+		if r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
+			return
+		}
+		if _, ok := requireIdempotencyKeyV2(w, r); !ok {
+			return
+		}
+		var body v2CommitBody
+		if !decodeV2Body(w, r, &body, 16*1024) {
+			return
+		}
+		assetID := r.PathValue("assetId")
+		target, err := deps.MemberAssetService.Get(r.Context(), principal, assetID)
+		if err != nil {
+			v2ServiceError(w, err)
+			return
+		}
+		result, err := deps.MemberAssetService.CommitDraft(r.Context(), principal, target.WorkspaceID, assetID, body.DraftRevision)
+		if err != nil {
+			v2ServiceError(w, err)
+			return
+		}
+		version, err := deps.MemberAssetService.GetVersion(r.Context(), principal, result.VersionID)
+		if err != nil {
+			v2ServiceError(w, err)
+			return
+		}
+		writeData(w, r, http.StatusCreated, version)
+	}
+}
+
+func v2PublishAsset(deps Dependencies) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		principal, ok := v2Principal(w, r, deps)
+		if !ok {
+			return
+		}
+		if r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
+			return
+		}
+		if _, ok := requireIdempotencyKeyV2(w, r); !ok {
+			return
+		}
+		var body struct {
+			DraftRevision string `json:"draft_revision"`
+		}
+		if r.ContentLength != 0 {
+			if !decodeV2Body(w, r, &body, 16*1024) {
+				return
+			}
+		}
+		assetID := r.PathValue("assetId")
+		target, err := deps.MemberAssetService.Get(r.Context(), principal, assetID)
+		if err != nil {
+			v2ServiceError(w, err)
+			return
+		}
+		result, err := deps.MemberAssetService.Publish(r.Context(), principal, target.WorkspaceID, assetID, body.DraftRevision, requireIdempotencyKeyV2Value(r))
+		if err != nil {
+			v2ServiceError(w, err)
+			return
+		}
+		writeETag(w, result.ETag)
+		writeData(w, r, http.StatusOK, result)
+	}
+}
+
+func requireIdempotencyKeyV2Value(r *http.Request) string {
+	return r.Header.Get("Idempotency-Key")
+}
+
+func v2ArchiveAsset(deps Dependencies) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		principal, ok := v2Principal(w, r, deps)
+		if !ok {
+			return
+		}
+		if r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
+			return
+		}
+		if _, ok := requireIdempotencyKeyV2(w, r); !ok {
+			return
+		}
+		assetID := r.PathValue("assetId")
+		if _, err := deps.MemberAssetService.Get(r.Context(), principal, assetID); err != nil {
+			v2ServiceError(w, err)
+			return
+		}
+		result, err := deps.MemberAssetService.Archive(r.Context(), principal, assetID, requireIdempotencyKeyV2Value(r))
+		if err != nil {
+			v2ServiceError(w, err)
+			return
+		}
+		writeETag(w, result.ETag)
+		writeData(w, r, http.StatusOK, result)
+	}
+}
+
+func v2RestoreAsset(deps Dependencies) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		principal, ok := v2Principal(w, r, deps)
+		if !ok {
+			return
+		}
+		if r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
+			return
+		}
+		if _, ok := requireIdempotencyKeyV2(w, r); !ok {
+			return
+		}
+		assetID := r.PathValue("assetId")
+		if _, err := deps.MemberAssetService.Get(r.Context(), principal, assetID); err != nil {
+			v2ServiceError(w, err)
+			return
+		}
+		result, err := deps.MemberAssetService.Restore(r.Context(), principal, assetID, requireIdempotencyKeyV2Value(r))
+		if err != nil {
+			v2ServiceError(w, err)
+			return
+		}
+		writeETag(w, result.ETag)
+		writeData(w, r, http.StatusOK, result)
+	}
+}
+
+func v2ConfirmVersion(deps Dependencies) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		principal, ok := v2Principal(w, r, deps)
+		if !ok {
+			return
+		}
+		if r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
+			return
+		}
+		if _, ok := requireIdempotencyKeyV2(w, r); !ok {
+			return
+		}
+		version, err := deps.MemberAssetService.ConfirmVersion(r.Context(), principal, r.PathValue("versionId"), requireIdempotencyKeyV2Value(r))
+		if err != nil {
+			v2ServiceError(w, err)
+			return
+		}
+		writeData(w, r, http.StatusCreated, version)
+	}
+}
+
+func atoiDefault(value string, fallback int) int {
+	if value == "" {
+		return fallback
+	}
+	result := 0
+	for _, ch := range value {
+		if ch < '0' || ch > '9' {
+			return fallback
+		}
+		result = result*10 + int(ch-'0')
+	}
+	if result == 0 {
+		return fallback
+	}
+	return result
+}
+
+func itoa(value int64) string {
+	if value == 0 {
+		return "0"
+	}
+	digits := ""
+	negative := value < 0
+	if negative {
+		value = -value
+	}
+	for value > 0 {
+		digits = string(rune('0'+value%10)) + digits
+		value /= 10
+	}
+	if negative {
+		return "-" + digits
+	}
+	return digits
+}
+
+// expectedRevisionFromIfMatch extracts the draft revision from an If-Match
+// header value of the form "<revision>" (ETag-quoted or bare digits).
+func expectedRevisionFromIfMatch(r *http.Request) string {
+	value := r.Header.Get("If-Match")
+	if value == "" {
+		return ""
+	}
+	for len(value) > 0 && (value[0] == '"' || value[len(value)-1] == '"') {
+		value = strings.Trim(value, "\"")
+	}
+	return value
+}

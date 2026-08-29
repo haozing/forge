@@ -37,7 +37,7 @@ func (f DomainToolFactory) Build(ctx context.Context, scope ReActToolScope, rawP
 	if queryService.Store == nil {
 		queryService.Store = f.Store
 	}
-	assets := assetservice.Service{Store: f.Store, Events: f.Events}
+	assets := assetservice.Service{Store: f.Store, Events: &f.Events}
 	tasks := agenttask.Service{Store: f.Store}
 	idempotencyKey := func(name string, ctx context.Context) string {
 		callID := compose.GetToolCallID(ctx)
@@ -262,10 +262,11 @@ func (f DomainToolFactory) getAttachmentText(ctx context.Context, scope ReActToo
 		SELECT LEFT(atx.text_content, 32000), atx.checksum, COALESCE(atx.language, '')
 		FROM asset.attachments att
 		JOIN asset.attachment_texts atx ON atx.attachment_id = att.id
-		JOIN asset.asset_versions av ON av.id = att.asset_version_id
-		JOIN asset.assets a ON a.id = av.asset_id AND a.current_published_version_id = av.id
+		JOIN asset.asset_version_attachments lva ON lva.organization_id = att.organization_id AND lva.attachment_id = att.id
+		JOIN asset.asset_versions av ON av.organization_id = lva.organization_id AND av.id = lva.asset_version_id
+		JOIN asset.assets a ON a.organization_id = av.organization_id AND a.id = av.asset_id AND a.current_published_version_id = av.id
 		WHERE att.organization_id = $1::uuid AND att.id = $2::uuid AND att.deleted_at IS NULL
-		  AND att.scan_status = 'clean' AND att.extraction_status = 'ready'
+		  AND att.status = 'clean' AND att.extraction_status = 'succeeded'
 		  AND a.resource_model_id::text = ANY($3::text[])
 	`, scope.OrganizationID, attachmentID, allowed).Scan(&text, &checksum, &language)
 	if errors.Is(err, pgx.ErrNoRows) {

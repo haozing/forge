@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // AuditEntry is a single audit_log row awaiting persistence. Result must be
@@ -46,9 +48,39 @@ func NewAuditEntry(action, organizationID, actorUserID, resourceType, resourceID
 	}
 }
 
+// AppendAuditTx persists one audit entry inside the caller's business
+// transaction. Governance and content writes must use this variant so audit
+// cannot be lost after the business commit.
+func AppendAuditTx(ctx context.Context, tx pgx.Tx, entry AuditEntry, workspaceID string) error {
+	if tx == nil {
+		return fmt.Errorf("audit transaction is required")
+	}
+	if entry.Action == "" {
+		return fmt.Errorf("audit entry requires an action")
+	}
+	result := entry.Result
+	if result == "" {
+		result = "allowed"
+	}
+	if !validAuditResults[result] {
+		return fmt.Errorf("invalid audit result %q", result)
+	}
+	metadataJSON, err := json.Marshal(entry.Metadata)
+	if err != nil {
+		return fmt.Errorf("encode audit metadata: %w", err)
+	}
+	_, err = tx.Exec(ctx, `
+		INSERT INTO audit.audit_log
+			(organization_id, workspace_id, actor_user_id, initiator_user_id, action, resource_type, resource_id, request_id, result, metadata)
+		VALUES (NULLIF($1,'')::uuid, NULLIF($2,'')::uuid, NULLIF($3,'')::uuid, NULLIF($4,'')::uuid, $5,
+			NULLIF($6,''), NULLIF($7,'')::uuid, NULLIF($8,''), $9, $10::jsonb)
+	`, entry.OrganizationID, workspaceID, entry.ActorUserID, entry.InitiatorUserID, entry.Action,
+		entry.ResourceType, entry.ResourceID, entry.RequestID, result, string(metadataJSON))
+	return err
+}
+
 // RecordAudit persists one generic audit entry. It is the shared write path
-// for workspace, session and transfer audit events; callers are expected to
-// invoke it best-effort (fire-and-forget) and only log on failure.
+// for session audit events; governance and content writes use AppendAuditTx.
 func (s *Store) RecordAudit(ctx context.Context, entry AuditEntry) error {
 	if s == nil || s.Pool == nil {
 		return fmt.Errorf("database store is not initialized")

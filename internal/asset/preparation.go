@@ -1,9 +1,14 @@
 package asset
 
+// preparation.go — persists the candidate produced by the fixed asset_prepare
+// graph. The graph returns data; this service re-checks permissions, validates
+// the candidate and materializes it as a new sealed version (origin
+// ai_generated, parent = source version) through CreateVersionTx inside one
+// transaction, then emits the version fact and the audit entry. There is no
+// processing claim: candidate versions are legitimate snapshots, not states.
+
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,7 +17,6 @@ import (
 	"agentchunzhi/internal/auth"
 	"agentchunzhi/internal/authz"
 	"agentchunzhi/internal/eventing"
-	"agentchunzhi/internal/retrieval"
 	"agentchunzhi/internal/store"
 	"agentchunzhi/internal/workflows"
 
@@ -38,9 +42,6 @@ type PrepareResult struct {
 	OutputTokens       int
 }
 
-// AssetPreparationService is the only service allowed to persist a candidate
-// produced by the fixed asset_prepare graph. The graph returns data; this
-// service owns the claim, re-check, transaction, projection event and reset.
 type AssetPreparationService struct {
 	Store       *store.Store
 	Events      eventing.EventStore
@@ -62,18 +63,6 @@ func (s AssetPreparationService) Prepare(ctx context.Context, req PrepareRequest
 	if err := s.checkPermission(ctx, principal, metadata.ResourceModelID); err != nil {
 		return PrepareResult{}, err
 	}
-	claimed, err := s.Store.Pool.Exec(ctx, `
-		UPDATE asset.asset_versions SET processing_started_at = now()
-		WHERE id = $1::uuid AND workflow_status = 'submitted'
-		  AND (processing_started_at IS NULL OR processing_started_at < now() - interval '10 minutes')
-	`, req.AssetVersionID)
-	if err != nil {
-		return PrepareResult{}, fmt.Errorf("claim asset preparation source: %w", err)
-	}
-	if claimed.RowsAffected() != 1 {
-		return PrepareResult{}, errors.New("asset preparation source is already being processed")
-	}
-
 	values := cloneMap(metadata.Fields)
 	output, err := s.Workflow.Invoke(ctx, workflows.Input{
 		OrganizationID:     metadata.OrganizationID,
@@ -89,27 +78,23 @@ func (s AssetPreparationService) Prepare(ctx context.Context, req PrepareRequest
 		Values:             values,
 	})
 	if err != nil {
-		_ = s.reset(ctx, req.AssetVersionID)
 		return PrepareResult{}, fmt.Errorf("execute asset_prepare graph: %w", err)
 	}
 	fields := cloneMap(output.Candidate)
 	delete(fields, "asset_ids")
-	delete(fields, "workflow_status")
 	if err := ValidateFields(metadata.FieldSchema, fields); err != nil {
-		_ = s.reset(ctx, req.AssetVersionID)
 		return PrepareResult{}, fmt.Errorf("validate asset preparation fields: %w", err)
 	}
 	if err := ValidateContent(metadata.Title, metadata.Markdown, &fields); err != nil {
-		_ = s.reset(ctx, req.AssetVersionID)
 		return PrepareResult{}, fmt.Errorf("validate asset preparation content: %w", err)
 	}
+	// Re-check the permission after the model call so a policy revoked while
+	// the graph ran cannot land a candidate.
 	if err := s.checkPermission(ctx, principal, metadata.ResourceModelID); err != nil {
-		_ = s.reset(ctx, req.AssetVersionID)
 		return PrepareResult{}, err
 	}
 	result, err := s.persistCandidate(ctx, req, metadata, fields)
 	if err != nil {
-		_ = s.reset(ctx, req.AssetVersionID)
 		return PrepareResult{}, err
 	}
 	result.InputTokens = output.InputTokens
@@ -128,7 +113,7 @@ type preparationMetadata struct {
 	Markdown        *string
 	Fields          map[string]any
 	FieldSchema     []byte
-	Status          string
+	Sealed          bool
 }
 
 func (s AssetPreparationService) loadSource(ctx context.Context, req PrepareRequest) (preparationMetadata, error) {
@@ -137,9 +122,10 @@ func (s AssetPreparationService) loadSource(ctx context.Context, req PrepareRequ
 	err := s.Store.Pool.QueryRow(ctx, `
 		SELECT av.organization_id::text, a.workspace_id::text, av.asset_id::text,
 		       av.resource_model_id::text, av.resource_model_version_id::text,
-		       av.version_no, av.title, av.markdown, av.fields, mv.field_schema, av.workflow_status
+		       av.version_no, av.title, av.markdown, av.fields, mv.field_schema,
+		       (av.sealed_at IS NOT NULL)
 		FROM asset.asset_versions av
-		JOIN asset.assets a ON a.id = av.asset_id
+		JOIN asset.assets a ON a.organization_id = av.organization_id AND a.id = av.asset_id
 		JOIN model.resource_model_versions mv ON mv.id = av.resource_model_version_id
 		JOIN integration.agent_applications aa ON aa.id = $5::uuid
 		  AND aa.organization_id = av.organization_id
@@ -154,15 +140,15 @@ func (s AssetPreparationService) loadSource(ctx context.Context, req PrepareRequ
 		req.AgentApplicationID, req.ModelEndpointID, req.ModelRevision).Scan(
 		&metadata.OrganizationID, &metadata.WorkspaceID, &metadata.AssetID,
 		&metadata.ResourceModelID, &metadata.ModelVersionID, &metadata.VersionNo, &metadata.Title,
-		&metadata.Markdown, &fields, &metadata.FieldSchema, &metadata.Status)
+		&metadata.Markdown, &fields, &metadata.FieldSchema, &metadata.Sealed)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return preparationMetadata{}, ErrNotFound
 	}
 	if err != nil {
 		return preparationMetadata{}, fmt.Errorf("load asset preparation source: %w", err)
 	}
-	if metadata.Status != "submitted" {
-		return preparationMetadata{}, fmt.Errorf("asset preparation source is not submitted")
+	if !metadata.Sealed {
+		return preparationMetadata{}, fmt.Errorf("%w: preparation source version is not sealed", ErrConflict)
 	}
 	metadata.Fields = map[string]any{}
 	if len(fields) > 0 {
@@ -188,56 +174,68 @@ func (s AssetPreparationService) checkPermission(ctx context.Context, principal 
 }
 
 func (s AssetPreparationService) persistCandidate(ctx context.Context, req PrepareRequest, metadata preparationMetadata, fields map[string]any) (PrepareResult, error) {
-	contentChecksum := hashPreparation(fields, metadata.Title, metadata.Markdown)
 	tx, err := s.Store.Pool.Begin(ctx)
 	if err != nil {
 		return PrepareResult{}, err
 	}
 	defer tx.Rollback(ctx)
-	var candidateID string
-	if err := tx.QueryRow(ctx, `
-		SELECT av.id::text FROM asset.asset_versions av
-		WHERE av.id = $1::uuid AND av.organization_id = $2::uuid AND av.workflow_status = 'submitted'
-		FOR UPDATE
-	`, req.AssetVersionID, metadata.OrganizationID).Scan(new(string)); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return PrepareResult{}, nil
-		}
+	row, err := LoadLifecycleTx(ctx, tx, metadata.OrganizationID, metadata.AssetID)
+	if err != nil {
 		return PrepareResult{}, err
 	}
-	if err := tx.QueryRow(ctx, `
-		INSERT INTO asset.asset_versions
-			(organization_id, workspace_id, asset_id, resource_model_id, resource_model_version_id, version_no,
-			 workflow_status, quality, title, markdown, fields, parent_version_id, content_checksum, created_by)
-		VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6,
-			'draft', 'ai_generated', $7, $8, $9::jsonb, $10::uuid, $11, $12::uuid)
-		RETURNING id::text
-	`, metadata.OrganizationID, metadata.WorkspaceID, metadata.AssetID, metadata.ResourceModelID,
-		metadata.ModelVersionID, metadata.VersionNo+1, metadata.Title, metadata.Markdown,
-		string(mustJSON(fields)), req.AssetVersionID, contentChecksum, req.AgentUserID).Scan(&candidateID); err != nil {
-		return PrepareResult{}, fmt.Errorf("persist asset preparation candidate: %w", err)
+	if row.PublicationStatus == PublicationArchived {
+		return PrepareResult{}, ErrAssetArchived
 	}
-	if _, err := tx.Exec(ctx, `UPDATE asset.assets SET current_working_version_id = $2::uuid, updated_at = now() WHERE id = $1::uuid`, metadata.AssetID, candidateID); err != nil {
+	// The candidate inherits tag/attachment provenance from its source
+	// snapshot; confirmation never carries over.
+	tagIDs, err := loadVersionTagIDs(ctx, tx, req.AssetVersionID)
+	if err != nil {
 		return PrepareResult{}, err
 	}
-	if _, err := tx.Exec(ctx, `UPDATE asset.asset_versions SET workflow_status = 'draft', processing_started_at = NULL WHERE id = $1::uuid`, req.AssetVersionID); err != nil {
+	attachmentIDs, err := loadVersionAttachmentIDs(ctx, tx, req.AssetVersionID)
+	if err != nil {
 		return PrepareResult{}, err
 	}
-	if err := retrieval.EnqueueProjectionTx(ctx, tx, s.Events, metadata.OrganizationID, candidateID, retrieval.ProjectionRebuild); err != nil {
+	candidateID, versionNo, err := CreateVersionTx(ctx, tx, VersionMaterial{
+		OrganizationID:         metadata.OrganizationID,
+		WorkspaceID:            metadata.WorkspaceID,
+		AssetID:                metadata.AssetID,
+		ResourceModelID:        metadata.ResourceModelID,
+		ResourceModelVersionID: metadata.ModelVersionID,
+		ParentVersionID:        req.AssetVersionID,
+		Origin:                 OriginAIGenerated,
+		ConfirmationStatus:     ConfirmationUnconfirmed,
+		Title:                  pointerValue(metadata.Title),
+		Markdown:               pointerValue(metadata.Markdown),
+		Fields:                 fields,
+		TagIDs:                 tagIDs,
+		AttachmentIDs:          attachmentIDs,
+		CreatedBy:              req.AgentUserID,
+	})
+	if err != nil {
 		return PrepareResult{}, err
 	}
-	if _, err := s.Events.AppendTx(ctx, tx, eventing.Event{OrganizationID: metadata.OrganizationID, EventType: "asset.agent_candidate_created", AggregateType: "asset_version", AggregateID: candidateID, AggregateVersion: 1, PayloadVersion: 1, Payload: map[string]string{"source_version_id": req.AssetVersionID, "agent_user_id": req.AgentUserID, "candidate_version_id": candidateID}}); err != nil {
+	next := row
+	next.CurrentWorkingVersionID = candidateID
+	next.Revision++
+	actor := auth.Principal{OrganizationID: metadata.OrganizationID, UserID: req.AgentUserID, UserType: "agent"}
+	if err := AppendAssetEventTx(ctx, tx, &s.Events, next, actor, eventing.EventAssetVersionCreated, eventing.PayloadVersionV1, eventing.AssetVersionCreatedPayload{
+		AssetID:     metadata.AssetID,
+		VersionID:   candidateID,
+		VersionNo:   versionNo,
+		WorkspaceID: metadata.WorkspaceID,
+	}); err != nil {
 		return PrepareResult{}, err
 	}
+	RecordAssetAuditTx(ctx, tx, metadata.OrganizationID, metadata.WorkspaceID, actor, "asset.version.prepared", metadata.AssetID, map[string]any{
+		"workspace_id":      metadata.WorkspaceID,
+		"source_version_id": req.AssetVersionID,
+		"version_id":        candidateID,
+	})
 	if err := tx.Commit(ctx); err != nil {
 		return PrepareResult{}, err
 	}
 	return PrepareResult{CandidateVersionID: candidateID}, nil
-}
-
-func (s AssetPreparationService) reset(ctx context.Context, versionID string) error {
-	_, err := s.Store.Pool.Exec(ctx, `UPDATE asset.asset_versions SET processing_started_at = NULL WHERE id = $1::uuid AND workflow_status = 'submitted'`, versionID)
-	return err
 }
 
 func cloneMap(input map[string]any) map[string]any {
@@ -255,16 +253,6 @@ func containsString(values []string, wanted string) bool {
 		}
 	}
 	return false
-}
-
-func hashPreparation(fields map[string]any, title, markdown *string) string {
-	payload, _ := json.Marshal(struct {
-		Fields   map[string]any `json:"fields"`
-		Title    *string        `json:"title"`
-		Markdown *string        `json:"markdown"`
-	}{fields, title, markdown})
-	digest := sha256.Sum256(payload)
-	return hex.EncodeToString(digest[:])
 }
 
 func pointerValue(value *string) string {

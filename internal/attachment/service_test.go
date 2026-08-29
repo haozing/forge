@@ -34,10 +34,12 @@ func TestBuildObjectKey(t *testing.T) {
 	}
 }
 
-func TestOpenDownloadRejectsEmptyScopeBeforeObjectAccess(t *testing.T) {
+func TestOpenDownloadRejectsInvalidAttachmentIDBeforeObjectAccess(t *testing.T) {
 	service := Service{}
-	_, err := service.OpenDownload(context.Background(), auth.Principal{}, "attachment-id", nil, "frontend")
-	if err != ErrNotFound {
+	if _, err := service.OpenDownload(context.Background(), auth.Principal{}, "not-a-uuid"); err != ErrNotFound {
 		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+	if _, err := service.Upload(context.Background(), auth.Principal{}, "not-a-uuid", "file.txt", "text/plain", 1, nil); err != ErrInvalidUpload {
+		t.Fatalf("expected ErrInvalidUpload for invalid workspace, got %v", err)
 	}
 }

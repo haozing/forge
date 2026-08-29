@@ -88,6 +88,7 @@ func (r ReActExecutor) Execute(ctx context.Context, req ReActRequest, emit func(
 	if err != nil {
 		return ReActResult{}, err
 	}
+	defer prepared.cancel()
 	runner := adk.NewRunner(ctx, adk.RunnerConfig{
 		Agent: prepared.agent, EnableStreaming: req.EnableStreaming, CheckPointStore: req.CheckPointStore,
 	})
@@ -105,6 +106,7 @@ func (r ReActExecutor) Resume(ctx context.Context, req ReActRequest, targets map
 	if err != nil {
 		return ReActResult{}, err
 	}
+	defer prepared.cancel()
 	runner := adk.NewRunner(ctx, adk.RunnerConfig{
 		Agent: prepared.agent, EnableStreaming: req.EnableStreaming, CheckPointStore: req.CheckPointStore,
 	})
@@ -124,9 +126,10 @@ func (r ReActExecutor) ResumeApproval(ctx context.Context, req ReActRequest, int
 }
 
 type preparedReAct struct {
-	ctx   context.Context
-	agent *adk.ChatModelAgent
-	model ResolvedModel
+	ctx    context.Context
+	cancel context.CancelFunc
+	agent  *adk.ChatModelAgent
+	model  ResolvedModel
 }
 
 func (r ReActExecutor) prepare(ctx context.Context, req ReActRequest) (preparedReAct, error) {
@@ -192,8 +195,8 @@ func (r ReActExecutor) prepare(ctx context.Context, req ReActRequest) (preparedR
 	if duration <= 0 || duration > 90*time.Second {
 		duration = 90 * time.Second
 	}
-	runCtx, _ := context.WithTimeout(ctx, duration)
-	return preparedReAct{ctx: runCtx, agent: agent, model: resolved}, nil
+	runCtx, cancel := context.WithTimeout(ctx, duration)
+	return preparedReAct{ctx: runCtx, cancel: cancel, agent: agent, model: resolved}, nil
 }
 
 func consumeReActEvents(iter *adk.AsyncIterator[*adk.AgentEvent], resolved ResolvedModel, checkpointID string, emit func(ReActEvent) error) (ReActResult, error) {

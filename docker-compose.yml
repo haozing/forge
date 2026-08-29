@@ -1,4 +1,21 @@
 services:
+  migrate:
+    build:
+      context: .
+      args:
+        GO_BASE_IMAGE: ${GO_BASE_IMAGE:-docker.m.daocloud.io/library/golang:1.27.0-bookworm}
+        GO_PROXY: ${GO_PROXY:-https://goproxy.cn,direct}
+    command: ["/app/agentchunzhi-migrate"]
+    profiles: ["tools"]
+    environment:
+      MIGRATION_PATH: db/migrations
+      DATABASE_RUNTIME_ROLE: ${DATABASE_RUNTIME_ROLE:-agentchunzhi_app}
+      DATABASE_MIGRATION_URL: "postgresql://${POSTGRES_USER:-agentchunzhi}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/${POSTGRES_DB:-agentchunzhi}?sslmode=disable"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [internal]
+
   postgres:
     image: agentchunzhi-postgres-r3:pg18-pgroonga-pgvector0.8.6
     build:

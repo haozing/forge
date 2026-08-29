@@ -59,7 +59,7 @@ func listMemberAssets(deps Dependencies) http.HandlerFunc {
 		}
 		page, err := deps.MemberAssetService.ListPage(r.Context(), principal, r.PathValue("workspaceId"), assetservice.MemberAssetListInput{
 			Query: query.Get("q"), ResourceModelID: query.Get("resource_model_id"), ContentKind: query.Get("content_kind"),
-			Visibility: query.Get("visibility"), PublicationStatus: query.Get("publication_status"), ReviewStatus: query.Get("review_status"),
+			Visibility: query.Get("visibility"), PublicationStatus: query.Get("publication_status"),
 			CreatedBy: query.Get("created_by"), ContainerID: query.Get("container_id"), ParentAssetID: query.Get("parent_asset_id"),
 			Tags: query["tags"], Sort: query.Get("sort"), Filters: filters, Limit: limit, Cursor: query.Get("cursor"),
 		})
@@ -213,54 +213,10 @@ func memberAssetResource(deps Dependencies) http.HandlerFunc {
 	}
 }
 
-type submitReviewRequest struct {
-	AssetVersionID string `json:"asset_version_id"`
-	Comment        string `json:"comment"`
-}
 
-func submitAssetReview(deps Dependencies) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
-			return
-		}
-		principal, ok := requireMemberSession(w, r, deps)
-		if !ok {
-			return
-		}
-		key, ok := requestIdempotencyKey(w, r)
-		if !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
-			return
-		}
-		var input submitReviewRequest
-		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 32*1024))
-		decoder.DisallowUnknownFields()
-		if r.ContentLength != 0 {
-			if err := decoder.Decode(&input); err != nil {
-				writeError(w, http.StatusUnprocessableEntity, "validation_failed")
-				return
-			}
-		}
-		if input.AssetVersionID == "" {
-			asset, err := deps.MemberAssetService.Get(r.Context(), principal, r.PathValue("assetId"))
-			if err != nil {
-				writeMemberAssetError(w, err, "asset_load_failed")
-				return
-			}
-			input.AssetVersionID = asset.CurrentWorkingVersionID
-		}
-		result, err := deps.MemberAssetService.SubmitReview(r.Context(), principal, r.PathValue("assetId"), input.AssetVersionID, key, input.Comment)
-		if err != nil {
-			writeMemberAssetError(w, err, "asset_review_submit_failed")
-			return
-		}
-		writeJSON(w, http.StatusCreated, result)
-	}
-}
 
 type memberPublishAssetRequest struct {
-	AssetVersionID string `json:"asset_version_id"`
+	DraftRevision string `json:"draft_revision"`
 }
 
 func publishMemberAsset(deps Dependencies) http.HandlerFunc {
@@ -287,15 +243,12 @@ func publishMemberAsset(deps Dependencies) http.HandlerFunc {
 				return
 			}
 		}
-		if input.AssetVersionID == "" {
-			asset, err := deps.MemberAssetService.Get(r.Context(), principal, r.PathValue("assetId"))
-			if err != nil {
-				writeMemberAssetError(w, err, "asset_load_failed")
-				return
-			}
-			input.AssetVersionID = asset.CurrentWorkingVersionID
+		asset, err := deps.MemberAssetService.Get(r.Context(), principal, r.PathValue("assetId"))
+		if err != nil {
+			writeMemberAssetError(w, err, "asset_load_failed")
+			return
 		}
-		result, err := deps.MemberAssetService.Publish(r.Context(), principal, r.PathValue("assetId"), input.AssetVersionID, key)
+		result, err := deps.MemberAssetService.Publish(r.Context(), principal, asset.WorkspaceID, r.PathValue("assetId"), input.DraftRevision, key)
 		if err != nil {
 			writeMemberAssetError(w, err, "asset_publish_failed")
 			return

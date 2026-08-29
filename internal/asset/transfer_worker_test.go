@@ -38,14 +38,14 @@ func TestExportAssetQueryBindsPermissionScopeAndFilters(t *testing.T) {
 			"q":                  "wide",
 			"visibility":         "workspace",
 			"publication_status": "published",
-			"tags":               []any{"camera"},
+			"origin":             "imported",
 			"fields":             map[string]any{"shot_size": "wide"},
 		},
 	})
 	if len(args) != 8 {
 		t.Fatalf("expected 8 bound arguments, got %d", len(args))
 	}
-	for _, fragment := range []string{"a.workspace_id = $2::uuid", "v.title", "a.visibility = $5", "v.tags @>", "v.fields @>"} {
+	for _, fragment := range []string{"a.workspace_id = $2::uuid", "v.title", "a.visibility = $5", "v.origin = $7", "v.fields @> $8"} {
 		if !strings.Contains(query, fragment) {
 			t.Fatalf("query missing %q: %s", fragment, query)
 		}
@@ -63,7 +63,7 @@ func TestNormalizeMemberFiltersBuildsProjectionPredicates(t *testing.T) {
 	if string(fields) != `[{"field":"shot_size","operator":"eq","value":"wide"}]` {
 		t.Fatalf("unexpected field predicates: %s", fields)
 	}
-	if string(tags) != `[{"field":"tags","operator":"contains_any","value":["camera"]}]` {
-		t.Fatalf("unexpected tag predicates: %s", tags)
+	if tags != nil {
+		t.Fatalf("tag jsonb predicates are retired; got %s", tags)
 	}
 }

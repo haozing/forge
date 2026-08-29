@@ -330,17 +330,6 @@ func TestCurrentUserRequiresSession(t *testing.T) {
 	}
 }
 
-func TestAttachmentUploadRequiresSession(t *testing.T) {
-	req := httptest.NewRequest(http.MethodPost, "/api/asset-versions/00000000-0000-4000-8000-000000000001/attachments", nil)
-	rec := httptest.NewRecorder()
-
-	NewHandler().ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("expected status %d, got %d", http.StatusUnauthorized, rec.Code)
-	}
-}
-
 func TestMemberAttachmentDownloadRequiresSession(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/api/attachments/00000000-0000-4000-8000-000000000001/download", nil)
 	rec := httptest.NewRecorder()

@@ -109,33 +109,23 @@ func (s Service) Create(ctx context.Context, principal auth.Principal, input Cre
 	}
 
 	var versionID, modelID, workspaceID string
-	var workflowStatus string
 	err = tx.QueryRow(ctx, `
 		SELECT a.current_working_version_id::text, a.resource_model_id::text,
-		       a.workspace_id::text, v.workflow_status
+		       a.workspace_id::text
 		FROM asset.assets a
-		JOIN asset.asset_versions v ON v.id = a.current_working_version_id
 		WHERE a.id = $1::uuid
 		  AND a.organization_id = $2::uuid
 		  AND a.resource_model_id::text = ANY($3::text[])
 		  AND a.resource_model_id::text = ANY($4::text[])
-		FOR UPDATE OF a, v
-	`, assetID, principal.OrganizationID, readableModelIDs, editableModelIDs).Scan(&versionID, &modelID, &workspaceID, &workflowStatus)
+		  AND a.current_working_version_id IS NOT NULL
+		  AND a.deleted_at IS NULL
+		FOR UPDATE OF a
+	`, assetID, principal.OrganizationID, readableModelIDs, editableModelIDs).Scan(&versionID, &modelID, &workspaceID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return TaskResult{}, ErrNotFound
 	}
 	if err != nil {
 		return TaskResult{}, fmt.Errorf("load asset for agent task: %w", err)
-	}
-	if workflowStatus != "draft" {
-		return TaskResult{}, ErrConflict
-	}
-	if _, err := tx.Exec(ctx, `
-		UPDATE asset.asset_versions
-			SET workflow_status = 'submitted'
-		WHERE id = $1::uuid
-	`, versionID); err != nil {
-		return TaskResult{}, fmt.Errorf("queue asset for agent task: %w", err)
 	}
 
 	var result TaskResult

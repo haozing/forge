@@ -23,7 +23,6 @@ type webhookCreateAssetRequest struct {
 	Title           *string        `json:"title"`
 	Markdown        *string        `json:"markdown"`
 	Fields          map[string]any `json:"fields"`
-	Tags            []string       `json:"tags"`
 }
 
 // webhookAssetResult wraps the created asset with channel metadata.
@@ -99,7 +98,6 @@ func webhookCreateAsset(deps Dependencies) http.HandlerFunc {
 			Title:           input.Title,
 			Markdown:        input.Markdown,
 			Fields:          input.Fields,
-			Tags:            input.Tags,
 			ReceivedAt:      receivedAt,
 		})
 		if err != nil {

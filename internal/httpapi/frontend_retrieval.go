@@ -8,7 +8,6 @@ import (
 
 	"agentchunzhi/internal/authz"
 	"agentchunzhi/internal/eventing"
-	"agentchunzhi/internal/retrieval"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -125,13 +124,15 @@ func rebuildRetrievalIndex(deps Dependencies) http.HandlerFunc {
 			return
 		}
 		versionIDs := make([]string, 0, 32)
+		assetIDs := make([]string, 0, 32)
 		for rows.Next() {
-			var assetID, versionID string
-			if err := rows.Scan(&assetID, &versionID); err != nil {
+			var rowAssetID, versionID string
+			if err := rows.Scan(&rowAssetID, &versionID); err != nil {
 				rows.Close()
 				writeError(w, http.StatusInternalServerError, "index_rebuild_failed")
 				return
 			}
+			assetIDs = append(assetIDs, rowAssetID)
 			versionIDs = append(versionIDs, versionID)
 		}
 		if err := rows.Err(); err != nil {
@@ -149,8 +150,8 @@ func rebuildRetrievalIndex(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusInternalServerError, "index_rebuild_failed")
 			return
 		}
-		for _, versionID := range versionIDs {
-			if _, txErr = deps.AssetService.Events.AppendTx(r.Context(), tx, eventing.Event{OrganizationID: principal.OrganizationID, EventType: "asset.retrieval_projection_requested", AggregateType: "asset_version", AggregateID: versionID, AggregateVersion: 1, PayloadVersion: 1, Payload: map[string]string{"asset_version_id": versionID, "operation": retrieval.ProjectionRebuild}}); txErr != nil {
+		for i, versionID := range versionIDs {
+			if _, txErr = deps.AssetService.Events.AppendTx(r.Context(), tx, eventing.Event{OrganizationID: principal.OrganizationID, EventType: eventing.EventAssetPublished, AggregateType: "asset", AggregateID: assetIDs[i], AggregateVersion: 1, PayloadVersion: eventing.PayloadVersionV1, Payload: eventing.AssetPublishedPayload{AssetID: assetIDs[i], VersionID: versionID, WorkspaceID: workspaceID}}); txErr != nil {
 				_ = tx.Rollback(r.Context())
 				writeError(w, http.StatusInternalServerError, "index_rebuild_failed")
 				return
@@ -192,7 +193,7 @@ func retryAssetIndex(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusInternalServerError, "index_retry_failed")
 			return
 		}
-		_, txErr = deps.AssetService.Events.AppendTx(r.Context(), tx, eventing.Event{OrganizationID: principal.OrganizationID, EventType: "asset.retrieval_projection_requested", AggregateType: "asset_version", AggregateID: versionID, AggregateVersion: 1, PayloadVersion: 1, Payload: map[string]string{"asset_version_id": versionID, "operation": retrieval.ProjectionRebuild}})
+		_, txErr = deps.AssetService.Events.AppendTx(r.Context(), tx, eventing.Event{OrganizationID: principal.OrganizationID, EventType: eventing.EventAssetPublished, AggregateType: "asset", AggregateID: versionID, AggregateVersion: 1, PayloadVersion: eventing.PayloadVersionV1, Payload: eventing.AssetPublishedPayload{AssetID: assetID, VersionID: versionID, WorkspaceID: workspaceID}})
 		if txErr == nil {
 			txErr = tx.Commit(r.Context())
 		} else {

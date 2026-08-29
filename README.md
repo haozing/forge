@@ -6,7 +6,8 @@ Agent Chunzhi 是面向小型团队的内容资产中台。内置 Agent 使用 E
 
 - `cmd/api`：HTTP API、成员会话、Agent 应用、模型接口和运行订阅。
 - `cmd/worker`：River Worker，执行固定 Graph、受限 ReAct、检索投影、转写和附件扫描。
-- `cmd/bootstrap`：初始化组织和首个管理员。
+- `cmd/bootstrap`：初始化组织和首位组织管理员（含内置模型 seed）。
+- `cmd/migrate`：独立迁移器，唯一允许执行 DDL 的进程。
 - `internal/agentruntime`：Eino ChatModel、RAG、ChatModelAgent、Tool Registry、Run Coordinator 和 PostgreSQL CheckPointStore。
 - `internal/workflows`：资产整理、发布、归档、导入、重建索引、转写和 Note 同步固定 Graph。
 - PostgreSQL：业务数据、PGroonga/pgvector、River、Outbox、运行状态、事件和加密 checkpoint。
@@ -14,19 +15,30 @@ Agent Chunzhi 是面向小型团队的内容资产中台。内置 Agent 使用 E
 
 模型配置与 Agent 应用分离：每个 AgentApplication 绑定一个 ModelEndpoint，因此多个应用可以使用不同的 Base URL、API Key、模型和推理参数，也可以共享一个 endpoint。一次运行只选择一个应用，不做多 Agent 委派或协作。
 
-## 本地启动
+## 阶段 0-6 开发基线（v2）
 
-要求 Go 1.27.0、Docker Compose 和支持 `pgcrypto`、PGroonga、pgvector 的 PostgreSQL（Compose 会自动构建数据库镜像）。
+v2 实施处于首次共享部署前：只支持**可破坏重建的空库**开发方式。阶段 0 至阶段 6 期间禁止连接共享或生产数据库；每次基线变化后必须重建开发/测试数据库，不保留旧数据。迁移由独立的 `cmd/migrate`（owner 角色，`DATABASE_MIGRATION_URL`）执行；API/worker 使用受限运行角色（`DATABASE_URL`）只校验 schema 契约，不执行 DDL 或 seed。
 
 ```powershell
 Copy-Item .env.example .env
 # 编辑 .env，填写 POSTGRES_PASSWORD、SEARCH_CURSOR_SECRET 和两组加密密钥；OSS 不使用时可留空
-docker compose up --build -d
+
+# 首次或基线变化后：从空库重建（破坏性，只作用于显式指定的开发库）
+docker compose up -d postgres
+./scripts/reset-v2-database.ps1 -Database agentchunzhi -ConfirmReset
+
+# 创建组织与首位组织管理员（bootstrap 只创建数据，不执行迁移）
+$env:ORG_SLUG="acme"; $env:ORG_NAME="Acme"; $env:ADMIN_EMAIL="admin@example.com"
+$env:ADMIN_DISPLAY_NAME="Admin"; $env:ADMIN_PASSWORD="..."
+docker compose run --rm migrate
+go run ./cmd/bootstrap
+
+docker compose up --build -d api worker
 docker compose ps
 curl.exe http://127.0.0.1:8080/readyz
 ```
 
-Compose 只启动 `postgres`、`api`、`worker` 和 `clamav`，API/Worker 使用同一迁移目录、ModelRegistry 和 CheckPointStore。迁移会在启动时自动加锁执行。生产环境必须覆盖数据库密码和加密根，并为 ModelEndpoint 配置 HTTPS Base URL 与主机 allowlist。
+生产环境必须覆盖数据库密码、加密根和 secret manager 注入的限流/投递密钥，并为 ModelEndpoint 配置 HTTPS Base URL 与主机 allowlist。
 
 首次初始化管理员：
 

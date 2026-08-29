@@ -73,7 +73,7 @@ func assetVersionProcessing(deps Dependencies) http.HandlerFunc {
 
 func loadAssetLineageVersions(r *http.Request, deps Dependencies, organizationID, assetID string) ([]map[string]any, error) {
 	rows, err := deps.Store.Pool.Query(r.Context(), `
-		SELECT id::text, version_no, workflow_status, quality, title, markdown,
+		SELECT id::text, version_no, origin, confirmation_status, title, markdown,
 		       source_raw_input_id::text, parent_version_id::text, content_checksum, created_at::text
 		FROM asset.asset_versions
 		WHERE organization_id = $1::uuid AND asset_id = $2::uuid
@@ -90,7 +90,7 @@ func loadAssetLineageVersions(r *http.Request, deps Dependencies, organizationID
 		if err := rows.Scan(&id, &versionNo, &status, &quality, &title, &markdown, &rawID, &parentID, &checksum, &created); err != nil {
 			return nil, err
 		}
-		items = append(items, map[string]any{"id": id, "version_no": versionNo, "workflow_status": status, "quality": quality, "title": title, "markdown": markdown, "source_raw_input_id": rawID, "parent_version_id": parentID, "content_checksum": checksum, "created_at": created})
+		items = append(items, map[string]any{"id": id, "version_no": versionNo, "origin": status, "confirmation_status": quality, "title": title, "markdown": markdown, "source_raw_input_id": rawID, "parent_version_id": parentID, "content_checksum": checksum, "created_at": created})
 	}
 	return items, rows.Err()
 }

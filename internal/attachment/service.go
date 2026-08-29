@@ -1,3 +1,8 @@
+// Package attachment implements the v2 standalone attachment model: files are
+// uploaded workspace-scoped first, scanned asynchronously, and only bound to
+// drafts (asset.asset_draft_attachments) and, through a commit transaction, to
+// sealed versions (asset.asset_version_attachments). Attachments never carry
+// an asset_version_id of their own.
 package attachment
 
 import (
@@ -18,58 +23,36 @@ import (
 	"agentchunzhi/internal/objectstore"
 	"agentchunzhi/internal/store"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
 
 var ErrNotFound = errors.New("attachment not found")
 var ErrInvalidUpload = errors.New("invalid attachment upload")
 var ErrUploadTooLarge = errors.New("attachment is too large")
+var ErrForbidden = errors.New("attachment access denied")
+var ErrNotClean = errors.New("attachment is not clean")
 
 type Service struct {
 	Store        *store.Store
-	Events       eventing.EventStore
+	Events       *eventing.EventStore
 	Objects      objectstore.ObjectStore
 	ObjectPrefix string
 	MaxBytes     int64
 }
 
-type UploadInput struct {
-	AssetVersionID string
-	Filename       string
-	MediaType      string
-	Size           int64
-	Body           io.ReadSeeker
-}
-
-type UploadResult struct {
-	ID             string    `json:"id"`
-	AssetVersionID string    `json:"asset_version_id"`
-	Filename       string    `json:"filename"`
-	MediaType      string    `json:"media_type"`
-	ByteSize       int64     `json:"size"`
-	SHA256         string    `json:"checksum"`
-	ScanStatus     string    `json:"scan_status"`
-	Status         string    `json:"status"`
-	CreatedBy      string    `json:"created_by"`
-	CreatedAt      time.Time `json:"created_at"`
-}
-
-type StatusResult struct {
-	ID             string    `json:"id"`
-	AssetVersionID string    `json:"asset_version_id"`
-	Filename       string    `json:"filename"`
-	MediaType      string    `json:"media_type"`
-	ByteSize       int64     `json:"size"`
-	SHA256         string    `json:"checksum"`
-	ScanStatus     string    `json:"scan_status"`
-	Status         string    `json:"status"`
-	CreatedBy      string    `json:"created_by"`
-	CreatedAt      time.Time `json:"created_at"`
-}
-
-type LinkInput struct {
-	AttachmentID   string
-	AssetVersionID string
+// Attachment is the metadata projection of asset.attachments. ObjectKey is
+// deliberately not part of the API surface.
+type Attachment struct {
+	ID          string    `json:"id"`
+	WorkspaceID string    `json:"workspace_id"`
+	Filename    string    `json:"filename"`
+	MediaType   string    `json:"media_type"`
+	ByteSize    int64     `json:"size"`
+	SHA256      string    `json:"checksum"`
+	Status      string    `json:"status"`
+	CreatedBy   string    `json:"created_by"`
+	CreatedAt   time.Time `json:"created_at"`
 }
 
 type Download struct {
@@ -80,148 +63,316 @@ type Download struct {
 	ETag          string
 }
 
-// Status performs the same model-scope check used by attachment upload. It
-// returns attachment metadata only, never an OSS key or provider URL.
-func (s Service) Status(ctx context.Context, principal auth.Principal, attachmentID string, allowedModelIDs []string) (StatusResult, error) {
-	if len(allowedModelIDs) == 0 {
-		return StatusResult{}, ErrNotFound
-	}
+func (s Service) validateStore() error {
 	if s.Store == nil || s.Store.Pool == nil {
-		return StatusResult{}, errors.New("database store is not initialized")
+		return errors.New("database store is not initialized")
 	}
-	var result StatusResult
+	return nil
+}
+
+// requireWorkspaceMember ensures the principal is a non-viewer member of the
+// workspace the attachment operation targets.
+func (s Service) requireWorkspaceMember(ctx context.Context, principal auth.Principal, workspaceID string) error {
+	if err := s.validateStore(); err != nil {
+		return err
+	}
+	var allowed bool
+	if err := s.Store.Pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM content.workspace_members
+			WHERE organization_id = $1::uuid AND workspace_id = $2::uuid
+			  AND user_id = $3::uuid AND role <> 'viewer'
+		)
+	`, principal.OrganizationID, workspaceID, principal.UserID).Scan(&allowed); err != nil {
+		return fmt.Errorf("check workspace membership: %w", err)
+	}
+	if !allowed {
+		return ErrForbidden
+	}
+	return nil
+}
+
+// Upload records a standalone attachment, transfers it to the object store and
+// queues the scan pipeline. The attachment is never bound to an asset version
+// here; callers attach it to an asset draft through Link.
+func (s Service) Upload(ctx context.Context, principal auth.Principal, workspaceID string, filename, mediaType string, size int64, reader io.ReadSeeker) (Attachment, error) {
+	if reader == nil || size < 0 || !validID(workspaceID) {
+		return Attachment{}, ErrInvalidUpload
+	}
+	if err := s.validateStore(); err != nil {
+		return Attachment{}, err
+	}
+	if s.Objects == nil {
+		return Attachment{}, errors.New("object store is not initialized")
+	}
+	maxBytes := s.MaxBytes
+	if maxBytes <= 0 {
+		maxBytes = 50 * 1024 * 1024
+	}
+	if size > maxBytes {
+		return Attachment{}, ErrUploadTooLarge
+	}
+	cleanName, err := cleanFilename(filename)
+	if err != nil {
+		return Attachment{}, err
+	}
+	cleanType, err := cleanMediaType(mediaType, cleanName)
+	if err != nil {
+		return Attachment{}, err
+	}
+	if err := s.requireWorkspaceMember(ctx, principal, workspaceID); err != nil {
+		return Attachment{}, err
+	}
+	if _, err := reader.Seek(0, io.SeekStart); err != nil {
+		return Attachment{}, fmt.Errorf("rewind attachment: %w", err)
+	}
+	hash := sha256.New()
+	bytesRead, err := io.Copy(hash, reader)
+	if err != nil {
+		return Attachment{}, fmt.Errorf("hash attachment: %w", err)
+	}
+	if bytesRead != size {
+		return Attachment{}, ErrInvalidUpload
+	}
+	if _, err := reader.Seek(0, io.SeekStart); err != nil {
+		return Attachment{}, fmt.Errorf("rewind attachment for OSS: %w", err)
+	}
+	sha256Hex := hex.EncodeToString(hash.Sum(nil))
+	objectID := uuid.NewString()
+	objectKey := buildObjectKey(s.ObjectPrefix, principal.OrganizationID, objectID)
+
+	var attachmentID, createdAt string
+	if err := s.Store.Pool.QueryRow(ctx, `
+		INSERT INTO asset.attachments
+			(organization_id, workspace_id, uploader_user_id, object_key, original_filename,
+			 media_type, byte_size, sha256, status, expires_at)
+		VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7, $8, 'uploading', now() + interval '24 hours')
+		RETURNING id::text, created_at::text
+	`, principal.OrganizationID, workspaceID, principal.UserID, objectKey, cleanName, cleanType, size, sha256Hex).Scan(&attachmentID, &createdAt); err != nil {
+		return Attachment{}, fmt.Errorf("record attachment metadata: %w", err)
+	}
+	if _, err := s.Objects.Put(ctx, objectstore.Object{
+		Key:           objectKey,
+		Body:          reader,
+		ContentType:   cleanType,
+		ContentLength: size,
+	}); err != nil {
+		s.markFailed(ctx, principal.OrganizationID, attachmentID)
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = s.Objects.Delete(cleanupCtx, objectstore.ObjectRef{Key: objectKey})
+		return Attachment{}, fmt.Errorf("store attachment object: %w", err)
+	}
+	if err := s.markScanning(ctx, principal, workspaceID, attachmentID); err != nil {
+		return Attachment{}, err
+	}
+	created := parseTime(createdAt)
+	return Attachment{
+		ID:          attachmentID,
+		WorkspaceID: workspaceID,
+		Filename:    cleanName,
+		MediaType:   cleanType,
+		ByteSize:    size,
+		SHA256:      sha256Hex,
+		Status:      "scanning",
+		CreatedBy:   principal.UserID,
+		CreatedAt:   created,
+	}, nil
+}
+
+// markScanning flips the uploaded attachment into the scanning state and emits
+// the attachment.created fact in the same transaction.
+func (s Service) markScanning(ctx context.Context, principal auth.Principal, workspaceID, attachmentID string) error {
+	tx, err := s.Store.Pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin attachment transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	tag, err := tx.Exec(ctx, `
+		UPDATE asset.attachments SET status = 'scanning', updated_at = now()
+		WHERE organization_id = $1::uuid AND id = $2::uuid AND status = 'uploading'
+	`, principal.OrganizationID, attachmentID)
+	if err != nil {
+		return fmt.Errorf("update attachment status: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	if s.Events == nil {
+		return errors.New("event store is not initialized")
+	}
+	if _, err := s.Events.AppendTx(ctx, tx, eventing.Event{
+		OrganizationID:   principal.OrganizationID,
+		WorkspaceID:      workspaceID,
+		EventType:        "attachment.created",
+		AggregateType:    "attachment",
+		AggregateID:      attachmentID,
+		AggregateVersion: 1,
+		PayloadVersion:   1,
+		Actor:            eventing.ActorFromPrincipal(principal),
+		Payload: map[string]string{
+			"attachment_id": attachmentID,
+		},
+	}); err != nil {
+		return fmt.Errorf("enqueue attachment scan: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit attachment transaction: %w", err)
+	}
+	return nil
+}
+
+func (s Service) markFailed(ctx context.Context, organizationID, attachmentID string) {
+	if s.Store == nil || s.Store.Pool == nil {
+		return
+	}
+	_, _ = s.Store.Pool.Exec(ctx, `
+		UPDATE asset.attachments SET status = 'failed', updated_at = now()
+		WHERE organization_id = $1::uuid AND id = $2::uuid
+	`, organizationID, attachmentID)
+}
+
+// Status returns attachment metadata for workspace members only. It never
+// exposes an OSS key or provider URL.
+func (s Service) Status(ctx context.Context, principal auth.Principal, attachmentID string) (Attachment, error) {
+	if !validID(attachmentID) {
+		return Attachment{}, ErrNotFound
+	}
+	if err := s.validateStore(); err != nil {
+		return Attachment{}, err
+	}
+	var result Attachment
 	err := s.Store.Pool.QueryRow(ctx, `
-		SELECT at.id::text, at.asset_version_id::text, at.original_filename,
-		       at.media_type, at.byte_size, at.sha256, at.scan_status,
-		       at.created_by::text, at.created_at
+		SELECT at.id::text, at.workspace_id::text, at.original_filename,
+		       at.media_type, at.byte_size, at.sha256, at.status,
+		       at.uploader_user_id::text, at.created_at
 		FROM asset.attachments at
-		JOIN asset.asset_versions av ON av.id = at.asset_version_id
-		JOIN asset.assets a ON a.id = av.asset_id
-		JOIN asset.asset_versions working_version ON working_version.id = a.current_working_version_id
 		WHERE at.id = $1::uuid
 		  AND at.deleted_at IS NULL
 		  AND at.organization_id = $2::uuid
-		  AND a.organization_id = $2::uuid
-		  AND a.resource_model_id::text = ANY($3::text[])
-		AND (
-			(working_version.workflow_status IN ('draft', 'submitted') AND EXISTS (
-				WITH RECURSIVE version_lineage AS (
-					SELECT a.current_working_version_id AS id
-					UNION ALL
-					SELECT parent.parent_version_id
-					FROM asset.asset_versions parent
-					JOIN version_lineage child ON parent.id = child.id
-					WHERE parent.parent_version_id IS NOT NULL
-				)
-				SELECT 1 FROM version_lineage WHERE id = at.asset_version_id
-			))
-			OR (a.publication_status = 'published' AND EXISTS (
-				WITH RECURSIVE version_lineage AS (
-					SELECT a.current_published_version_id AS id
-					UNION ALL
-					SELECT parent.parent_version_id
-					FROM asset.asset_versions parent
-					JOIN version_lineage child ON parent.id = child.id
-					WHERE parent.parent_version_id IS NOT NULL
-				)
-				SELECT 1 FROM version_lineage WHERE id = at.asset_version_id
-			))
-		)
-	`, attachmentID, principal.OrganizationID, allowedModelIDs).Scan(
+		  AND EXISTS (
+			SELECT 1 FROM content.workspace_members wm
+			WHERE wm.organization_id = at.organization_id
+			  AND wm.workspace_id = at.workspace_id
+			  AND wm.user_id = $3::uuid
+		  )
+	`, attachmentID, principal.OrganizationID, principal.UserID).Scan(
 		&result.ID,
-		&result.AssetVersionID,
+		&result.WorkspaceID,
 		&result.Filename,
 		&result.MediaType,
 		&result.ByteSize,
 		&result.SHA256,
-		&result.ScanStatus,
+		&result.Status,
 		&result.CreatedBy,
 		&result.CreatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return StatusResult{}, ErrNotFound
+		return Attachment{}, ErrNotFound
 	}
 	if err != nil {
-		return StatusResult{}, fmt.Errorf("authorize attachment status: %w", err)
+		return Attachment{}, fmt.Errorf("authorize attachment status: %w", err)
 	}
-	result.Status = "available"
 	return result, nil
 }
 
-func (s Service) List(ctx context.Context, principal auth.Principal, assetVersionID string, allowedModelIDs []string) ([]StatusResult, error) {
-	if len(allowedModelIDs) == 0 || s.Store == nil || s.Store.Pool == nil {
+// List returns the attachments currently attached to the asset draft.
+func (s Service) List(ctx context.Context, principal auth.Principal, assetID string) ([]Attachment, error) {
+	if !validID(assetID) {
 		return nil, ErrNotFound
 	}
+	if err := s.validateStore(); err != nil {
+		return nil, err
+	}
 	rows, err := s.Store.Pool.Query(ctx, `
-		SELECT at.id::text, at.asset_version_id::text, at.original_filename, at.media_type,
-		       at.byte_size, at.sha256, at.scan_status, at.created_by::text, at.created_at
-		FROM asset.attachments at JOIN asset.asset_versions av ON av.id = at.asset_version_id JOIN asset.assets a ON a.id = av.asset_id
-		WHERE at.organization_id = $1::uuid AND at.asset_version_id = $2::uuid AND at.deleted_at IS NULL AND a.resource_model_id::text = ANY($3::text[])
+		SELECT at.id::text, at.workspace_id::text, at.original_filename, at.media_type,
+		       at.byte_size, at.sha256, at.status, at.uploader_user_id::text, at.created_at
+		FROM asset.attachments at
+		JOIN asset.asset_draft_attachments lda ON lda.organization_id = at.organization_id AND lda.attachment_id = at.id
+		JOIN asset.asset_drafts d ON d.organization_id = lda.organization_id AND d.id = lda.asset_draft_id
+		WHERE d.organization_id = $1::uuid AND d.asset_id = $2::uuid
+		  AND at.deleted_at IS NULL
+		  AND EXISTS (
+			SELECT 1 FROM content.workspace_members wm
+			WHERE wm.organization_id = at.organization_id
+			  AND wm.workspace_id = at.workspace_id
+			  AND wm.user_id = $3::uuid
+		  )
 		ORDER BY at.created_at DESC, at.id
-	`, principal.OrganizationID, assetVersionID, allowedModelIDs)
+	`, principal.OrganizationID, assetID, principal.UserID)
 	if err != nil {
 		return nil, fmt.Errorf("list attachment metadata: %w", err)
 	}
 	defer rows.Close()
-	items := make([]StatusResult, 0)
+	items := make([]Attachment, 0)
 	for rows.Next() {
-		var item StatusResult
-		if err := rows.Scan(&item.ID, &item.AssetVersionID, &item.Filename, &item.MediaType, &item.ByteSize, &item.SHA256, &item.ScanStatus, &item.CreatedBy, &item.CreatedAt); err != nil {
+		var item Attachment
+		if err := rows.Scan(&item.ID, &item.WorkspaceID, &item.Filename, &item.MediaType, &item.ByteSize, &item.SHA256, &item.Status, &item.CreatedBy, &item.CreatedAt); err != nil {
 			return nil, err
 		}
-		item.Status = "available"
 		items = append(items, item)
 	}
 	return items, rows.Err()
 }
 
-// UpdateFilename changes attachment metadata only while the attachment is on
-// the asset's current draft working version. Published attachment metadata is
-// immutable and must be changed by creating a new working version.
-func (s Service) UpdateFilename(ctx context.Context, principal auth.Principal, attachmentID, filename string, allowedModelIDs []string) (StatusResult, error) {
-	if len(allowedModelIDs) == 0 || s.Store == nil || s.Store.Pool == nil {
-		return StatusResult{}, ErrNotFound
+// UpdateFilename changes attachment metadata while it is still unbound; once
+// an attachment is materialized into a sealed version its provenance is
+// immutable and a new upload is required.
+func (s Service) UpdateFilename(ctx context.Context, principal auth.Principal, attachmentID, filename string) (Attachment, error) {
+	if !validID(attachmentID) {
+		return Attachment{}, ErrNotFound
+	}
+	if err := s.validateStore(); err != nil {
+		return Attachment{}, err
 	}
 	cleaned, err := cleanFilename(filename)
 	if err != nil {
-		return StatusResult{}, err
+		return Attachment{}, err
 	}
 	tag, err := s.Store.Pool.Exec(ctx, `
 		UPDATE asset.attachments at
-		SET original_filename = $1
-		FROM asset.asset_versions av
-		JOIN asset.assets a ON a.id = av.asset_id
-		WHERE at.id = $2::uuid
-		  AND at.asset_version_id = av.id
-		  AND at.organization_id = $3::uuid
-		  AND a.organization_id = $3::uuid
+		SET original_filename = $3, updated_at = now()
+		WHERE at.organization_id = $1::uuid AND at.id = $2::uuid
 		  AND at.deleted_at IS NULL
-		  AND a.current_working_version_id = av.id
-		  AND av.workflow_status = 'draft'
-		  AND a.resource_model_id::text = ANY($4::text[])
-	`, cleaned, attachmentID, principal.OrganizationID, allowedModelIDs)
+		  AND at.uploader_user_id = $4::uuid
+		  AND NOT EXISTS (
+			SELECT 1 FROM asset.asset_version_attachments lva WHERE lva.attachment_id = at.id
+		  )
+	`, principal.OrganizationID, attachmentID, cleaned, principal.UserID)
 	if err != nil {
-		return StatusResult{}, fmt.Errorf("update attachment filename: %w", err)
+		return Attachment{}, fmt.Errorf("update attachment filename: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return StatusResult{}, ErrNotFound
+		return Attachment{}, ErrNotFound
 	}
-	return s.Status(ctx, principal, attachmentID, allowedModelIDs)
+	return s.Status(ctx, principal, attachmentID)
 }
 
-func (s Service) Delete(ctx context.Context, principal auth.Principal, attachmentID string, allowedModelIDs []string) error {
-	if len(allowedModelIDs) == 0 || s.Store == nil || s.Store.Pool == nil {
+// Delete soft-deletes an unbound attachment and removes its object. Version
+// provenance stays intact; the object itself is retained for sealed versions.
+func (s Service) Delete(ctx context.Context, principal auth.Principal, attachmentID string) error {
+	if !validID(attachmentID) {
 		return ErrNotFound
 	}
+	if err := s.validateStore(); err != nil {
+		return err
+	}
 	var objectKey string
-	err := s.Store.Pool.QueryRow(ctx, `SELECT at.object_key FROM asset.attachments at JOIN asset.asset_versions av ON av.id = at.asset_version_id JOIN asset.assets a ON a.id = av.asset_id WHERE at.id = $1::uuid AND at.organization_id = $2::uuid AND at.deleted_at IS NULL AND a.resource_model_id::text = ANY($3::text[])`, attachmentID, principal.OrganizationID, allowedModelIDs).Scan(&objectKey)
+	err := s.Store.Pool.QueryRow(ctx, `
+		UPDATE asset.attachments at
+		SET deleted_at = now(), updated_at = now()
+		WHERE at.organization_id = $1::uuid AND at.id = $2::uuid
+		  AND at.deleted_at IS NULL
+		  AND at.uploader_user_id = $3::uuid
+		  AND NOT EXISTS (
+			SELECT 1 FROM asset.asset_version_attachments lva WHERE lva.attachment_id = at.id
+		  )
+		RETURNING at.object_key
+	`, principal.OrganizationID, attachmentID, principal.UserID).Scan(&objectKey)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrNotFound
 	}
 	if err != nil {
-		return fmt.Errorf("load attachment for delete: %w", err)
-	}
-	if _, err := s.Store.Pool.Exec(ctx, `UPDATE asset.attachments SET deleted_at = now() WHERE id = $1::uuid AND organization_id = $2::uuid`, attachmentID, principal.OrganizationID); err != nil {
 		return fmt.Errorf("soft delete attachment: %w", err)
 	}
 	if s.Objects != nil && objectKey != "" {
@@ -232,24 +383,47 @@ func (s Service) Delete(ctx context.Context, principal auth.Principal, attachmen
 	return nil
 }
 
-func (s Service) Link(ctx context.Context, principal auth.Principal, input LinkInput, allowedModelIDs []string) error {
-	if len(allowedModelIDs) == 0 || s.Store == nil || s.Store.Pool == nil {
+// Link attaches a clean attachment to the asset's shared draft. The binding is
+// materialized into versions only through a commit transaction.
+func (s Service) Link(ctx context.Context, principal auth.Principal, attachmentID, assetID string) error {
+	if !validID(attachmentID) || !validID(assetID) {
 		return ErrNotFound
 	}
-	if _, err := s.Store.Pool.Exec(ctx, `INSERT INTO asset.attachment_links (attachment_id, asset_version_id, created_by) SELECT $1::uuid, $2::uuid, $3::uuid WHERE EXISTS (SELECT 1 FROM asset.attachments at JOIN asset.asset_versions av ON av.id = at.asset_version_id JOIN asset.assets a ON a.id = av.asset_id WHERE at.id = $1::uuid AND at.organization_id = $4::uuid AND at.deleted_at IS NULL AND a.resource_model_id::text = ANY($5::text[])) AND EXISTS (SELECT 1 FROM asset.asset_versions av JOIN asset.assets a ON a.id = av.asset_id WHERE av.id = $2::uuid AND a.organization_id = $4::uuid AND a.resource_model_id::text = ANY($5::text[])) ON CONFLICT DO NOTHING`, input.AttachmentID, input.AssetVersionID, principal.UserID, principal.OrganizationID, allowedModelIDs); err != nil {
+	if err := s.validateStore(); err != nil {
+		return err
+	}
+	tag, err := s.Store.Pool.Exec(ctx, `
+		INSERT INTO asset.asset_draft_attachments
+			(organization_id, workspace_id, asset_draft_id, attachment_id, added_by)
+		SELECT d.organization_id, d.workspace_id, d.id, at.id, $3::uuid
+		FROM asset.attachments at
+		JOIN asset.asset_drafts d ON d.organization_id = at.organization_id AND d.workspace_id = at.workspace_id
+		JOIN asset.assets a ON a.organization_id = d.organization_id AND a.id = d.asset_id
+		WHERE at.organization_id = $1::uuid AND at.id = $2::uuid
+		  AND a.id = $4::uuid
+		  AND at.deleted_at IS NULL AND at.status = 'clean'
+		  AND (at.expires_at IS NULL OR at.expires_at > now())
+		ON CONFLICT (asset_draft_id, attachment_id) DO NOTHING
+	`, principal.OrganizationID, attachmentID, principal.UserID, assetID)
+	if err != nil {
 		return fmt.Errorf("link attachment: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
 	}
 	return nil
 }
 
 // OpenDownload performs the final database authorization check before opening
-// the provider stream. Callers never receive an OSS URL.
-func (s Service) OpenDownload(ctx context.Context, principal auth.Principal, attachmentID string, allowedModelIDs []string, outlet string) (Download, error) {
-	if len(allowedModelIDs) == 0 {
+// the provider stream. Workspace members may download; anyone else only when
+// the attachment is materialized on the current published version of a public
+// asset. Callers never receive an OSS URL.
+func (s Service) OpenDownload(ctx context.Context, principal auth.Principal, attachmentID string) (Download, error) {
+	if !validID(attachmentID) {
 		return Download{}, ErrNotFound
 	}
-	if s.Store == nil || s.Store.Pool == nil {
-		return Download{}, errors.New("database store is not initialized")
+	if err := s.validateStore(); err != nil {
+		return Download{}, err
 	}
 	if s.Objects == nil {
 		return Download{}, errors.New("object store is not initialized")
@@ -259,42 +433,30 @@ func (s Service) OpenDownload(ctx context.Context, principal auth.Principal, att
 	err := s.Store.Pool.QueryRow(ctx, `
 		SELECT at.object_key, at.original_filename, at.media_type, at.byte_size
 		FROM asset.attachments at
-		JOIN asset.asset_versions source_version ON source_version.id = at.asset_version_id
-		JOIN asset.assets a ON a.id = source_version.asset_id
-		JOIN asset.asset_versions published_version ON published_version.id = a.current_published_version_id
-		JOIN model.resource_model_versions mv ON mv.id = published_version.resource_model_version_id
 		WHERE at.id = $1::uuid
 		  AND at.deleted_at IS NULL
-		  AND at.scan_status = 'clean'
+		  AND at.status = 'clean'
 		  AND at.organization_id = $2::uuid
-		  AND a.organization_id = $2::uuid
-		  AND a.resource_model_id::text = ANY($3::text[])
-		  AND a.publication_status = 'published'
-		  AND EXISTS (
-			WITH RECURSIVE version_lineage AS (
-				SELECT a.current_published_version_id AS id
-				UNION ALL
-				SELECT parent.parent_version_id
-				FROM asset.asset_versions parent
-				JOIN version_lineage child ON parent.id = child.id
-				WHERE parent.parent_version_id IS NOT NULL
+		  AND (
+			EXISTS (
+				SELECT 1 FROM content.workspace_members wm
+				WHERE wm.organization_id = at.organization_id
+				  AND wm.workspace_id = at.workspace_id
+				  AND wm.user_id = $3::uuid
 			)
-			SELECT 1 FROM version_lineage WHERE id = at.asset_version_id
-		)
-		  AND COALESCE(NULLIF(mv.policy #>> ARRAY['outlets', $4::text, 'enabled'], '')::boolean, false)
-		  AND CASE published_version.quality
-				WHEN 'raw' THEN 1
-				WHEN 'ai_generated' THEN 2
-				WHEN 'human_confirmed' THEN 3
-				WHEN 'human_confirmed' THEN 3
-			END >= CASE COALESCE(NULLIF(mv.policy #>> ARRAY['outlets', $4::text, 'min_quality'], ''), 'raw')
-				WHEN 'raw' THEN 1
-				WHEN 'ai_generated' THEN 2
-				WHEN 'human_confirmed' THEN 3
-				WHEN 'human_confirmed' THEN 3
-			ELSE 99
-			END
-		`, attachmentID, principal.OrganizationID, allowedModelIDs, outlet).Scan(&objectKey, &filename, &mediaType, &byteSize)
+			OR EXISTS (
+				SELECT 1
+				FROM asset.asset_version_attachments lva
+				JOIN asset.asset_versions v ON v.organization_id = lva.organization_id AND v.id = lva.asset_version_id
+				JOIN asset.assets a ON a.organization_id = v.organization_id AND a.id = v.asset_id
+				WHERE lva.attachment_id = at.id
+				  AND a.current_published_version_id = v.id
+				  AND a.publication_status = 'published'
+				  AND a.deleted_at IS NULL
+				  AND a.visibility = 'public'
+			)
+		  )
+	`, attachmentID, principal.OrganizationID, principal.UserID).Scan(&objectKey, &filename, &mediaType, &byteSize)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Download{}, ErrNotFound
 	}
@@ -324,127 +486,12 @@ func (s Service) OpenDownload(ctx context.Context, principal auth.Principal, att
 	}, nil
 }
 
-func (s Service) Upload(ctx context.Context, principal auth.Principal, allowedModelIDs []string, input UploadInput) (UploadResult, error) {
-	if len(allowedModelIDs) == 0 {
-		return UploadResult{}, ErrNotFound
-	}
-	if s.Store == nil || s.Store.Pool == nil {
-		return UploadResult{}, errors.New("database store is not initialized")
-	}
-	if s.Objects == nil {
-		return UploadResult{}, errors.New("object store is not initialized")
-	}
-	if input.Body == nil || input.Size < 0 {
-		return UploadResult{}, ErrInvalidUpload
-	}
-	maxBytes := s.MaxBytes
-	if maxBytes <= 0 {
-		maxBytes = 50 * 1024 * 1024
-	}
-	if input.Size > maxBytes {
-		return UploadResult{}, ErrUploadTooLarge
-	}
-	filename, err := cleanFilename(input.Filename)
+func parseTime(value string) time.Time {
+	parsed, err := time.Parse(time.RFC3339Nano, value)
 	if err != nil {
-		return UploadResult{}, err
+		return time.Now().UTC()
 	}
-	mediaType, err := cleanMediaType(input.MediaType, filename)
-	if err != nil {
-		return UploadResult{}, err
-	}
-	var attachmentID string
-	err = s.Store.Pool.QueryRow(ctx, `
-		SELECT gen_random_uuid()::text
-		FROM asset.asset_versions av
-		JOIN asset.assets a ON a.id = av.asset_id
-		WHERE av.id = $1::uuid
-		  AND av.organization_id = $2::uuid
-		  AND a.organization_id = $2::uuid
-		  AND a.current_working_version_id = av.id
-		  AND a.resource_model_id::text = ANY($3::text[])
-		  AND av.workflow_status = 'draft'
-	`, input.AssetVersionID, principal.OrganizationID, allowedModelIDs).Scan(&attachmentID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return UploadResult{}, ErrNotFound
-	}
-	if err != nil {
-		return UploadResult{}, fmt.Errorf("authorize attachment upload: %w", err)
-	}
-	if _, err := input.Body.Seek(0, io.SeekStart); err != nil {
-		return UploadResult{}, fmt.Errorf("rewind attachment: %w", err)
-	}
-	hash := sha256.New()
-	bytesRead, err := io.Copy(hash, input.Body)
-	if err != nil {
-		return UploadResult{}, fmt.Errorf("hash attachment: %w", err)
-	}
-	if bytesRead != input.Size {
-		return UploadResult{}, ErrInvalidUpload
-	}
-	if _, err := input.Body.Seek(0, io.SeekStart); err != nil {
-		return UploadResult{}, fmt.Errorf("rewind attachment for OSS: %w", err)
-	}
-	sha256Hex := hex.EncodeToString(hash.Sum(nil))
-	objectKey := buildObjectKey(s.ObjectPrefix, principal.OrganizationID, attachmentID)
-	if _, err := s.Objects.Put(ctx, objectstore.Object{
-		Key:           objectKey,
-		Body:          input.Body,
-		ContentType:   mediaType,
-		ContentLength: input.Size,
-	}); err != nil {
-		return UploadResult{}, fmt.Errorf("store attachment object: %w", err)
-	}
-	result := UploadResult{
-		ID:             attachmentID,
-		AssetVersionID: input.AssetVersionID,
-		Filename:       filename,
-		MediaType:      mediaType,
-		ByteSize:       input.Size,
-		SHA256:         sha256Hex,
-		ScanStatus:     "pending",
-		Status:         "available",
-		CreatedBy:      principal.UserID,
-		CreatedAt:      time.Now().UTC(),
-	}
-	if err := s.persistUpload(ctx, principal, result, objectKey); err != nil {
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = s.Objects.Delete(cleanupCtx, objectstore.ObjectRef{Key: objectKey})
-		return UploadResult{}, err
-	}
-	return result, nil
-}
-
-func (s Service) persistUpload(ctx context.Context, principal auth.Principal, result UploadResult, objectKey string) error {
-	tx, err := s.Store.Pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("begin attachment transaction: %w", err)
-	}
-	defer tx.Rollback(ctx)
-	if _, err := tx.Exec(ctx, `
-		INSERT INTO asset.attachments
-			(id, organization_id, asset_version_id, object_key, original_filename, media_type, byte_size, sha256, created_by)
-		VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7, $8, $9::uuid)
-	`, result.ID, principal.OrganizationID, result.AssetVersionID, objectKey, result.Filename, result.MediaType, result.ByteSize, result.SHA256, principal.UserID); err != nil {
-		return fmt.Errorf("record attachment metadata: %w", err)
-	}
-	if _, err := s.Events.AppendTx(ctx, tx, eventing.Event{
-		OrganizationID:   principal.OrganizationID,
-		EventType:        "attachment.created",
-		AggregateType:    "attachment",
-		AggregateID:      result.ID,
-		AggregateVersion: 1,
-		PayloadVersion:   1,
-		Payload: map[string]string{
-			"attachment_id": result.ID,
-		},
-	}); err != nil {
-		return fmt.Errorf("enqueue attachment scan: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit attachment transaction: %w", err)
-	}
-	return nil
+	return parsed
 }
 
 func cleanFilename(value string) (string, error) {
@@ -482,4 +529,23 @@ func buildObjectKey(prefix, organizationID, attachmentID string) string {
 		return organizationID + "/" + attachmentID
 	}
 	return prefix + "/" + organizationID + "/" + attachmentID
+}
+
+func validID(value string) bool {
+	value = strings.TrimSpace(value)
+	if len(value) != 36 {
+		return false
+	}
+	for index, char := range value {
+		if index == 8 || index == 13 || index == 18 || index == 23 {
+			if char != '-' {
+				return false
+			}
+			continue
+		}
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') && (char < 'A' || char > 'F') {
+			return false
+		}
+	}
+	return true
 }

@@ -15,51 +15,31 @@ type fieldPredicate struct {
 }
 
 type filterPlan struct {
-	QualityGTE string
-	Fields     []fieldPredicate
-	Tags       []fieldPredicate
+	Fields []fieldPredicate
 }
 
 func parseFilterPlan(filters map[string]any) (filterPlan, error) {
-	plan := filterPlan{QualityGTE: "raw", Fields: []fieldPredicate{}, Tags: []fieldPredicate{}}
+	plan := filterPlan{Fields: []fieldPredicate{}}
 	for key := range filters {
-		if key != "quality_gte" && key != "fields" && key != "tags" {
+		if key != "fields" {
 			return filterPlan{}, fmt.Errorf("%w: unsupported filter %q", ErrInvalidQuery, key)
 		}
-	}
-	if value, ok := filters["quality_gte"]; ok {
-		quality, ok := value.(string)
-		if !ok || qualityRank(quality) == 0 {
-			return filterPlan{}, fmt.Errorf("%w: invalid quality_gte", ErrInvalidQuery)
-		}
-		plan.QualityGTE = quality
 	}
 	if rawFields, ok := filters["fields"]; ok {
 		fields, ok := rawFields.(map[string]any)
 		if !ok || len(fields) > 20 {
 			return filterPlan{}, fmt.Errorf("%w: fields must contain at most 20 fields", ErrInvalidQuery)
 		}
-		predicates, err := parsePredicates(fields, false)
+		predicates, err := parsePredicates(fields)
 		if err != nil {
 			return filterPlan{}, err
 		}
 		plan.Fields = predicates
 	}
-	if rawTags, ok := filters["tags"]; ok {
-		operation, ok := rawTags.(map[string]any)
-		if !ok {
-			return filterPlan{}, fmt.Errorf("%w: tags must be an operator object", ErrInvalidQuery)
-		}
-		predicates, err := parsePredicates(map[string]any{"tags": operation}, true)
-		if err != nil {
-			return filterPlan{}, err
-		}
-		plan.Tags = predicates
-	}
 	return plan, nil
 }
 
-func parsePredicates(fields map[string]any, tags bool) ([]fieldPredicate, error) {
+func parsePredicates(fields map[string]any) ([]fieldPredicate, error) {
 	names := make([]string, 0, len(fields))
 	for name := range fields {
 		names = append(names, name)
@@ -83,9 +63,6 @@ func parsePredicates(fields map[string]any, tags bool) ([]fieldPredicate, error)
 			value := operations[operator]
 			if !validFilterOperator(operator) {
 				return nil, fmt.Errorf("%w: unsupported operator %q", ErrInvalidQuery, operator)
-			}
-			if tags && operator != "eq" && operator != "neq" && operator != "in" && operator != "contains" && operator != "contains_any" && operator != "exists" {
-				return nil, fmt.Errorf("%w: unsupported tags operator %q", ErrInvalidQuery, operator)
 			}
 			if operator == "in" || operator == "contains_any" {
 				values, ok := value.([]any)
@@ -124,32 +101,6 @@ func (p filterPlan) fieldsJSON() string {
 	return string(encoded)
 }
 
-func (p filterPlan) tagsJSON() string {
-	encoded, _ := json.Marshal(p.Tags)
-	return string(encoded)
-}
-
-func (p filterPlan) allJSON() string {
-	predicates := make([]fieldPredicate, 0, len(p.Fields)+len(p.Tags))
-	predicates = append(predicates, p.Fields...)
-	predicates = append(predicates, p.Tags...)
-	encoded, _ := json.Marshal(predicates)
-	return string(encoded)
-}
-
-func qualityRank(value string) int {
-	switch value {
-	case "raw":
-		return 1
-	case "ai_generated":
-		return 2
-	case "human_confirmed":
-		return 3
-	default:
-		return 0
-	}
-}
-
 func isJSONNumber(value any) bool {
 	switch value.(type) {
 	case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32, float64, json.Number:
@@ -174,7 +125,7 @@ func (s Service) validateFilterFields(ctx context.Context, organizationID string
 			       WHERE field->>'key' = $3
 			   )), false)
 			FROM model.resource_models rm
-			JOIN model.resource_model_versions mv ON mv.id = rm.current_version_id
+			JOIN model.resource_model_versions mv ON mv.organization_id = rm.organization_id AND mv.id = rm.current_version_id
 			WHERE rm.organization_id = $1::uuid AND rm.id = ANY($2::uuid[])
 		`, organizationID, models, predicate.Field).Scan(&allowed); err != nil {
 			return fmt.Errorf("validate filter schema: %w", err)

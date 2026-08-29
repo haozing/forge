@@ -145,7 +145,6 @@ func NewAssetPrepareGraph(extractors ...CandidateExtractor) (Runnable, error) {
 		delete(candidate, "_model_input_tokens")
 		delete(candidate, "_model_output_tokens")
 		candidate["asset_ids"] = append([]string(nil), input.AssetIDs...)
-		candidate["workflow_status"] = "submitted"
 		return Output{WorkflowKey: "asset_prepare", CodeVersion: 1, Candidate: candidate, Values: input.Values, InputTokens: inputTokens, OutputTokens: outputTokens}, nil
 	})); err != nil {
 		return nil, err

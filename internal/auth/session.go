@@ -28,7 +28,12 @@ type SessionService struct {
 type Session struct {
 	Principal
 	Token     string
+	ID        string
 	ExpiresAt time.Time
+	// IdleExpires and AbsoluteExpires are the v2 dual session lifetimes;
+	// ExpiresAt aliases AbsoluteExpires for the legacy cookie writer.
+	IdleExpires     time.Time
+	AbsoluteExpires time.Time
 }
 
 func (s SessionService) Login(ctx context.Context, loginName, password string) (Session, error) {

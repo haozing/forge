@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/csv"
 	"encoding/hex"
@@ -11,11 +12,12 @@ import (
 	"errors"
 	"fmt"
 	"html"
+	"os"
 	"strings"
 
+	"agentchunzhi/internal/auth"
 	"agentchunzhi/internal/eventing"
 	"agentchunzhi/internal/objectstore"
-	"agentchunzhi/internal/retrieval"
 	"agentchunzhi/internal/store"
 
 	"github.com/jackc/pgx/v5"
@@ -26,11 +28,23 @@ var (
 	ErrNoPendingExport = errors.New("no pending export job")
 )
 
+const transferLeaseInterval = "10 minutes"
+
 type TransferProcessor struct {
 	Store        *store.Store
 	Events       eventing.EventStore
 	Objects      objectstore.ObjectStore
 	ObjectPrefix string
+}
+
+// newLeaseOwner renders a per-run lease token so a crashed run's leases can be
+// told apart from live ones (lease_until expiry is what actually frees work).
+func newLeaseOwner() string {
+	buf := make([]byte, 8)
+	if _, err := rand.Read(buf); err != nil {
+		return fmt.Sprintf("transfer-%d", os.Getpid())
+	}
+	return hex.EncodeToString(buf)
 }
 
 func (p TransferProcessor) ProcessNextImport(ctx context.Context) error {
@@ -41,12 +55,17 @@ func (p TransferProcessor) ProcessNextImport(ctx context.Context) error {
 	err := p.Store.Pool.QueryRow(ctx, `
 		WITH next_job AS (
 			SELECT id FROM asset.import_batches
-			WHERE status = 'queued' ORDER BY created_at, id
+			WHERE status = 'queued'
+			   OR (status = 'processing' AND (lease_until IS NULL OR lease_until < now()))
+			ORDER BY created_at, id
 			FOR UPDATE SKIP LOCKED LIMIT 1
 		)
-		UPDATE asset.import_batches b SET status = 'processing', completed_at = NULL
+		UPDATE asset.import_batches b
+		SET status = 'processing', completed_at = NULL,
+		    lease_owner = $1, lease_until = now() + interval '`+transferLeaseInterval+`',
+		    attempt_count = b.attempt_count + 1
 		FROM next_job WHERE b.id = next_job.id RETURNING b.id::text
-	`).Scan(&id)
+	`, newLeaseOwner()).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrNoPendingImport
 	}
@@ -67,7 +86,15 @@ func (p TransferProcessor) ProcessImportJob(ctx context.Context, id string) erro
 		return errors.New("database store is not initialized")
 	}
 	var claimed string
-	if err := p.Store.Pool.QueryRow(ctx, `UPDATE asset.import_batches SET status = 'processing', completed_at = NULL WHERE id = $1::uuid AND status = 'queued' RETURNING id::text`, id).Scan(&claimed); err != nil {
+	if err := p.Store.Pool.QueryRow(ctx, `
+		UPDATE asset.import_batches
+		SET status = 'processing', completed_at = NULL,
+		    lease_owner = $2, lease_until = now() + interval '`+transferLeaseInterval+`',
+		    attempt_count = attempt_count + 1
+		WHERE id = $1::uuid
+		  AND (status = 'queued' OR (status = 'processing' AND (lease_until IS NULL OR lease_until < now())))
+		RETURNING id::text
+	`, id, newLeaseOwner()).Scan(&claimed); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrNoPendingImport
 		}
@@ -82,132 +109,217 @@ func (p TransferProcessor) ProcessImportJob(ctx context.Context, id string) erro
 	return nil
 }
 
+// importBatchHeader is the immutable context every row of one batch shares.
+type importBatchHeader struct {
+	id             string
+	organizationID string
+	workspaceID    string
+	modelID        string
+	versionID      string
+	sourceName     string
+	submittedBy    string
+	fieldSchema    []byte
+}
+
+type pendingImportRow struct {
+	id        string
+	number    int
+	sourceRow []byte
+}
+
+// processImport walks the batch row by row; every row lives in its own short
+// transaction so one bad row never rolls back the assets of its siblings. The
+// batch summary is recomputed from row statuses in a separate transaction at
+// the end, never from in-memory counters.
 func (p TransferProcessor) processImport(ctx context.Context, batchID string) error {
-	tx, err := p.Store.Pool.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx)
-	var organizationID, workspaceID, modelID, versionID, sourceName, submittedBy string
-	var fieldSchema []byte
-	if err := tx.QueryRow(ctx, `
-		SELECT b.organization_id::text, rm.workspace_id::text, b.resource_model_id::text,
+	var header importBatchHeader
+	if err := p.Store.Pool.QueryRow(ctx, `
+		SELECT b.id::text, b.organization_id::text, b.workspace_id::text, b.resource_model_id::text,
 		       b.resource_model_version_id::text, COALESCE(b.source_name, ''), b.submitted_by::text, v.field_schema
 		FROM asset.import_batches b
-		JOIN model.resource_models rm ON rm.id = b.resource_model_id
-		JOIN model.resource_model_versions v ON v.id = b.resource_model_version_id
+		JOIN model.resource_model_versions v ON v.organization_id = b.organization_id AND v.id = b.resource_model_version_id
 		WHERE b.id = $1::uuid AND b.status = 'processing'
-		FOR UPDATE OF b
-	`, batchID).Scan(&organizationID, &workspaceID, &modelID, &versionID, &sourceName, &submittedBy, &fieldSchema); err != nil {
+	`, batchID).Scan(&header.id, &header.organizationID, &header.workspaceID, &header.modelID,
+		&header.versionID, &header.sourceName, &header.submittedBy, &header.fieldSchema); err != nil {
 		return fmt.Errorf("load import job: %w", err)
 	}
-	rows, err := tx.Query(ctx, `SELECT id::text, row_number, source_row FROM asset.import_rows WHERE import_batch_id = $1::uuid AND status = 'pending' ORDER BY row_number FOR UPDATE`, batchID)
+	rows, err := p.Store.Pool.Query(ctx, `
+		SELECT id::text, row_number, source_row FROM asset.import_rows
+		WHERE import_batch_id = $1::uuid
+		  AND (status = 'pending' OR (status = 'processing' AND (lease_until IS NULL OR lease_until < now())))
+		ORDER BY row_number
+	`, batchID)
 	if err != nil {
 		return fmt.Errorf("load import rows: %w", err)
 	}
-	type pendingImportRow struct {
-		id        string
-		number    int
-		sourceRow []byte
-	}
-	pendingRows := make([]pendingImportRow, 0)
+	candidateRows := make([]pendingImportRow, 0)
 	for rows.Next() {
 		var row pendingImportRow
 		if err := rows.Scan(&row.id, &row.number, &row.sourceRow); err != nil {
 			rows.Close()
 			return fmt.Errorf("scan import row: %w", err)
 		}
-		pendingRows = append(pendingRows, row)
+		candidateRows = append(candidateRows, row)
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
 		return err
 	}
 	rows.Close()
-	accepted, rejected := 0, 0
-	for _, row := range pendingRows {
-		rowID, rowNumber, raw := row.id, row.number, row.sourceRow
-		var sourceRow map[string]any
-		if err := json.Unmarshal(raw, &sourceRow); err != nil {
-			if err := rejectImportRows(ctx, tx, rowID, []ImportRowError{{Code: "invalid_json"}}); err != nil {
-				return err
+	for _, row := range candidateRows {
+		if err := p.processImportRow(ctx, header, row); err != nil {
+			// Unexpected (non-validation) failure: park the row as rejected
+			// with the cause, then keep going with the remaining rows.
+			if rejectErr := p.rejectImportRow(ctx, row.id, row.number, err); rejectErr != nil {
+				return fmt.Errorf("process import row %d: %v; mark row rejected: %w", row.number, err, rejectErr)
 			}
-			rejected++
-			continue
 		}
-		// Structurally broken CSV rows arrive with handler-recorded findings under
-		// a reserved key; they fail here so physical parse issues stay per-row.
-		if preErrors := importPreRowErrors(sourceRow); len(preErrors) > 0 {
-			if err := rejectImportRows(ctx, tx, rowID, preErrors); err != nil {
-				return err
-			}
-			rejected++
-			continue
+	}
+	return p.completeImport(ctx, batchID)
+}
+
+// processImportRow claims one row (pending, or processing with an expired
+// lease), validates it and, on success, creates the raw input, the asset with
+// its first sealed imported version and the shared draft inside the row's
+// transaction. Validation failures reject the row in the same transaction.
+func (p TransferProcessor) processImportRow(ctx context.Context, header importBatchHeader, row pendingImportRow) error {
+	tx, err := p.Store.Pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	var claimed string
+	if err := tx.QueryRow(ctx, `
+		UPDATE asset.import_rows
+		SET status = 'processing', lease_owner = $2, lease_until = now() + interval '`+transferLeaseInterval+`',
+		    attempt_count = attempt_count + 1
+		WHERE id = $1::uuid
+		  AND (status = 'pending' OR (status = 'processing' AND (lease_until IS NULL OR lease_until < now())))
+		RETURNING id::text
+	`, row.id, newLeaseOwner()).Scan(&claimed); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			// Another run owns the row inside a live lease.
+			return nil
 		}
-		title := stringPointer(sourceRow["title"])
-		markdown := stringPointer(sourceRow["markdown"])
-		fields := importFields(sourceRow)
-		if err := ValidateContent(title, markdown, &fields); err != nil {
-			if err := rejectImportRows(ctx, tx, rowID, []ImportRowError{{Code: "invalid_content"}}); err != nil {
-				return err
-			}
-			rejected++
-			continue
-		}
-		if err := ValidateFields(fieldSchema, fields); err != nil {
-			if err := rejectImportRows(ctx, tx, rowID, []ImportRowError{{Code: "invalid_fields"}}); err != nil {
-				return err
-			}
-			rejected++
-			continue
-		}
-		payload, _ := json.Marshal(sourceRow)
-		sum := sha256.Sum256(payload)
-		var rawInputID, assetID, assetVersionID string
-		if err := tx.QueryRow(ctx, `
-			INSERT INTO asset.raw_inputs (organization_id, submitted_by, source_type, content_type, payload, content_checksum)
-			VALUES ($1::uuid, $2::uuid, 'import', 'application/json', $3::jsonb, $4)
-			RETURNING id::text
-		`, organizationID, submittedBy, string(payload), hex.EncodeToString(sum[:])).Scan(&rawInputID); err != nil {
-			return fmt.Errorf("create import raw input: %w", err)
-		}
-		if err := tx.QueryRow(ctx, `INSERT INTO asset.assets (organization_id, workspace_id, resource_model_id, created_by) SELECT b.organization_id, rm.workspace_id, b.resource_model_id, b.submitted_by FROM asset.import_batches b JOIN model.resource_models rm ON rm.id = b.resource_model_id WHERE b.id = $1::uuid RETURNING id::text`, batchID).Scan(&assetID); err != nil {
-			return fmt.Errorf("create imported asset: %w", err)
-		}
-		checksum := hex.EncodeToString(sum[:])
-		if err := tx.QueryRow(ctx, `
-			INSERT INTO asset.asset_versions
-				(organization_id, workspace_id, asset_id, resource_model_id, resource_model_version_id,
-				 version_no, workflow_status, quality, title, markdown, fields, source_raw_input_id,
-				 content_checksum, created_by, source)
-			SELECT b.organization_id, rm.workspace_id, $2::uuid, b.resource_model_id, b.resource_model_version_id,
-				1, 'draft', 'raw', $3, $4, $5::jsonb, $6::uuid, $7, b.submitted_by, $8::jsonb
-			FROM asset.import_batches b JOIN model.resource_models rm ON rm.id = b.resource_model_id
-			WHERE b.id = $1::uuid RETURNING id::text
-		`, batchID, assetID, title, markdown, mustJSON(fields), rawInputID, checksum, mustJSON(map[string]any{"source_name": sourceName, "row_number": rowNumber})).Scan(&assetVersionID); err != nil {
-			return fmt.Errorf("create imported asset version: %w", err)
-		}
-		if _, err := tx.Exec(ctx, `UPDATE asset.import_rows SET raw_input_id = $2::uuid WHERE id = $1::uuid`, rowID, rawInputID); err != nil {
-			return fmt.Errorf("link imported raw input: %w", err)
-		}
-		if _, err := tx.Exec(ctx, `UPDATE asset.assets SET current_working_version_id = $2::uuid, updated_at = now() WHERE id = $1::uuid`, assetID, assetVersionID); err != nil {
-			return fmt.Errorf("set imported working version: %w", err)
-		}
-		if err := retrieval.EnqueueProjectionTx(ctx, tx, p.Events, organizationID, assetVersionID, retrieval.ProjectionRebuild); err != nil {
-			return fmt.Errorf("enqueue imported projection: %w", err)
-		}
-		if _, err := tx.Exec(ctx, `UPDATE asset.import_rows SET status = 'accepted', errors = '[]'::jsonb WHERE id = $1::uuid`, rowID); err != nil {
+		return fmt.Errorf("claim import row: %w", err)
+	}
+	reject := func(entries []ImportRowError) error {
+		return rejectImportRows(ctx, tx, row.id, entries)
+	}
+	var sourceRow map[string]any
+	if err := json.Unmarshal(row.sourceRow, &sourceRow); err != nil {
+		if err := reject([]ImportRowError{{Code: "invalid_json"}}); err != nil {
 			return err
 		}
-		accepted++
+		return tx.Commit(ctx)
 	}
-	if _, err := tx.Exec(ctx, `UPDATE asset.import_batches SET status = 'succeeded', summary = $2::jsonb, completed_at = now() WHERE id = $1::uuid`, batchID, mustJSON(map[string]any{"rows_total": accepted + rejected, "rows_accepted": accepted, "rows_rejected": rejected})); err != nil {
-		return fmt.Errorf("complete import job: %w", err)
+	// Structurally broken CSV rows arrive with handler-recorded findings under
+	// a reserved key; they fail here so physical parse issues stay per-row.
+	if preErrors := importPreRowErrors(sourceRow); len(preErrors) > 0 {
+		if err := reject(preErrors); err != nil {
+			return err
+		}
+		return tx.Commit(ctx)
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit import job: %w", err)
+	title := stringPointer(sourceRow["title"])
+	markdown := stringPointer(sourceRow["markdown"])
+	fields := importFields(sourceRow)
+	if err := ValidateContent(title, markdown, &fields); err != nil {
+		if err := reject([]ImportRowError{{Code: "invalid_content"}}); err != nil {
+			return err
+		}
+		return tx.Commit(ctx)
+	}
+	if err := ValidateFields(header.fieldSchema, fields); err != nil {
+		if err := reject([]ImportRowError{{Code: "invalid_fields"}}); err != nil {
+			return err
+		}
+		return tx.Commit(ctx)
+	}
+	payload, _ := json.Marshal(sourceRow)
+	sum := sha256.Sum256(payload)
+	var rawInputID string
+	if err := tx.QueryRow(ctx, `
+		INSERT INTO asset.raw_inputs
+			(organization_id, workspace_id, submitted_by, source_type, content_type, payload, content_checksum)
+		VALUES ($1::uuid, $2::uuid, $3::uuid, 'import', 'application/json', $4::jsonb, $5)
+		RETURNING id::text
+	`, header.organizationID, header.workspaceID, header.submittedBy, string(payload), hex.EncodeToString(sum[:])).Scan(&rawInputID); err != nil {
+		return fmt.Errorf("create import raw input: %w", err)
+	}
+	assetID, versionID, versionNo, err := createAssetWithFirstVersionTx(ctx, tx,
+		header.organizationID, header.workspaceID, header.modelID, header.versionID,
+		rawInputID, OriginImported, derefString(title), "", derefString(markdown),
+		fields, header.submittedBy)
+	if err != nil {
+		return err
+	}
+	actor := auth.Principal{OrganizationID: header.organizationID, UserID: header.submittedBy, UserType: "member"}
+	if err := emitAssetVersionCreatedTx(ctx, tx, &p.Events, header.organizationID, header.workspaceID, assetID, versionID, versionNo, actor); err != nil {
+		return err
+	}
+	RecordAssetAuditTx(ctx, tx, header.organizationID, header.workspaceID, actor, "asset.import.created", assetID, map[string]any{
+		"workspace_id": header.workspaceID,
+		"batch_id":     header.id,
+		"source_name":  header.sourceName,
+		"row_number":   row.number,
+		"version_id":   versionID,
+	})
+	if _, err := tx.Exec(ctx, `
+		UPDATE asset.import_rows
+		SET status = 'accepted', errors = '[]'::jsonb, last_error = NULL,
+		    raw_input_id = $2::uuid, asset_id = $3::uuid, version_id = $4::uuid,
+		    lease_owner = NULL, lease_until = NULL
+		WHERE id = $1::uuid
+	`, row.id, rawInputID, assetID, versionID); err != nil {
+		return fmt.Errorf("accept import row: %w", err)
+	}
+	return tx.Commit(ctx)
+}
+
+// rejectImportRow parks a row whose short transaction failed outright.
+func (p TransferProcessor) rejectImportRow(ctx context.Context, rowID string, rowNumber int, cause error) error {
+	message := truncateTransferError(cause)
+	if message == "" {
+		message = "import row failed"
+	}
+	payload := mustJSON([]ImportRowError{{Code: "import_row_failed", Message: message}})
+	if len(payload) == 0 {
+		payload = []byte("[]")
+	}
+	if _, err := p.Store.Pool.Exec(ctx, rejectImportRowsSQL, rowID, string(payload), message); err != nil {
+		return fmt.Errorf("reject import row %d: %w", rowNumber, err)
 	}
 	return nil
+}
+
+// completeImport recomputes the batch summary from the persisted row statuses
+// and closes the batch, releasing the lease.
+func (p TransferProcessor) completeImport(ctx context.Context, batchID string) error {
+	tx, err := p.Store.Pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `
+		UPDATE asset.import_batches b
+		SET status = 'succeeded', completed_at = now(),
+		    lease_owner = NULL, lease_until = NULL, last_error = NULL,
+		    summary = (
+		        SELECT jsonb_build_object(
+		            'rows_total', count(*),
+		            'rows_accepted', count(*) FILTER (WHERE r.status = 'accepted'),
+		            'rows_rejected', count(*) FILTER (WHERE r.status = 'rejected'),
+		            'rows_pending', count(*) FILTER (WHERE r.status IN ('pending', 'processing'))
+		        )
+		        FROM asset.import_rows r
+		        WHERE r.import_batch_id = b.id
+		    )
+		WHERE b.id = $1::uuid AND b.status = 'processing'
+	`, batchID); err != nil {
+		return fmt.Errorf("complete import job: %w", err)
+	}
+	return tx.Commit(ctx)
 }
 
 func (p TransferProcessor) ProcessNextExport(ctx context.Context) error {
@@ -259,24 +371,20 @@ func (p TransferProcessor) processExport(ctx context.Context, jobID string) erro
 	if p.Objects == nil {
 		return errors.New("object store is not configured")
 	}
-	var organizationID, modelID string
-	var snapshotRaw, permissionRaw []byte
-	if err := p.Store.Pool.QueryRow(ctx, `SELECT ej.organization_id::text, ej.resource_model_id::text, ej.query_snapshot, ej.permission_scope FROM asset.export_jobs ej WHERE ej.id = $1::uuid AND ej.status = 'processing'`, jobID).Scan(&organizationID, &modelID, &snapshotRaw, &permissionRaw); err != nil {
+	var organizationID, workspaceID, modelID, format string
+	var snapshotRaw []byte
+	if err := p.Store.Pool.QueryRow(ctx, `
+		SELECT ej.organization_id::text, ej.workspace_id::text, ej.resource_model_id::text,
+		       ej.query_snapshot, COALESCE(ej.format, 'jsonl')
+		FROM asset.export_jobs ej
+		WHERE ej.id = $1::uuid AND ej.status = 'processing'
+	`, jobID).Scan(&organizationID, &workspaceID, &modelID, &snapshotRaw, &format); err != nil {
 		return err
 	}
 	var snapshot map[string]any
 	if err := json.Unmarshal(snapshotRaw, &snapshot); err != nil {
 		return fmt.Errorf("decode export snapshot: %w", err)
 	}
-	var permissionScope map[string]any
-	if err := json.Unmarshal(permissionRaw, &permissionScope); err != nil {
-		return fmt.Errorf("decode export permission scope: %w", err)
-	}
-	workspaceID, _ := permissionScope["workspace_id"].(string)
-	if !validID(workspaceID) {
-		return errors.New("export permission scope has no workspace")
-	}
-	format, _ := snapshot["format"].(string)
 	if format == "" {
 		format = "jsonl"
 	}
@@ -286,16 +394,16 @@ func (p TransferProcessor) processExport(ctx context.Context, jobID string) erro
 		return err
 	}
 	defer rows.Close()
-	headers := []string{"id", "title", "markdown", "fields", "tags", "visibility", "publication_status", "review_status"}
+	headers := []string{"id", "title", "markdown", "fields", "tag_keys", "visibility", "publication_status", "origin"}
 	records := make([][]string, 0, 128)
 	for rows.Next() {
-		var id, visibility, publication, review string
+		var id, visibility, publication, origin string
 		var title, markdown *string
-		var fields, tags []byte
-		if err := rows.Scan(&id, &title, &markdown, &fields, &tags, &visibility, &publication, &review); err != nil {
+		var fields []byte
+		if err := rows.Scan(&id, &title, &markdown, &fields, &visibility, &publication, &origin); err != nil {
 			return err
 		}
-		records = append(records, []string{id, derefString(title), derefString(markdown), string(fields), string(tags), visibility, publication, review})
+		records = append(records, []string{id, derefString(title), derefString(markdown), string(fields), "[]", visibility, publication, origin})
 	}
 	if err := rows.Err(); err != nil {
 		return err
@@ -330,8 +438,8 @@ func (p TransferProcessor) processExport(ctx context.Context, jobID string) erro
 		for _, record := range records {
 			line, _ := json.Marshal(map[string]any{
 				"id": record[0], "title": nullableString(record[1]), "markdown": nullableString(record[2]),
-				"fields": decodeJSONMap([]byte(record[3])), "tags": decodeStringSlice([]byte(record[4])),
-				"visibility": record[5], "publication_status": record[6], "review_status": record[7],
+				"fields": decodeJSONMap([]byte(record[3])), "tag_keys": []any{},
+				"visibility": record[4], "publication_status": record[5], "origin": record[6],
 			})
 			body.Write(line)
 			body.WriteByte('\n')
@@ -428,6 +536,7 @@ func exportAssetQuery(organizationID, workspaceID, modelID string, snapshot map[
 		"a.organization_id = $1::uuid",
 		"a.workspace_id = $2::uuid",
 		"a.resource_model_id = $3::uuid",
+		"a.deleted_at IS NULL",
 		"a.publication_status <> 'archived'",
 	}
 	filters, _ := snapshot["filters"].(map[string]any)
@@ -440,26 +549,22 @@ func exportAssetQuery(organizationID, workspaceID, modelID string, snapshot map[
 		placeholder := len(args)
 		where = append(where, fmt.Sprintf("(COALESCE(v.title, '') ILIKE '%%' || $%d || '%%' OR COALESCE(v.markdown, '') ILIKE '%%' || $%d || '%%')", placeholder, placeholder))
 	}
-	for _, key := range []string{"visibility", "publication_status", "review_status"} {
+	for _, key := range []string{"visibility", "publication_status", "origin"} {
 		if value, ok := filters[key].(string); ok && strings.TrimSpace(value) != "" {
-			column := map[string]string{"visibility": "a.visibility", "publication_status": "a.publication_status", "review_status": "v.review_status"}[key]
+			column := map[string]string{"visibility": "a.visibility", "publication_status": "a.publication_status", "origin": "v.origin"}[key]
 			where = append(where, add(column+" = $%d", value))
 		}
-	}
-	if tags, ok := filters["tags"].([]any); ok && len(tags) > 0 {
-		encoded, _ := json.Marshal(tags)
-		where = append(where, add("v.tags @> $%d::jsonb", string(encoded)))
 	}
 	if fields, ok := filters["fields"].(map[string]any); ok && len(fields) > 0 {
 		encoded, _ := json.Marshal(fields)
 		where = append(where, add("v.fields @> $%d::jsonb", string(encoded)))
 	}
-	query := "SELECT a.id::text, v.title, v.markdown, v.fields, v.tags, a.visibility, a.publication_status, v.review_status FROM asset.assets a JOIN asset.asset_versions v ON v.id = COALESCE(a.current_published_version_id, a.current_working_version_id) WHERE " + strings.Join(where, " AND ") + " ORDER BY a.id"
+	query := "SELECT a.id::text, v.title, v.markdown, v.fields, a.visibility, a.publication_status, v.origin FROM asset.assets a JOIN asset.asset_versions v ON v.organization_id = a.organization_id AND v.id = COALESCE(a.current_published_version_id, a.current_working_version_id) WHERE " + strings.Join(where, " AND ") + " ORDER BY a.id"
 	return query, args
 }
 
 func (p TransferProcessor) failImport(ctx context.Context, id string, cause error) error {
-	_, err := p.Store.Pool.Exec(ctx, `UPDATE asset.import_batches SET status = 'failed', summary = jsonb_build_object('error', $2::text), completed_at = now() WHERE id = $1::uuid AND status = 'processing'`, id, truncateTransferError(cause))
+	_, err := p.Store.Pool.Exec(ctx, `UPDATE asset.import_batches SET status = 'failed', summary = jsonb_build_object('error', $2::text), last_error = $2, lease_owner = NULL, lease_until = NULL, completed_at = now() WHERE id = $1::uuid AND status = 'processing'`, id, truncateTransferError(cause))
 	return err
 }
 func (p TransferProcessor) failExport(ctx context.Context, id string, cause error) error {
@@ -480,7 +585,7 @@ type ImportRowError struct {
 // function whose type PostgreSQL cannot infer at PREPARE time, so the first
 // bad row failed the whole batch with SQLSTATE 42P18 "could not determine data
 // type of parameter $2" instead of landing in import_rows.errors.
-const rejectImportRowsSQL = `UPDATE asset.import_rows SET status = 'rejected', errors = $2::jsonb WHERE id = $1::uuid`
+const rejectImportRowsSQL = `UPDATE asset.import_rows SET status = 'rejected', errors = $2::jsonb, last_error = $3, lease_owner = NULL, lease_until = NULL WHERE id = $1::uuid AND status IN ('pending', 'processing')`
 
 func rejectImportRows(ctx context.Context, tx pgx.Tx, id string, entries []ImportRowError) error {
 	if len(entries) == 0 {
@@ -490,10 +595,29 @@ func rejectImportRows(ctx context.Context, tx pgx.Tx, id string, entries []Impor
 	if len(payload) == 0 {
 		payload = []byte("[]")
 	}
-	if _, err := tx.Exec(ctx, rejectImportRowsSQL, id, string(payload)); err != nil {
+	message := entries[0].Code
+	if entries[0].Message != "" {
+		message = entries[0].Code + ": " + entries[0].Message
+	}
+	if _, err := tx.Exec(ctx, rejectImportRowsSQL, id, string(payload), message); err != nil {
 		return fmt.Errorf("reject import row: %w", err)
 	}
 	return nil
+}
+
+// emitAssetVersionCreatedTx re-reads the lifecycle row (CreateVersionTx has
+// already bumped its revision) and appends the asset.version_created fact.
+func emitAssetVersionCreatedTx(ctx context.Context, tx pgx.Tx, events *eventing.EventStore, organizationID, workspaceID, assetID, versionID string, versionNo int64, actor auth.Principal) error {
+	row, err := LoadLifecycleTx(ctx, tx, organizationID, assetID)
+	if err != nil {
+		return err
+	}
+	return AppendAssetEventTx(ctx, tx, events, row, actor, eventing.EventAssetVersionCreated, eventing.PayloadVersionV1, eventing.AssetVersionCreatedPayload{
+		AssetID:     assetID,
+		VersionID:   versionID,
+		VersionNo:   versionNo,
+		WorkspaceID: workspaceID,
+	})
 }
 
 // ImportPreRowErrorsKey is the reserved source-row key under which the imports

@@ -16,14 +16,14 @@ func (r ScopeResolver) AllowedSystemResourceIDs(ctx context.Context, principal a
 	if r.Store == nil || r.Store.Pool == nil {
 		return nil, fmt.Errorf("database store is not initialized")
 	}
-	if principal.UserType != "member" || action != "agent.manage" {
+	if principal.UserType != auth.UserTypeMember || action != "agent.manage" {
 		return []string{}, nil
 	}
 	var admin bool
 	err := r.Store.Pool.QueryRow(ctx, `
 		SELECT EXISTS (SELECT 1 FROM identity.users
 		WHERE id = $1::uuid AND organization_id = $2::uuid AND user_type = 'member'
-		  AND status = 'active' AND member_role = 'admin')
+		  AND status = 'active' AND organization_role = 'admin')
 	`, principal.UserID, principal.OrganizationID).Scan(&admin)
 	if err != nil {
 		return nil, fmt.Errorf("resolve organization administrator: %w", err)
@@ -34,11 +34,16 @@ func (r ScopeResolver) AllowedSystemResourceIDs(ctx context.Context, principal a
 	return []string{"system:agent-users", "system:agent-applications"}, nil
 }
 
+// AllowedModelIDs resolves the model scope for agent technical identities and
+// workspace members. Organization-level governance grants nothing here: a
+// member sees models bound to workspaces where they hold an explicit
+// membership. Builtin models carry a NULL workspace and follow the caller's
+// workspace reach.
 func (r ScopeResolver) AllowedModelIDs(ctx context.Context, principal auth.Principal, action string) ([]string, error) {
 	if r.Store == nil || r.Store.Pool == nil {
 		return nil, fmt.Errorf("database store is not initialized")
 	}
-	if principal.UserType == "agent" {
+	if principal.UserType == auth.UserTypeAgent {
 		action = strings.TrimPrefix(strings.TrimSpace(action), "asset.")
 		rows, err := r.Store.Pool.Query(ctx, `
 			SELECT DISTINCT resource_model_id::text FROM content.agent_access_policies
@@ -50,7 +55,7 @@ func (r ScopeResolver) AllowedModelIDs(ctx context.Context, principal auth.Princ
 		}
 		return collectIDs(rows)
 	}
-	if principal.UserType != "member" {
+	if principal.UserType != auth.UserTypeMember {
 		return []string{}, nil
 	}
 	rows, err := r.Store.Pool.Query(ctx, `
@@ -59,10 +64,9 @@ func (r ScopeResolver) AllowedModelIDs(ctx context.Context, principal auth.Princ
 		JOIN identity.users u ON u.id = $2::uuid AND u.organization_id = rm.organization_id
 		LEFT JOIN content.workspaces w ON w.organization_id = rm.organization_id
 		 AND (w.id = rm.workspace_id OR w.default_resource_model_id = rm.id)
-		LEFT JOIN content.workspace_members wm ON wm.workspace_id = w.id AND wm.user_id = u.id
+		JOIN content.workspace_members wm ON wm.workspace_id = w.id AND wm.user_id = u.id
 		WHERE rm.organization_id = $1::uuid AND rm.status = 'active'
 		  AND u.user_type = 'member' AND u.status = 'active'
-		  AND (u.member_role = 'admin' OR wm.user_id IS NOT NULL)
 	`, principal.OrganizationID, principal.UserID)
 	if err != nil {
 		return nil, fmt.Errorf("resolve member model scope: %w", err)
@@ -74,7 +78,7 @@ func (r ScopeResolver) AllowedAgentApplicationIDs(ctx context.Context, principal
 	if r.Store == nil || r.Store.Pool == nil {
 		return nil, fmt.Errorf("database store is not initialized")
 	}
-	if principal.UserType != "member" || action != "agent.use" {
+	if principal.UserType != auth.UserTypeMember || action != "agent.use" {
 		return []string{}, nil
 	}
 	rows, err := r.Store.Pool.Query(ctx, `

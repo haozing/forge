@@ -23,8 +23,11 @@ func TestDefaultRegistryUsesFixedGraph(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if output.Candidate["title"] != "title" || output.Candidate["workflow_status"] != "submitted" {
+	if output.Candidate["title"] != "title" {
 		t.Fatalf("unexpected candidate: %#v", output.Candidate)
+	}
+	if _, has := output.Candidate["workflow_status"]; has {
+		t.Fatal("workflow status must not leak into candidates: versions are immutable")
 	}
 	if _, err := registry.Resolve("graph_json_from_db"); !errors.Is(err, ErrWorkflowNotFound) {
 		t.Fatalf("unknown workflow should be rejected, got %v", err)

@@ -30,12 +30,7 @@ func listFrontendAttachments(deps Dependencies) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		allowed, err := deps.ScopeResolver.AllowedModelIDs(r.Context(), principal, "asset.read")
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "authorization_scope_failed")
-			return
-		}
-		items, err := deps.AttachmentService.List(r.Context(), principal, r.PathValue("versionId"), allowed)
+		items, err := deps.AttachmentService.List(r.Context(), principal, r.PathValue("versionId"))
 		if err != nil {
 			writeFrontendAttachmentError(w, err, "attachment_list_failed")
 			return
@@ -54,12 +49,7 @@ func getFrontendAttachment(deps Dependencies) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		allowed, err := deps.ScopeResolver.AllowedModelIDs(r.Context(), principal, "asset.read")
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "authorization_scope_failed")
-			return
-		}
-		item, err := deps.AttachmentService.Status(r.Context(), principal, r.PathValue("attachmentId"), allowed)
+		item, err := deps.AttachmentService.Status(r.Context(), principal, r.PathValue("attachmentId"))
 		if err != nil {
 			writeFrontendAttachmentError(w, err, "attachment_status_failed")
 			return
@@ -93,12 +83,7 @@ func patchFrontendAttachment(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusUnprocessableEntity, "validation_failed")
 			return
 		}
-		allowed, err := deps.ScopeResolver.AllowedModelIDs(r.Context(), principal, "asset.write")
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "authorization_scope_failed")
-			return
-		}
-		item, err := deps.AttachmentService.UpdateFilename(r.Context(), principal, r.PathValue("attachmentId"), input.Filename, allowed)
+		item, err := deps.AttachmentService.UpdateFilename(r.Context(), principal, r.PathValue("attachmentId"), input.Filename)
 		if err != nil {
 			writeFrontendAttachmentError(w, err, "attachment_update_failed")
 			return
@@ -121,12 +106,7 @@ func deleteFrontendAttachment(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
 			return
 		}
-		allowed, err := deps.ScopeResolver.AllowedModelIDs(r.Context(), principal, "asset.write")
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "authorization_scope_failed")
-			return
-		}
-		if err := deps.AttachmentService.Delete(r.Context(), principal, r.PathValue("attachmentId"), allowed); err != nil {
+		if err := deps.AttachmentService.Delete(r.Context(), principal, r.PathValue("attachmentId")); err != nil {
 			writeFrontendAttachmentError(w, err, "attachment_delete_failed")
 			return
 		}
@@ -135,7 +115,7 @@ func deleteFrontendAttachment(deps Dependencies) http.HandlerFunc {
 }
 
 type linkFrontendAttachmentRequest struct {
-	AssetVersionID string `json:"asset_version_id"`
+	AssetID string `json:"asset_id"`
 }
 
 func linkFrontendAttachment(deps Dependencies) http.HandlerFunc {
@@ -155,19 +135,11 @@ func linkFrontendAttachment(deps Dependencies) http.HandlerFunc {
 		var input linkFrontendAttachmentRequest
 		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 32*1024))
 		decoder.DisallowUnknownFields()
-		if err := decoder.Decode(&input); err != nil || strings.TrimSpace(input.AssetVersionID) == "" {
+		if err := decoder.Decode(&input); err != nil || strings.TrimSpace(input.AssetID) == "" {
 			writeError(w, http.StatusUnprocessableEntity, "validation_failed")
 			return
 		}
-		allowed, err := deps.ScopeResolver.AllowedModelIDs(r.Context(), principal, "asset.write")
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "authorization_scope_failed")
-			return
-		}
-		if err := deps.AttachmentService.Link(r.Context(), principal, attachment.LinkInput{
-			AttachmentID:   r.PathValue("attachmentId"),
-			AssetVersionID: input.AssetVersionID,
-		}, allowed); err != nil {
+		if err := deps.AttachmentService.Link(r.Context(), principal, r.PathValue("attachmentId"), input.AssetID); err != nil {
 			writeFrontendAttachmentError(w, err, "attachment_link_failed")
 			return
 		}
@@ -176,14 +148,11 @@ func linkFrontendAttachment(deps Dependencies) http.HandlerFunc {
 }
 
 func frontendAssetVersionAttachments(deps Dependencies) http.HandlerFunc {
-	upload := uploadAttachment(deps)
 	list := listFrontendAttachments(deps)
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
 			list(w, r)
-		case http.MethodPost:
-			upload(w, r)
 		default:
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
 		}

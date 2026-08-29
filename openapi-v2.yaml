@@ -1,0 +1,524 @@
+openapi: 3.0.3
+info:
+  title: AgentChunzhi v2 API
+  version: 2.0.0-phase0
+  description: |
+    唯一 v2 契约。入口族：
+    - /api/v2/... 成员会话和工作区管理 API
+    - /api/open/v2/... Agent 和外部系统 API Key API
+    - /api/public/v2/... 匿名或站点访问 API
+    阶段 0 冻结全局组件与核心资源名；未实现的领域只冻结资源命名，不注册假 handler。
+servers:
+  - url: /
+tags:
+  - name: publication-requests
+  - name: assets
+  - name: identity
+  - name: workspaces
+  - name: tags
+  - name: query
+  - name: sites
+paths:
+  /api/v2/workspaces/{workspaceId}/publication-requests:
+    get:
+      tags: [publication-requests]
+      operationId: listPublicationRequests
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/PublicationRequestStatus'
+      responses:
+        '200':
+          description: 审核队列
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/PublicationRequestListData'
+                  - $ref: '#/components/schemas/Envelope'
+    post:
+      tags: [publication-requests]
+      operationId: submitPublicationRequest
+      description: 为资产当前 working version 提交发布审批
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [asset_id, draft_revision]
+              properties:
+                asset_id:
+                  type: string
+                  format: uuid
+                draft_revision:
+                  type: integer
+                comment:
+                  type: string
+      responses:
+        '201':
+          description: 已创建
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/PublicationRequest'
+                  - $ref: '#/components/schemas/Envelope'
+  /api/v2/workspaces/{workspaceId}/publication-requests/{requestId}:
+    get:
+      tags: [publication-requests]
+      operationId: getPublicationRequest
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - name: requestId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: 审核详情
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/PublicationRequest'
+                  - $ref: '#/components/schemas/Envelope'
+  /api/v2/workspaces/{workspaceId}/publication-requests/{requestId}/approve:
+    post:
+      tags: [publication-requests]
+      operationId: approvePublicationRequest
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - name: requestId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                comment: { type: string }
+      responses:
+        '200':
+          description: 已批准并发布
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/PublicationRequest'
+                  - $ref: '#/components/schemas/Envelope'
+  /api/v2/workspaces/{workspaceId}/publication-requests/{requestId}/reject:
+    post:
+      tags: [publication-requests]
+      operationId: rejectPublicationRequest
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - name: requestId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [comment]
+              properties:
+                comment: { type: string }
+      responses:
+        '200':
+          description: 已拒绝
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/PublicationRequest'
+                  - $ref: '#/components/schemas/Envelope'
+  /api/v2/workspaces/{workspaceId}/publication-requests/{requestId}/cancel:
+    post:
+      tags: [publication-requests]
+      operationId: cancelPublicationRequest
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - name: requestId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason: { type: string }
+      responses:
+        '200':
+          description: 已取消
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/PublicationRequest'
+                  - $ref: '#/components/schemas/Envelope'
+  /api/v2/workspaces/{workspaceId}/publication-requests/{requestId}/comments:
+    post:
+      tags: [publication-requests]
+      operationId: createPublicationComment
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - name: requestId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [body]
+              properties:
+                body: { type: string }
+      responses:
+        '201':
+          description: 评论已创建
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/PublicationComment'
+                  - $ref: '#/components/schemas/Envelope'
+  /api/v2/workspaces/{workspaceId}/publication-requests/batch:
+    post:
+      tags: [publication-requests]
+      operationId: batchPublicationRequests
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [decision, items]
+              properties:
+                decision:
+                  type: string
+                  enum: [approve, reject]
+                items:
+                  type: array
+                  maxItems: 100
+                  items:
+                    type: object
+                    required: [request_id]
+                    properties:
+                      request_id: { type: string, format: uuid }
+                      comment: { type: string }
+      responses:
+        '200':
+          description: 批量结果（逐项）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/PublicationBatchResult'
+                  - $ref: '#/components/schemas/Envelope'
+  /api/v2/assets/{assetId}/draft:
+    patch:
+      tags: [assets]
+      operationId: autosaveAssetDraft
+      description: AssetDraft 自动保存；If-Match 携带 draft revision
+      parameters:
+        - $ref: '#/components/parameters/AssetId'
+        - $ref: '#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AssetDraftPatch'
+      responses:
+        '200':
+          description: 已保存
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/AssetDraft'
+                  - $ref: '#/components/schemas/Envelope'
+  /api/v2/assets/{assetId}/commit-draft:
+    post:
+      tags: [assets]
+      operationId: commitAssetDraft
+      parameters:
+        - $ref: '#/components/parameters/AssetId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [draft_revision]
+              properties:
+                draft_revision: { type: integer }
+      responses:
+        '201':
+          description: 新版本已创建
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/AssetVersion'
+                  - $ref: '#/components/schemas/Envelope'
+  /api/v2/assets/{assetId}/publish:
+    post:
+      tags: [assets]
+      operationId: publishAsset
+      parameters:
+        - $ref: '#/components/parameters/AssetId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                draft_revision: { type: integer }
+      responses:
+        '200':
+          description: 已发布
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Asset'
+                  - $ref: '#/components/schemas/Envelope'
+  /api/v2/assets/{assetId}/archive:
+    post:
+      tags: [assets]
+      operationId: archiveAsset
+      parameters:
+        - $ref: '#/components/parameters/AssetId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: 已归档
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Asset'
+                  - $ref: '#/components/schemas/Envelope'
+  /api/v2/assets/{assetId}/restore:
+    post:
+      tags: [assets]
+      operationId: restoreAsset
+      parameters:
+        - $ref: '#/components/parameters/AssetId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: 已恢复为草稿
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Asset'
+                  - $ref: '#/components/schemas/Envelope'
+  /api/v2/asset-versions/{versionId}/confirm:
+    post:
+      tags: [assets]
+      operationId: confirmAssetVersion
+      description: 人工确认：创建内容相同的派生版本并写入 human_confirmed
+      parameters:
+        - name: versionId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '201':
+          description: 派生版本已创建
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/AssetVersion'
+                  - $ref: '#/components/schemas/Envelope'
+components:
+  parameters:
+    WorkspaceId:
+      name: workspaceId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    AssetId:
+      name: assetId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    Cursor:
+      name: cursor
+      in: query
+      schema: { type: string, nullable: true }
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema: { type: string, minLength: 1, maxLength: 200 }
+    IfMatch:
+      name: If-Match
+      in: header
+      required: true
+      schema: { type: string }
+  schemas:
+    Envelope:
+      type: object
+      properties:
+        request_id:
+          type: string
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, request_id]
+          properties:
+            code: { type: string }
+            message: { type: string }
+            request_id: { type: string }
+            details:
+              type: object
+              additionalProperties: true
+              nullable: true
+    CursorPage:
+      type: object
+      required: [next_cursor, has_more]
+      properties:
+        next_cursor: { type: string, nullable: true }
+        has_more: { type: boolean }
+    PublicationRequestStatus:
+      type: string
+      enum: [pending, approved, rejected, cancelled]
+    PublicationCancelReason:
+      type: string
+      enum: [user_cancelled, new_version, asset_archived, admin_cancelled]
+    PublicationRequest:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        workspace_id: { type: string, format: uuid }
+        asset_id: { type: string, format: uuid }
+        asset_version_id: { type: string, format: uuid }
+        status: { $ref: '#/components/schemas/PublicationRequestStatus' }
+        submitted_by: { type: string, format: uuid }
+        decided_by: { type: string, format: uuid, nullable: true }
+        decision_comment: { type: string, nullable: true }
+        cancelled_by: { type: string, format: uuid, nullable: true }
+        cancel_reason: { $ref: '#/components/schemas/PublicationCancelReason' }
+        submitted_at: { type: string, format: date-time }
+        decided_at: { type: string, format: date-time, nullable: true }
+        revision: { type: integer }
+    PublicationRequestListData:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/PublicationRequest' }
+        page: { $ref: '#/components/schemas/CursorPage' }
+    PublicationComment:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        publication_request_id: { type: string, format: uuid }
+        body: { type: string }
+        author_user_id: { type: string, format: uuid }
+        created_at: { type: string, format: date-time }
+    PublicationBatchResult:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              request_id: { type: string, format: uuid }
+              ok: { type: boolean }
+              error_code: { type: string, nullable: true }
+              request: { $ref: '#/components/schemas/PublicationRequest' }
+    Asset:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        workspace_id: { type: string, format: uuid }
+        resource_model_id: { type: string, format: uuid }
+        publication_status:
+          type: string
+          enum: [draft, published, archived]
+        visibility:
+          type: string
+          enum: [workspace, organization, public]
+        current_working_version_id: { type: string, format: uuid }
+        current_published_version_id: { type: string, format: uuid, nullable: true }
+        revision: { type: integer }
+    AssetDraftPatch:
+      type: object
+      properties:
+        title: { type: string, nullable: true }
+        summary: { type: string, nullable: true }
+        markdown: { type: string, nullable: true }
+        fields: { type: object, additionalProperties: true, nullable: true }
+    AssetDraft:
+      type: object
+      properties:
+        asset_id: { type: string, format: uuid }
+        base_version_id: { type: string, format: uuid }
+        revision: { type: integer }
+        committed_revision: { type: integer }
+        title: { type: string }
+        summary: { type: string }
+        markdown: { type: string }
+        fields: { type: object, additionalProperties: true }
+        updated_by: { type: string, format: uuid }
+        updated_at: { type: string, format: date-time }
+    AssetVersion:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        asset_id: { type: string, format: uuid }
+        version_no: { type: integer }
+        origin:
+          type: string
+          enum: [human, imported, ai_generated, ai_assisted]
+        confirmation_status:
+          type: string
+          enum: [unconfirmed, human_confirmed]
+        title: { type: string }
+        summary: { type: string }
+        markdown: { type: string }
+        fields: { type: object, additionalProperties: true }
+        parent_version_id: { type: string, format: uuid, nullable: true }
+        content_checksum: { type: string }
+        created_at: { type: string, format: date-time }

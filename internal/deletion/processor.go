@@ -66,10 +66,11 @@ func (p Processor) ProcessNext(ctx context.Context) error {
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO content.notifications
-			(organization_id, workspace_id, recipient_user_id, type, title, body, object_type, object_id, metadata)
-		VALUES ($1::uuid, $2::uuid, $3::uuid, 'system', $4, '', 'deletion_job', $5::uuid,
-		        jsonb_build_object('resource_type', $6::text, 'resource_id', $7::text, 'status', 'completed'))
-	`, organizationID, workspaceID, requestedBy, deletionTitle(resourceType), jobID, resourceType, resourceID); err != nil {
+			(organization_id, workspace_id, recipient_user_id, kind, payload)
+		VALUES ($1::uuid, $2::uuid, $3::uuid, 'system',
+		        jsonb_build_object('resource_type', $4::text, 'resource_id', $5::text,
+		                           'deletion_job_id', $6::text, 'status', 'completed'))
+	`, organizationID, workspaceID, requestedBy, resourceType, resourceID, jobID); err != nil {
 		return fmt.Errorf("create deletion notification: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `UPDATE content.deletion_jobs SET status = 'completed', completed_at = now(), error_code = NULL, error_summary = NULL WHERE id = $1::uuid`, jobID); err != nil {
@@ -94,7 +95,11 @@ func processAssetDeletion(ctx context.Context, tx pgx.Tx, organizationID, worksp
 	if result.RowsAffected() == 0 {
 		return errors.New("asset not found")
 	}
-	if _, err := tx.Exec(ctx, `UPDATE asset.asset_reviews SET status = 'superseded', reviewed_at = now() WHERE organization_id = $1::uuid AND asset_id = $2::uuid AND status = 'pending'`, organizationID, assetID); err != nil {
+	if _, err := tx.Exec(ctx, `
+		UPDATE asset.publication_requests
+		SET status = 'cancelled', cancel_reason = 'asset_archived', revision = revision + 1, decided_at = now()
+		WHERE organization_id = $1::uuid AND asset_id = $2::uuid AND status = 'pending'
+	`, organizationID, assetID); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(ctx, `UPDATE retrieval.chunk_embeddings SET status = 'deleted', updated_at = now() WHERE chunk_id IN (SELECT id FROM retrieval.chunks WHERE organization_id = $1::uuid AND asset_id = $2::uuid)`, organizationID, assetID); err != nil {
@@ -132,11 +137,4 @@ func failJob(ctx context.Context, tx pgx.Tx, jobID, code string, cause error) er
 		return err
 	}
 	return nil
-}
-
-func deletionTitle(resourceType string) string {
-	if resourceType == "workspace" {
-		return "Workspace deletion completed"
-	}
-	return "Asset deletion completed"
 }

@@ -54,11 +54,14 @@ func TestCursorIsSigned(t *testing.T) {
 }
 
 func TestMemberQueryEnums(t *testing.T) {
-	if err := validateMemberQueryEnums([]string{"private", "workspace"}, []string{"draft", "published"}); err != nil {
+	if err := validateMemberQueryEnums([]string{"workspace", "organization", "public"}, []string{"draft", "published"}); err != nil {
 		t.Fatalf("valid enum filters rejected: %v", err)
 	}
-	if err := validateMemberQueryEnums([]string{"login"}, nil); err != nil {
-		t.Fatalf("login visibility error = %v", err)
+	if err := validateMemberQueryEnums([]string{"private"}, nil); !errors.Is(err, ErrInvalidQuery) {
+		t.Fatalf("legacy private visibility should be rejected, got %v", err)
+	}
+	if err := validateMemberQueryEnums([]string{"login"}, nil); !errors.Is(err, ErrInvalidQuery) {
+		t.Fatalf("legacy login visibility should be rejected, got %v", err)
 	}
 	if err := validateMemberQueryEnums([]string{"unknown"}, nil); !errors.Is(err, ErrInvalidQuery) {
 		t.Fatalf("invalid visibility error = %v", err)

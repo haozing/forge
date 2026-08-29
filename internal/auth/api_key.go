@@ -14,6 +14,12 @@ import (
 
 var ErrUnauthenticated = errors.New("unauthenticated")
 
+// Subject types stored in identity.users.user_type.
+const (
+	UserTypeMember = "member"
+	UserTypeAgent  = "agent"
+)
+
 type Principal struct {
 	UserID         string
 	OrganizationID string
@@ -46,9 +52,11 @@ func (a APIKeyAuthenticator) Authenticate(ctx context.Context, r *http.Request) 
 		SELECT u.id, u.organization_id, u.user_type, k.capabilities
 		FROM identity.api_keys k
 		JOIN identity.users u ON u.id = k.user_id
+		JOIN organization.organizations o ON o.id = u.organization_id
 		WHERE k.key_hash = $1
 		  AND k.status = 'active'
 		  AND u.status = 'active'
+		  AND o.status = 'active'
 		  AND (k.expires_at IS NULL OR k.expires_at > now())
 	`, hash).Scan(&p.UserID, &p.OrganizationID, &p.UserType, &capabilitiesJSON)
 	if err != nil {

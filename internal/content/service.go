@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	assetservice "agentchunzhi/internal/asset"
 	"agentchunzhi/internal/auth"
 	"agentchunzhi/internal/eventing"
 	"agentchunzhi/internal/retrieval"
@@ -148,7 +149,6 @@ type NotePublishResult struct {
 	NoteAssetID       string `json:"note_asset_id"`
 	AssetVersionID    string `json:"asset_version_id"`
 	PublicationStatus string `json:"publication_status"`
-	Quality           string `json:"quality"`
 }
 
 type CreateDerivationInput struct {
@@ -315,23 +315,13 @@ func (s Service) CreateDerivation(ctx context.Context, principal auth.Principal,
 	}
 	var noteAsset string
 	if err := tx.QueryRow(ctx, `
-			INSERT INTO asset.assets (organization_id, workspace_id, resource_model_id, publication_status, created_by)
-			VALUES ($1::uuid, $2::uuid, $3::uuid, 'draft', $4::uuid) RETURNING id::text
+			INSERT INTO asset.assets (organization_id, workspace_id, resource_model_id, created_by)
+			VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid) RETURNING id::text
 		`, principal.OrganizationID, workspaceID, noteModelID, principal.UserID).Scan(&noteAsset); err != nil {
 		return DerivationResult{}, fmt.Errorf("create derived note asset: %w", err)
 	}
-	var noteVersion string
-	if err := tx.QueryRow(ctx, `
-		INSERT INTO asset.asset_versions
-				(organization_id, workspace_id, asset_id, resource_model_id, resource_model_version_id, version_no,
-				 workflow_status, quality, title, markdown, fields, content_checksum, created_by)
-			VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid, 1, 'draft', 'raw', $6, '', '{}'::jsonb, $7, $8::uuid)
-			RETURNING id::text
-		`, principal.OrganizationID, workspaceID, noteAsset, noteModelID, noteModelVersionID, title, emptyChecksum(), principal.UserID).Scan(&noteVersion); err != nil {
-		return DerivationResult{}, fmt.Errorf("create derived note version: %w", err)
-	}
-	if _, err := tx.Exec(ctx, `UPDATE asset.assets SET current_working_version_id = $2::uuid WHERE id = $1::uuid`, noteAsset, noteVersion); err != nil {
-		return DerivationResult{}, fmt.Errorf("set derived note working version: %w", err)
+	if _, err := createAssetVersionWithDraft(ctx, tx, principal.OrganizationID, workspaceID, noteAsset, noteModelID, noteModelVersionID, title, "", nil, principal.UserID); err != nil {
+		return DerivationResult{}, err
 	}
 	var targetConversation string
 	if err := tx.QueryRow(ctx, `
@@ -495,7 +485,7 @@ func (s Service) FinalizeDerivation(ctx context.Context, principal auth.Principa
 	if err := tx.QueryRow(ctx, `
 		SELECT av.id::text, av.resource_model_id::text, av.resource_model_version_id::text,
 		       COALESCE(av.title, ''), COALESCE(av.markdown, ''), av.fields
-		FROM asset.assets a JOIN asset.asset_versions av ON av.id = a.current_working_version_id
+		FROM asset.assets a JOIN asset.asset_versions av ON av.organization_id = a.organization_id AND av.id = a.current_working_version_id
 		WHERE a.organization_id = $1::uuid AND a.id = $2::uuid
 		FOR UPDATE OF a, av
 	`, principal.OrganizationID, sourceNoteAssetID).Scan(&sourceVersionID, &sourceModelID, &sourceModelVersionID, &sourceTitle, &sourceMarkdown, &sourceFields); err != nil {
@@ -509,12 +499,12 @@ func (s Service) FinalizeDerivation(ctx context.Context, principal auth.Principa
 		var targetVersionID, targetModelID, targetModelVersionID, targetTitle string
 		var targetMarkdown, targetFields []byte
 		if err := tx.QueryRow(ctx, `
-			SELECT av.id::text, av.resource_model_id::text, av.resource_model_version_id::text,
-			       COALESCE(av.title, ''), COALESCE(av.markdown, ''), av.fields
-			FROM asset.assets a JOIN asset.asset_versions av ON av.id = a.current_working_version_id
-			WHERE a.organization_id = $1::uuid AND a.id = $2::uuid
-			FOR UPDATE OF a, av
-		`, principal.OrganizationID, input.TargetAssetID).Scan(&targetVersionID, &targetModelID, &targetModelVersionID, &targetTitle, &targetMarkdown, &targetFields); err != nil {
+		SELECT av.id::text, av.resource_model_id::text, av.resource_model_version_id::text,
+		       COALESCE(av.title, ''), COALESCE(av.markdown, ''), av.fields
+		FROM asset.assets a JOIN asset.asset_versions av ON av.organization_id = a.organization_id AND av.id = a.current_working_version_id
+		WHERE a.organization_id = $1::uuid AND a.id = $2::uuid
+		FOR UPDATE OF a, av
+	`, principal.OrganizationID, input.TargetAssetID).Scan(&targetVersionID, &targetModelID, &targetModelVersionID, &targetTitle, &targetMarkdown, &targetFields); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return FinalizeResult{}, ErrNotFound
 			}
@@ -526,31 +516,40 @@ func (s Service) FinalizeDerivation(ctx context.Context, principal auth.Principa
 		if input.ExpectedContainerVersionID != "" {
 			var currentContainerVersion string
 			err := tx.QueryRow(ctx, `
-				SELECT cv.id::text FROM content.note_bindings nb
-				JOIN content.containers c ON c.id = nb.note_container_id
-				JOIN content.container_versions cv ON cv.id = c.current_version_id
-				WHERE nb.organization_id = $1::uuid AND nb.note_asset_id = $2::uuid
-			`, principal.OrganizationID, input.TargetAssetID).Scan(&currentContainerVersion)
+			SELECT cv.id::text FROM content.note_bindings nb
+			JOIN content.containers c ON c.id = nb.note_container_id
+			JOIN content.container_versions cv ON cv.id = c.current_version_id
+			WHERE nb.organization_id = $1::uuid AND nb.note_asset_id = $2::uuid
+		`, principal.OrganizationID, input.TargetAssetID).Scan(&currentContainerVersion)
 			if errors.Is(err, pgx.ErrNoRows) || currentContainerVersion != input.ExpectedContainerVersionID {
 				return FinalizeResult{}, fmt.Errorf("%w: target container version changed", ErrConflict)
 			}
 		}
-		var nextVersion int
-		if err := tx.QueryRow(ctx, `SELECT COALESCE(MAX(version_no), 0) + 1 FROM asset.asset_versions WHERE asset_id = $1::uuid`, input.TargetAssetID).Scan(&nextVersion); err != nil {
-			return FinalizeResult{}, fmt.Errorf("allocate merge version: %w", err)
+		var targetFieldsMap map[string]any
+		if len(targetFields) > 0 {
+			_ = json.Unmarshal(targetFields, &targetFieldsMap)
 		}
 		mergedMarkdown := strings.TrimSpace(string(targetMarkdown)) + "\n\n" + strings.TrimSpace(string(sourceMarkdown))
-		if err := tx.QueryRow(ctx, `
-			INSERT INTO asset.asset_versions
-						(organization_id, workspace_id, asset_id, resource_model_id, resource_model_version_id, version_no,
-						 workflow_status, quality, title, markdown, fields, parent_version_id, content_checksum, created_by)
-					VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6, 'draft', 'raw', $7, $8, $9::jsonb, $10::uuid, $11, $12::uuid)
-					RETURNING id::text
-				`, principal.OrganizationID, workspaceID, input.TargetAssetID, targetModelID, targetModelVersionID, nextVersion, targetTitle, mergedMarkdown, string(targetFields), targetVersionID, hashBytes(mergedMarkdown), principal.UserID).Scan(&result.AssetVersionID); err != nil {
+		mergeVersionID, _, err := assetservice.CreateVersionTx(ctx, tx, assetservice.VersionMaterial{
+			OrganizationID:         principal.OrganizationID,
+			WorkspaceID:            workspaceID,
+			AssetID:                input.TargetAssetID,
+			ResourceModelID:        targetModelID,
+			ResourceModelVersionID: targetModelVersionID,
+			ParentVersionID:        targetVersionID,
+			Origin:                 assetservice.OriginHuman,
+			ConfirmationStatus:     assetservice.ConfirmationUnconfirmed,
+			Title:                  targetTitle,
+			Markdown:               mergedMarkdown,
+			Fields:                 targetFieldsMap,
+			CreatedBy:              principal.UserID,
+		})
+		if err != nil {
 			return FinalizeResult{}, fmt.Errorf("create merge version: %w", err)
 		}
-		if _, err := tx.Exec(ctx, `UPDATE asset.assets SET current_working_version_id = $2::uuid, updated_at = now() WHERE organization_id = $1::uuid AND id = $3::uuid`, principal.OrganizationID, result.AssetVersionID, input.TargetAssetID); err != nil {
-			return FinalizeResult{}, fmt.Errorf("advance merge target: %w", err)
+		result.AssetVersionID = mergeVersionID
+		if err := advanceAssetDraft(ctx, tx, principal.OrganizationID, workspaceID, input.TargetAssetID, mergeVersionID, targetTitle, mergedMarkdown, targetFieldsMap, principal.UserID); err != nil {
+			return FinalizeResult{}, err
 		}
 		result.AssetID = input.TargetAssetID
 		if err := tx.QueryRow(ctx, `
@@ -579,23 +578,20 @@ func (s Service) FinalizeDerivation(ctx context.Context, principal auth.Principa
 			return FinalizeResult{}, err
 		}
 		if err := tx.QueryRow(ctx, `
-					INSERT INTO asset.assets (organization_id, workspace_id, resource_model_id, publication_status, created_by)
-					VALUES ($1::uuid, $2::uuid, $3::uuid, 'draft', $4::uuid) RETURNING id::text
+					INSERT INTO asset.assets (organization_id, workspace_id, resource_model_id, created_by)
+					VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid) RETURNING id::text
 				`, principal.OrganizationID, workspaceID, sourceModelID, principal.UserID).Scan(&result.AssetID); err != nil {
 			return FinalizeResult{}, fmt.Errorf("create result document asset: %w", err)
 		}
-		if err := tx.QueryRow(ctx, `
-			INSERT INTO asset.asset_versions
-						(organization_id, workspace_id, asset_id, resource_model_id, resource_model_version_id, version_no,
-						 workflow_status, quality, title, markdown, fields, content_checksum, created_by)
-					VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid, 1, 'draft', 'raw', $6, $7, $8::jsonb, $9, $10::uuid)
-					RETURNING id::text
-				`, principal.OrganizationID, workspaceID, result.AssetID, sourceModelID, sourceModelVersionID, title, string(sourceMarkdown), string(sourceFields), hashBytes(string(sourceMarkdown)), principal.UserID).Scan(&result.AssetVersionID); err != nil {
-			return FinalizeResult{}, fmt.Errorf("create result document version: %w", err)
+		var sourceFieldsMap map[string]any
+		if len(sourceFields) > 0 {
+			_ = json.Unmarshal(sourceFields, &sourceFieldsMap)
 		}
-		if _, err := tx.Exec(ctx, `UPDATE asset.assets SET current_working_version_id = $2::uuid, updated_at = now() WHERE organization_id = $1::uuid AND id = $3::uuid`, principal.OrganizationID, result.AssetVersionID, result.AssetID); err != nil {
-			return FinalizeResult{}, fmt.Errorf("set result document version: %w", err)
+		resultVersionID, err := createAssetVersionWithDraft(ctx, tx, principal.OrganizationID, workspaceID, result.AssetID, sourceModelID, sourceModelVersionID, title, string(sourceMarkdown), sourceFieldsMap, principal.UserID)
+		if err != nil {
+			return FinalizeResult{}, err
 		}
+		result.AssetVersionID = resultVersionID
 		if input.Disposition == "reference" {
 			if err := tx.QueryRow(ctx, `
 				INSERT INTO content.asset_relations
@@ -655,39 +651,29 @@ func (s Service) PublishNote(ctx context.Context, principal auth.Principal, idem
 		}
 		return result, nil
 	}
-	var organizationID, noteAssetID, versionID, workflow, previousPublished string
+	var organizationID, noteAssetID, versionID, previousPublished string
 	err = tx.QueryRow(ctx, `
-		SELECT nb.organization_id::text, nb.note_asset_id::text, av.id::text, av.workflow_status,
+		SELECT nb.organization_id::text, nb.note_asset_id::text, av.id::text,
 		       COALESCE(a.current_published_version_id::text, '')
-		FROM content.note_bindings nb
+	FROM content.note_bindings nb
 		JOIN content.conversations c ON c.id = nb.conversation_id
 		JOIN content.workspace_members wm ON wm.workspace_id = c.workspace_id AND wm.user_id = $3::uuid
 		JOIN asset.assets a ON a.id = nb.note_asset_id AND a.organization_id = $1::uuid
-		JOIN asset.asset_versions av ON av.id = a.current_working_version_id
+		JOIN asset.asset_versions av ON av.organization_id = a.organization_id AND av.id = a.current_working_version_id
                 WHERE nb.organization_id = $1::uuid AND nb.conversation_id = $2::uuid
                   AND av.id = $4::uuid
                   AND wm.role <> 'viewer' AND (c.visibility = 'workspace' OR c.initiator_user_id = $3::uuid)
 		FOR UPDATE OF nb, a, av
-	`, principal.OrganizationID, conversationID, principal.UserID, expectedVersionID).Scan(&organizationID, &noteAssetID, &versionID, &workflow, &previousPublished)
+	`, principal.OrganizationID, conversationID, principal.UserID, expectedVersionID).Scan(&organizationID, &noteAssetID, &versionID, &previousPublished)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return NotePublishResult{}, ErrNotFound
 	}
 	if err != nil {
 		return NotePublishResult{}, fmt.Errorf("load note for publish: %w", err)
 	}
-	if workflow != "draft" {
-		return NotePublishResult{}, fmt.Errorf("%w: note version is not publishable", ErrConflict)
-	}
-	if _, err := tx.Exec(ctx, `
-		UPDATE asset.asset_versions
-		SET quality = CASE WHEN quality = 'high_quality' THEN quality ELSE 'human_confirmed' END
-		WHERE id = $1::uuid
-	`, versionID); err != nil {
-		return NotePublishResult{}, fmt.Errorf("confirm note version: %w", err)
-	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE asset.assets
-		SET current_published_version_id = $2::uuid, publication_status = 'published', updated_at = now()
+		SET current_published_version_id = $2::uuid, publication_status = 'published', published_at = now(), updated_at = now()
 		WHERE id = $1::uuid
 	`, noteAssetID, versionID); err != nil {
 		return NotePublishResult{}, fmt.Errorf("publish note asset: %w", err)
@@ -696,14 +682,14 @@ func (s Service) PublishNote(ctx context.Context, principal auth.Principal, idem
 		return NotePublishResult{}, errors.New("event store is not initialized")
 	}
 	if previousPublished != "" && previousPublished != versionID {
-		if err := retrieval.EnqueueProjectionTx(ctx, tx, s.Events, organizationID, previousPublished, retrieval.ProjectionDelete); err != nil {
+		if err := retrieval.UpsertProjectionTx(ctx, tx, previousPublished); err != nil {
 			return NotePublishResult{}, err
 		}
 	}
-	if err := retrieval.EnqueueProjectionTx(ctx, tx, s.Events, organizationID, versionID, retrieval.ProjectionRebuild); err != nil {
+	if err := retrieval.UpsertProjectionTx(ctx, tx, versionID); err != nil {
 		return NotePublishResult{}, err
 	}
-	result := NotePublishResult{ConversationID: conversationID, NoteAssetID: noteAssetID, AssetVersionID: versionID, PublicationStatus: "published", Quality: "human_confirmed"}
+	result := NotePublishResult{ConversationID: conversationID, NoteAssetID: noteAssetID, AssetVersionID: versionID, PublicationStatus: "published"}
 	body, _ := json.Marshal(result)
 	if err := saveIdempotency(ctx, tx, principal, "conversation.note.publish", idempotencyKey, body); err != nil {
 		return NotePublishResult{}, err
@@ -739,18 +725,18 @@ func (s Service) SyncNote(ctx context.Context, principal auth.Principal, idempot
 		}
 		return result, nil
 	}
-	var noteContainerID, noteAssetID, resourceModelID, resourceModelVersionID string
+	var workspaceID, noteContainerID, noteAssetID, resourceModelID, resourceModelVersionID string
 	if err := tx.QueryRow(ctx, `
-		SELECT nb.note_container_id::text, nb.note_asset_id::text, av.resource_model_id::text, av.resource_model_version_id::text
+		SELECT c.workspace_id::text, nb.note_container_id::text, nb.note_asset_id::text, av.resource_model_id::text, av.resource_model_version_id::text
 		FROM content.note_bindings nb
 		JOIN content.conversations c ON c.id = nb.conversation_id
                 JOIN content.workspace_members wm ON wm.workspace_id = c.workspace_id AND wm.user_id = $3::uuid
 		JOIN asset.assets a ON a.id = nb.note_asset_id AND a.organization_id = $1::uuid
-		JOIN asset.asset_versions av ON av.id = a.current_working_version_id
+		JOIN asset.asset_versions av ON av.organization_id = a.organization_id AND av.id = a.current_working_version_id
                 WHERE nb.organization_id = $1::uuid AND nb.conversation_id = $2::uuid
                   AND wm.role <> 'viewer' AND (c.visibility = 'workspace' OR c.initiator_user_id = $3::uuid)
 		FOR UPDATE OF nb, a
-	`, principal.OrganizationID, conversationID, principal.UserID).Scan(&noteContainerID, &noteAssetID, &resourceModelID, &resourceModelVersionID); err != nil {
+	`, principal.OrganizationID, conversationID, principal.UserID).Scan(&workspaceID, &noteContainerID, &noteAssetID, &resourceModelID, &resourceModelVersionID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return NoteSyncResult{}, ErrNotFound
 		}
@@ -839,26 +825,41 @@ func (s Service) SyncNote(ctx context.Context, principal auth.Principal, idempot
 	if _, err := tx.Exec(ctx, `UPDATE content.containers SET current_version_id = $2::uuid, updated_at = now() WHERE organization_id = $1::uuid AND id = $3::uuid`, principal.OrganizationID, noteContainerVersionID, noteContainerID); err != nil {
 		return NoteSyncResult{}, fmt.Errorf("advance note container version: %w", err)
 	}
-	var nextVersion int
-	if err := tx.QueryRow(ctx, `SELECT COALESCE(MAX(version_no), 0) + 1 FROM asset.asset_versions WHERE asset_id = $1::uuid`, noteAssetID).Scan(&nextVersion); err != nil {
-		return NoteSyncResult{}, fmt.Errorf("allocate note version: %w", err)
-	}
-	var versionID string
+	// Snapshot the conversation transcript as a new immutable working version
+	// derived from the current one, then move the shared draft base on top.
+	var currentVersionID, currentTitle string
+	var currentFields []byte
 	if err := tx.QueryRow(ctx, `
-		INSERT INTO asset.asset_versions
-				(organization_id, workspace_id, asset_id, resource_model_id, resource_model_version_id, version_no,
-				 workflow_status, quality, title, markdown, fields, parent_version_id, content_checksum, created_by)
-			SELECT a.organization_id, a.workspace_id, a.id, $2::uuid, $3::uuid, $4, 'draft', 'raw',
-		       COALESCE(av.title, 'Untitled Note'), $5, COALESCE(av.fields, '{}'::jsonb), av.id, $6, $7::uuid
+		SELECT av.id::text, COALESCE(av.title, 'Untitled Note'), av.fields
 		FROM asset.assets a
-		JOIN asset.asset_versions av ON av.id = a.current_working_version_id
-		WHERE a.id = $1::uuid
-		RETURNING id::text
-	`, noteAssetID, resourceModelID, resourceModelVersionID, nextVersion, content, checksum, principal.UserID).Scan(&versionID); err != nil {
+		JOIN asset.asset_versions av ON av.organization_id = a.organization_id AND av.id = a.current_working_version_id
+		WHERE a.organization_id = $1::uuid AND a.id = $2::uuid
+	`, principal.OrganizationID, noteAssetID).Scan(&currentVersionID, &currentTitle, &currentFields); err != nil {
+		return NoteSyncResult{}, fmt.Errorf("load note working version: %w", err)
+	}
+	var currentFieldsMap map[string]any
+	if len(currentFields) > 0 {
+		_ = json.Unmarshal(currentFields, &currentFieldsMap)
+	}
+	versionID, _, err := assetservice.CreateVersionTx(ctx, tx, assetservice.VersionMaterial{
+		OrganizationID:         principal.OrganizationID,
+		WorkspaceID:            workspaceID,
+		AssetID:                noteAssetID,
+		ResourceModelID:        resourceModelID,
+		ResourceModelVersionID: resourceModelVersionID,
+		ParentVersionID:        currentVersionID,
+		Origin:                 assetservice.OriginHuman,
+		ConfirmationStatus:     assetservice.ConfirmationUnconfirmed,
+		Title:                  currentTitle,
+		Markdown:               content,
+		Fields:                 currentFieldsMap,
+		CreatedBy:              principal.UserID,
+	})
+	if err != nil {
 		return NoteSyncResult{}, fmt.Errorf("create note version: %w", err)
 	}
-	if _, err := tx.Exec(ctx, `UPDATE asset.assets SET current_working_version_id = $2::uuid, updated_at = now() WHERE id = $1::uuid`, noteAssetID, versionID); err != nil {
-		return NoteSyncResult{}, fmt.Errorf("advance note version: %w", err)
+	if err := advanceAssetDraft(ctx, tx, principal.OrganizationID, workspaceID, noteAssetID, versionID, currentTitle, content, currentFieldsMap, principal.UserID); err != nil {
+		return NoteSyncResult{}, err
 	}
 	if _, err := tx.Exec(ctx, `UPDATE content.note_bindings SET last_synced_message_sequence = $2, updated_at = now() WHERE conversation_id = $1::uuid`, conversationID, lastSequence); err != nil {
 		return NoteSyncResult{}, fmt.Errorf("advance note sync cursor: %w", err)
@@ -1247,23 +1248,13 @@ func (s Service) CreateConversation(ctx context.Context, principal auth.Principa
 	var noteAsset string
 	if err := tx.QueryRow(ctx, `
 			INSERT INTO asset.assets
-					(organization_id, workspace_id, resource_model_id, publication_status, created_by)
-				VALUES ($1::uuid, $2::uuid, $3::uuid, 'draft', $4::uuid) RETURNING id::text
+					(organization_id, workspace_id, resource_model_id, created_by)
+				VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid) RETURNING id::text
 		`, principal.OrganizationID, input.WorkspaceID, defaultModel, principal.UserID).Scan(&noteAsset); err != nil {
 		return ConversationResult{}, fmt.Errorf("create note asset: %w", err)
 	}
-	var noteVersion string
-	if err := tx.QueryRow(ctx, `
-			INSERT INTO asset.asset_versions
-					(organization_id, workspace_id, asset_id, resource_model_id, resource_model_version_id, version_no,
-						 workflow_status, quality, title, markdown, fields, content_checksum, created_by)
-				VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid, 1, 'draft', 'raw', $6, '', '{}'::jsonb, $7, $8::uuid)
-				RETURNING id::text
-		`, principal.OrganizationID, input.WorkspaceID, noteAsset, defaultModel, modelVersion, input.Title, checksum, principal.UserID).Scan(&noteVersion); err != nil {
-		return ConversationResult{}, fmt.Errorf("create note asset version: %w", err)
-	}
-	if _, err := tx.Exec(ctx, `UPDATE asset.assets SET current_working_version_id = $2::uuid WHERE id = $1::uuid`, noteAsset, noteVersion); err != nil {
-		return ConversationResult{}, fmt.Errorf("set note working version: %w", err)
+	if _, err := createAssetVersionWithDraft(ctx, tx, principal.OrganizationID, input.WorkspaceID, noteAsset, defaultModel, modelVersion, input.Title, "", nil, principal.UserID); err != nil {
+		return ConversationResult{}, err
 	}
 	var conversationID string
 	if err := tx.QueryRow(ctx, `
@@ -1355,29 +1346,27 @@ func (s Service) RegisterMedia(ctx context.Context, principal auth.Principal, id
 		}
 		return result, nil
 	}
-	var noteAssetID string
+	var conversationActive bool
 	if err := tx.QueryRow(ctx, `
-		SELECT nb.note_asset_id::text
-		FROM content.conversations c
-                JOIN content.workspace_members wm ON wm.workspace_id = c.workspace_id AND wm.user_id = $3::uuid
-                JOIN content.note_bindings nb ON nb.conversation_id = c.id
-                WHERE c.organization_id = $1::uuid AND c.id = $2::uuid AND c.status = 'active'
-                  AND wm.role <> 'viewer' AND (c.visibility = 'workspace' OR c.initiator_user_id = $3::uuid)
-	`, principal.OrganizationID, input.ConversationID, principal.UserID).Scan(&noteAssetID); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return MediaResult{}, ErrNotFound
-		}
+		SELECT EXISTS (
+			SELECT 1
+			FROM content.conversations c
+			JOIN content.workspace_members wm ON wm.workspace_id = c.workspace_id AND wm.user_id = $3::uuid
+			WHERE c.organization_id = $1::uuid AND c.id = $2::uuid AND c.status = 'active'
+			  AND wm.role <> 'viewer' AND (c.visibility = 'workspace' OR c.initiator_user_id = $3::uuid)
+		)
+	`, principal.OrganizationID, input.ConversationID, principal.UserID).Scan(&conversationActive); err != nil {
 		return MediaResult{}, fmt.Errorf("load media conversation: %w", err)
+	}
+	if !conversationActive {
+		return MediaResult{}, ErrNotFound
 	}
 	var mediaType, scanStatus string
 	if err := tx.QueryRow(ctx, `
-		SELECT at.media_type, at.scan_status
+		SELECT at.media_type, at.status
 		FROM asset.attachments at
-		JOIN asset.asset_versions av ON av.id = at.asset_version_id
-		JOIN asset.assets a ON a.id = av.asset_id
-		WHERE at.organization_id = $1::uuid AND at.id = $2::uuid
-		  AND a.id = $3::uuid AND a.current_working_version_id = av.id
-	`, principal.OrganizationID, input.AttachmentID, noteAssetID).Scan(&mediaType, &scanStatus); err != nil {
+		WHERE at.organization_id = $1::uuid AND at.id = $2::uuid AND at.deleted_at IS NULL
+	`, principal.OrganizationID, input.AttachmentID).Scan(&mediaType, &scanStatus); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return MediaResult{}, ErrNotFound
 		}
@@ -1593,6 +1582,73 @@ func createEmptyContainerVersion(ctx context.Context, tx pgx.Tx, organizationID,
 	}
 	if _, err := tx.Exec(ctx, `UPDATE content.containers SET current_version_id = $2::uuid WHERE id = $1::uuid`, containerID, versionID); err != nil {
 		return fmt.Errorf("set initial container version: %w", err)
+	}
+	return nil
+}
+
+// createAssetVersionWithDraft seeds a freshly inserted asset with its first
+// immutable working version and the shared draft. Version creation goes
+// through asset.CreateVersionTx; the draft starts at revision 1.
+func createAssetVersionWithDraft(ctx context.Context, tx pgx.Tx, organizationID, workspaceID, assetID, resourceModelID, resourceModelVersionID, title, markdown string, fields map[string]any, userID string) (string, error) {
+	if fields == nil {
+		fields = map[string]any{}
+	}
+	versionID, _, err := assetservice.CreateVersionTx(ctx, tx, assetservice.VersionMaterial{
+		OrganizationID:         organizationID,
+		WorkspaceID:            workspaceID,
+		AssetID:                assetID,
+		ResourceModelID:        resourceModelID,
+		ResourceModelVersionID: resourceModelVersionID,
+		Origin:                 assetservice.OriginHuman,
+		ConfirmationStatus:     assetservice.ConfirmationUnconfirmed,
+		Title:                  title,
+		Markdown:               markdown,
+		Fields:                 fields,
+		CreatedBy:              userID,
+	})
+	if err != nil {
+		return "", fmt.Errorf("create initial asset version: %w", err)
+	}
+	if err := insertAssetDraft(ctx, tx, organizationID, workspaceID, assetID, versionID, title, markdown, fields, userID); err != nil {
+		return "", err
+	}
+	return versionID, nil
+}
+
+// advanceAssetDraft moves the shared draft base to a newly created version on
+// an existing asset, creating the draft when the asset predates the draft.
+func advanceAssetDraft(ctx context.Context, tx pgx.Tx, organizationID, workspaceID, assetID, versionID, title, markdown string, fields map[string]any, userID string) error {
+	return insertAssetDraft(ctx, tx, organizationID, workspaceID, assetID, versionID, title, markdown, fields, userID)
+}
+
+func insertAssetDraft(ctx context.Context, tx pgx.Tx, organizationID, workspaceID, assetID, versionID, title, markdown string, fields map[string]any, userID string) error {
+	fieldsJSON, err := json.Marshal(fields)
+	if err != nil {
+		return fmt.Errorf("encode draft fields: %w", err)
+	}
+	var draftID string
+	if err := tx.QueryRow(ctx, `
+		INSERT INTO asset.asset_drafts
+			(organization_id, workspace_id, asset_id, base_version_id, revision, committed_revision,
+			 title, summary, markdown, fields, origin, updated_by)
+		VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, 1, 1, $5, '', $6, $7::jsonb, 'human', $8::uuid)
+		ON CONFLICT (asset_id) DO UPDATE SET
+			base_version_id = EXCLUDED.base_version_id,
+			title = EXCLUDED.title,
+			markdown = EXCLUDED.markdown,
+			fields = EXCLUDED.fields,
+			revision = asset.asset_drafts.revision + 1,
+			updated_by = EXCLUDED.updated_by,
+			updated_at = now()
+		RETURNING id::text
+	`, organizationID, workspaceID, assetID, versionID, title, markdown, string(fieldsJSON), userID).Scan(&draftID); err != nil {
+		return fmt.Errorf("upsert asset draft: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE asset.assets SET draft_id = $3::uuid, updated_at = now()
+		WHERE organization_id = $1::uuid AND id = $2::uuid
+	`, organizationID, assetID, draftID); err != nil {
+		return fmt.Errorf("bind asset draft: %w", err)
 	}
 	return nil
 }

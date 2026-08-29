@@ -1,11 +1,9 @@
 package httpapi
 
 import (
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -17,102 +15,7 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-type reviewCommentRequest struct {
-	Body string `json:"body"`
-}
 
-func reviewComments(deps Dependencies) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		principal, ok := requireMemberSession(w, r, deps)
-		if !ok {
-			return
-		}
-		if !requirePathUUID(w, r.PathValue("reviewId")) {
-			return
-		}
-		if deps.Store == nil || deps.Store.Pool == nil {
-			writeError(w, http.StatusInternalServerError, "database_unconfigured")
-			return
-		}
-		if _, err := deps.ReviewService.Get(r.Context(), principal, r.PathValue("reviewId")); err != nil {
-			writeReviewError(w, err, "review_load_failed")
-			return
-		}
-		switch r.Method {
-		case http.MethodGet:
-			rows, err := deps.Store.Pool.Query(r.Context(), `
-				SELECT c.id::text, c.body, c.created_at, u.id::text, u.display_name
-				FROM content.review_comments c
-				JOIN identity.users u ON u.id = c.author_user_id
-				WHERE c.organization_id = $1::uuid AND c.review_id = $2::uuid
-				ORDER BY c.created_at, c.id`, principal.OrganizationID, r.PathValue("reviewId"))
-			if err != nil {
-				writeError(w, http.StatusInternalServerError, "review_comment_list_failed")
-				return
-			}
-			defer rows.Close()
-			items := make([]map[string]any, 0)
-			for rows.Next() {
-				var id, body, authorID, authorName string
-				var createdAt time.Time
-				if err := rows.Scan(&id, &body, &createdAt, &authorID, &authorName); err != nil {
-					writeError(w, http.StatusInternalServerError, "review_comment_list_failed")
-					return
-				}
-				items = append(items, map[string]any{
-					"id": id, "body": body, "author": map[string]string{"id": authorID, "display_name": authorName},
-					"created_at": createdAt,
-				})
-			}
-			if err := rows.Err(); err != nil {
-				writeError(w, http.StatusInternalServerError, "review_comment_list_failed")
-				return
-			}
-			writeJSON(w, http.StatusOK, map[string]any{"items": items, "has_more": false})
-		case http.MethodPost:
-			key, ok := requestIdempotencyKey(w, r)
-			if !ok {
-				writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
-				return
-			}
-			var input reviewCommentRequest
-			decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 32*1024))
-			decoder.DisallowUnknownFields()
-			if err := decoder.Decode(&input); err != nil || strings.TrimSpace(input.Body) == "" || len(input.Body) > 20000 {
-				writeError(w, http.StatusUnprocessableEntity, "validation_failed")
-				return
-			}
-			body := strings.TrimSpace(input.Body)
-			requestHash := fmt.Sprintf("%x", sha256.Sum256([]byte(body)))
-			var id string
-			var createdAt time.Time
-			var storedHash string
-			err := deps.Store.Pool.QueryRow(r.Context(), `
-                                INSERT INTO content.review_comments
-                                        (organization_id, review_id, author_user_id, body, idempotency_key, request_hash)
-                                VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6)
-                                ON CONFLICT (organization_id, review_id, author_user_id, idempotency_key)
-                                        WHERE idempotency_key IS NOT NULL
-                                        DO UPDATE SET idempotency_key = EXCLUDED.idempotency_key
-                                RETURNING id::text, created_at, request_hash`,
-				principal.OrganizationID, r.PathValue("reviewId"), principal.UserID, body, key, requestHash).Scan(&id, &createdAt, &storedHash)
-			if err != nil {
-				writeError(w, http.StatusInternalServerError, "review_comment_create_failed")
-				return
-			}
-			if storedHash != requestHash {
-				writeError(w, http.StatusConflict, "idempotency_key_reused")
-				return
-			}
-			writeJSON(w, http.StatusCreated, map[string]any{
-				"id": id, "body": body,
-				"author": map[string]string{"id": principal.UserID}, "created_at": createdAt,
-			})
-		default:
-			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
-		}
-	}
-}
 
 func searchSuggestions(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {

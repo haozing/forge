@@ -235,13 +235,12 @@ func (p OperationProcessor) assetPreparationVersions(ctx context.Context, runID 
 	for _, assetID := range assetIDs {
 		var versionID string
 		err := p.Store.Pool.QueryRow(ctx, `
-			UPDATE asset.asset_versions v SET workflow_status = 'submitted', processing_started_at = NULL
+			SELECT a.current_working_version_id::text
 			FROM asset.assets a
 			WHERE a.id = $1::uuid
 			  AND a.organization_id = (SELECT organization_id FROM automation.runs WHERE id = $2::uuid)
-			  AND v.id = a.current_working_version_id
-			  AND v.workflow_status IN ('draft', 'submitted')
-			RETURNING v.id::text
+			  AND a.current_working_version_id IS NOT NULL
+			  AND a.deleted_at IS NULL
 		`, assetID, runID).Scan(&versionID)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, fmt.Errorf("asset %s is not editable", assetID)
@@ -277,11 +276,12 @@ func (p OperationProcessor) publishAssets(ctx context.Context, claimed ClaimedRu
 			tx.Rollback(ctx)
 			return err
 		}
-		if _, err := tx.Exec(ctx, `UPDATE asset.asset_versions SET quality = CASE WHEN quality = 'raw' THEN 'human_confirmed' ELSE quality END WHERE id = $1::uuid`, versionID); err != nil {
-			tx.Rollback(ctx)
-			return err
-		}
-		if _, err := tx.Exec(ctx, `UPDATE asset.assets SET current_published_version_id = $2::uuid, publication_status = 'published', updated_at = now() WHERE id = $1::uuid`, assetID, versionID); err != nil {
+		if _, err := tx.Exec(ctx, `
+			UPDATE asset.assets
+			SET current_published_version_id = $2::uuid, publication_status = 'published',
+			    published_at = now(), updated_at = now()
+			WHERE organization_id = $1::uuid AND id = $3::uuid
+		`, organizationID, versionID, assetID); err != nil {
 			tx.Rollback(ctx)
 			return err
 		}
@@ -289,15 +289,15 @@ func (p OperationProcessor) publishAssets(ctx context.Context, claimed ClaimedRu
 			tx.Rollback(ctx)
 			return err
 		}
-		if err := retrieval.EnqueueProjectionTx(ctx, tx, p.Events, organizationID, versionID, retrieval.ProjectionRebuild); err != nil {
-			tx.Rollback(ctx)
-			return err
-		}
 		if previousPublishedID != nil && *previousPublishedID != versionID {
-			if err := retrieval.EnqueueProjectionTx(ctx, tx, p.Events, organizationID, *previousPublishedID, retrieval.ProjectionDelete); err != nil {
+			if err := retrieval.UpsertProjectionTx(ctx, tx, *previousPublishedID); err != nil {
 				tx.Rollback(ctx)
 				return err
 			}
+		}
+		if err := retrieval.UpsertProjectionTx(ctx, tx, versionID); err != nil {
+			tx.Rollback(ctx)
+			return err
 		}
 		if err := tx.Commit(ctx); err != nil {
 			return err
@@ -324,20 +324,26 @@ func (p OperationProcessor) archiveAssets(ctx context.Context, claimed ClaimedRu
 		return err
 	}
 	defer rows.Close()
+	var versionIDs []string
 	for rows.Next() {
 		var versionID string
 		if err := rows.Scan(&versionID); err != nil {
 			return err
 		}
-		if err := retrieval.EnqueueProjectionTx(ctx, tx, p.Events, orgID, versionID, retrieval.ProjectionDelete); err != nil {
-			return err
-		}
+		versionIDs = append(versionIDs, versionID)
 	}
 	if err := rows.Err(); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(ctx, `UPDATE asset.assets SET publication_status = 'archived', current_published_version_id = NULL, updated_at = now() WHERE id = ANY($1::uuid[]) AND organization_id = $2::uuid`, assetIDs, orgID); err != nil {
 		return err
+	}
+	// With the published pointer cleared the projector retracts these versions
+	// from the retrieval index.
+	for _, versionID := range versionIDs {
+		if err := retrieval.UpsertProjectionTx(ctx, tx, versionID); err != nil {
+			return err
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return err
@@ -354,17 +360,17 @@ func (p OperationProcessor) reindexAssets(ctx context.Context, claimed ClaimedRu
 		return err
 	}
 	defer tx.Rollback(ctx)
-	rows, err := tx.Query(ctx, `SELECT a.organization_id::text, COALESCE(a.current_working_version_id, a.current_published_version_id)::text FROM asset.assets a WHERE a.id = ANY($1::uuid[]) AND a.organization_id = (SELECT organization_id FROM automation.runs WHERE id = $2::uuid)`, assetIDs, claimed.Run.ID)
+	rows, err := tx.Query(ctx, `SELECT COALESCE(a.current_working_version_id, a.current_published_version_id)::text FROM asset.assets a WHERE a.id = ANY($1::uuid[]) AND a.organization_id = (SELECT organization_id FROM automation.runs WHERE id = $2::uuid) AND COALESCE(a.current_working_version_id, a.current_published_version_id) IS NOT NULL`, assetIDs, claimed.Run.ID)
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var org, versionID string
-		if err := rows.Scan(&org, &versionID); err != nil {
+		var versionID string
+		if err := rows.Scan(&versionID); err != nil {
 			return err
 		}
-		if err := retrieval.EnqueueProjectionTx(ctx, tx, p.Events, org, versionID, retrieval.ProjectionRebuild); err != nil {
+		if err := retrieval.UpsertProjectionTx(ctx, tx, versionID); err != nil {
 			return err
 		}
 	}

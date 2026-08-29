@@ -182,13 +182,15 @@ func TestWriteAuditEventWithMemorySink(t *testing.T) {
 }
 
 func TestValidMemberRole(t *testing.T) {
-	valid := []string{"admin", "editor", "reviewer", "viewer", "member", "owner"}
+	// v2 contract: the closed workspace role set is admin/editor/reviewer/viewer.
+	// There is no workspace owner and no workspace member role.
+	valid := []string{"admin", "editor", "reviewer", "viewer"}
 	for _, role := range valid {
 		if !validMemberRole(role) {
 			t.Fatalf("%q should be valid", role)
 		}
 	}
-	for _, role := range []string{"", " owner", "owner ", "superadmin", "Owner"} {
+	for _, role := range []string{"", " owner", "owner ", "superadmin", "Owner", "member", "owner"} {
 		if validMemberRole(role) {
 			t.Fatalf("%q should be invalid before trimming", role)
 		}

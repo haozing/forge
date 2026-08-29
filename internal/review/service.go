@@ -1,5 +1,9 @@
 package review
 
+// service.go — the single-level PublicationRequest aggregate. Approval is the
+// only command that flips the published pointer under the approval policy;
+// no review action ever mutates AssetVersion content.
+
 import (
 	"context"
 	"encoding/base64"
@@ -9,60 +13,63 @@ import (
 	"strings"
 	"time"
 
+	"agentchunzhi/internal/access"
+	"agentchunzhi/internal/asset"
 	"agentchunzhi/internal/auth"
 	"agentchunzhi/internal/authz"
+	"agentchunzhi/internal/eventing"
 	"agentchunzhi/internal/store"
 
 	"github.com/jackc/pgx/v5"
 )
 
 var (
-	ErrInvalidInput = errors.New("invalid review input")
-	ErrForbidden    = errors.New("review access denied")
-	ErrNotFound     = errors.New("review not found")
-	ErrConflict     = errors.New("review conflict")
+	ErrInvalidInput      = errors.New("invalid publication request input")
+	ErrForbidden         = errors.New("publication action forbidden")
+	ErrNotFound          = errors.New("publication request not found")
+	ErrConflict          = errors.New("publication request conflict")
+	ErrSelfApproval      = errors.New("submitter cannot approve own request")
+	ErrVersionSuperseded = errors.New("request version is no longer the working version")
 )
 
+// VersionCommitter lets the review service materialize a dirty draft into a
+// working version without importing the HTTP or asset-internal details.
+type VersionCommitter interface {
+	CommitDraft(ctx context.Context, principal auth.Principal, workspaceID, assetID, expectedDraftRevision string) (asset.CommitResult, error)
+}
+
 type Service struct {
-	Store  *store.Store
-	Policy authz.WorkspacePolicy
+	Store     *store.Store
+	Policy    authz.WorkspacePolicy
+	Events    *eventing.EventStore
+	Committer VersionCommitter
 }
 
-type Item struct {
-	ID                string         `json:"review_id"`
-	WorkspaceID       string         `json:"workspace_id"`
-	AssetID           string         `json:"asset_id"`
-	AssetVersionID    string         `json:"asset_version_id"`
-	ResourceModelID   string         `json:"resource_model_id"`
-	ResourceModelName string         `json:"resource_model_name"`
-	Title             *string        `json:"title"`
-	Fields            map[string]any `json:"fields"`
-	Quality           string         `json:"quality"`
-	Status            string         `json:"status"`
-	Comment           string         `json:"comment"`
-	SubmittedBy       Actor          `json:"submitted_by"`
-	ReviewedBy        *Actor         `json:"reviewed_by,omitempty"`
-	SubmittedAt       time.Time      `json:"submitted_at"`
-	ReviewedAt        *time.Time     `json:"reviewed_at,omitempty"`
-	ETag              string         `json:"etag"`
+type Request struct {
+	ID              string     `json:"id"`
+	WorkspaceID     string     `json:"workspace_id"`
+	AssetID         string     `json:"asset_id"`
+	AssetVersionID  string     `json:"asset_version_id"`
+	Status          string     `json:"status"`
+	SubmittedBy     string     `json:"submitted_by"`
+	DecidedBy       *string    `json:"decided_by"`
+	DecisionComment *string    `json:"decision_comment"`
+	CancelledBy     *string    `json:"cancelled_by"`
+	CancelReason    *string    `json:"cancel_reason"`
+	SubmittedAt     time.Time  `json:"submitted_at"`
+	DecidedAt       *time.Time `json:"decided_at"`
+	Revision        int64      `json:"revision"`
+	ETag            string     `json:"etag"`
+	Title           string     `json:"title,omitempty"`
+	AssetVisibility string     `json:"asset_visibility,omitempty"`
 }
 
-type Actor struct {
-	ID          string `json:"id"`
-	DisplayName string `json:"display_name"`
-}
-
-type DecisionInput struct {
-	Comment           string `json:"comment"`
-	ExpectedVersionID string `json:"expected_version_id"`
-}
-
-type DecisionResult struct {
-	ReviewID       string `json:"review_id"`
-	AssetID        string `json:"asset_id"`
-	AssetVersionID string `json:"asset_version_id"`
-	Status         string `json:"status"`
-	Decision       string `json:"decision"`
+type Comment struct {
+	ID                   string    `json:"id"`
+	PublicationRequestID string    `json:"publication_request_id"`
+	Body                 string    `json:"body"`
+	AuthorUserID         string    `json:"author_user_id"`
+	CreatedAt            time.Time `json:"created_at"`
 }
 
 type ListInput struct {
@@ -76,283 +83,50 @@ type ListInput struct {
 }
 
 type Page struct {
-	Items      []Item
+	Items      []Request
 	HasMore    bool
 	NextCursor string
 }
 
-func (s Service) require(ctx context.Context, principal auth.Principal, workspaceID, modelID, action string) error {
-	if principal.UserType != "member" || s.Store == nil || s.Store.Pool == nil || s.Policy == nil {
-		return ErrForbidden
-	}
-	_, err := s.Policy.Require(ctx, principal, workspaceID, modelID, action)
-	if errors.Is(err, authz.ErrWorkspaceForbidden) || errors.Is(err, authz.ErrWorkspaceNotFound) {
-		return ErrForbidden
-	}
-	return err
+type DecisionInput struct {
+	Comment string
 }
 
-func (s Service) ListPage(ctx context.Context, principal auth.Principal, workspaceID string, input ListInput) (Page, error) {
-	if !validID(workspaceID) || (input.ResourceModelID != "" && !validID(input.ResourceModelID)) || (input.SubmittedBy != "" && !validID(input.SubmittedBy)) {
-		return Page{}, ErrInvalidInput
-	}
-	input.Status = strings.TrimSpace(input.Status)
-	if input.Status != "" && input.Status != "pending" && input.Status != "approved" && input.Status != "rejected" && input.Status != "superseded" {
-		return Page{}, ErrInvalidInput
-	}
-	limit := input.Limit
-	if limit == 0 {
-		limit = 50
-	}
-	if limit < 1 || limit > 100 {
-		return Page{}, ErrInvalidInput
-	}
-	createdFrom, err := parseReviewTime(input.CreatedFrom)
-	if err != nil {
-		return Page{}, err
-	}
-	createdTo, err := parseReviewTime(input.CreatedTo)
-	if err != nil || (createdFrom != nil && createdTo != nil && createdFrom.After(*createdTo)) {
-		return Page{}, ErrInvalidInput
-	}
-	cursor, err := decodeReviewCursor(input.Cursor)
-	if err != nil {
-		return Page{}, err
-	}
-	if err := s.require(ctx, principal, workspaceID, input.ResourceModelID, "asset.review"); err != nil {
-		return Page{}, err
-	}
-	fromValue, toValue := "", ""
-	if createdFrom != nil {
-		fromValue = createdFrom.UTC().Format(time.RFC3339Nano)
-	}
-	if createdTo != nil {
-		toValue = createdTo.UTC().Format(time.RFC3339Nano)
-	}
-	rows, err := s.Store.Pool.Query(ctx, `
-		SELECT r.id::text, r.workspace_id::text, r.asset_id::text, r.asset_version_id::text,
-		       v.resource_model_id::text, rm.name, v.title, v.fields, v.quality, r.status, r.comment,
-		       su.id::text, su.display_name, ru.id::text, ru.display_name,
-		       r.submitted_at, r.reviewed_at
-		FROM asset.asset_reviews r
-		JOIN asset.asset_versions v ON v.id = r.asset_version_id
-		JOIN model.resource_models rm ON rm.id = v.resource_model_id
-		JOIN identity.users su ON su.id = r.submitted_by
-		LEFT JOIN identity.users ru ON ru.id = r.reviewed_by
-		WHERE r.organization_id = $1::uuid AND r.workspace_id = $2::uuid
-		  AND ($3 = '' OR r.status = $3)
-		  AND ($4 = '' OR v.resource_model_id = NULLIF($4, '')::uuid)
-		  AND ($5 = '' OR r.submitted_by = NULLIF($5, '')::uuid)
-		  AND ($6 = '' OR r.submitted_at >= NULLIF($6, '')::timestamptz)
-		  AND ($7 = '' OR r.submitted_at <= NULLIF($7, '')::timestamptz)
-		  AND ($8 = '' OR (r.submitted_at, r.id) < (NULLIF($9, '')::timestamptz, NULLIF($10, '')::uuid))
-		ORDER BY r.submitted_at DESC, r.id DESC LIMIT $11
-	`, principal.OrganizationID, workspaceID, input.Status, input.ResourceModelID, input.SubmittedBy, fromValue, toValue, input.Cursor, cursor.SubmittedAt, cursor.ID, limit+1)
-	if err != nil {
-		return Page{}, fmt.Errorf("list reviews: %w", err)
-	}
-	defer rows.Close()
-	items := make([]Item, 0, limit+1)
-	for rows.Next() {
-		item, err := scanItem(rows)
-		if err != nil {
-			return Page{}, err
-		}
-		items = append(items, item)
-	}
-	if err := rows.Err(); err != nil {
-		return Page{}, fmt.Errorf("iterate reviews: %w", err)
-	}
-	page := Page{Items: items}
-	if len(page.Items) > limit {
-		page.HasMore = true
-		page.Items = page.Items[:limit]
-		last := page.Items[len(page.Items)-1]
-		page.NextCursor = encodeReviewCursor(last.SubmittedAt, last.ID)
-	}
-	return page, nil
-}
-
-type reviewCursor struct {
-	SubmittedAt string `json:"submitted_at"`
-	ID          string `json:"id"`
-}
-
-func encodeReviewCursor(submittedAt time.Time, id string) string {
-	raw, _ := json.Marshal(reviewCursor{SubmittedAt: submittedAt.UTC().Format(time.RFC3339Nano), ID: id})
-	return base64.RawURLEncoding.EncodeToString(raw)
-}
-
-func decodeReviewCursor(value string) (reviewCursor, error) {
-	if strings.TrimSpace(value) == "" {
-		return reviewCursor{}, nil
-	}
-	raw, err := base64.RawURLEncoding.DecodeString(value)
-	if err != nil {
-		return reviewCursor{}, ErrInvalidInput
-	}
-	var cursor reviewCursor
-	if err := json.Unmarshal(raw, &cursor); err != nil || !validID(cursor.ID) {
-		return reviewCursor{}, ErrInvalidInput
-	}
-	if _, err := time.Parse(time.RFC3339Nano, cursor.SubmittedAt); err != nil {
-		return reviewCursor{}, ErrInvalidInput
-	}
-	return cursor, nil
-}
-
-func parseReviewTime(value string) (*time.Time, error) {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return nil, nil
-	}
-	parsed, err := time.Parse(time.RFC3339Nano, value)
-	if err != nil {
-		return nil, ErrInvalidInput
-	}
-	return &parsed, nil
-}
-
-func (s Service) Get(ctx context.Context, principal auth.Principal, reviewID string) (Item, error) {
-	if !validID(reviewID) {
-		return Item{}, ErrInvalidInput
-	}
-	var workspaceID, modelID string
-	err := s.Store.Pool.QueryRow(ctx, `SELECT r.workspace_id::text, v.resource_model_id::text FROM asset.asset_reviews r JOIN asset.asset_versions v ON v.id = r.asset_version_id WHERE r.organization_id = $1::uuid AND r.id = $2::uuid`, principal.OrganizationID, reviewID).Scan(&workspaceID, &modelID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return Item{}, ErrNotFound
-	}
-	if err != nil {
-		return Item{}, fmt.Errorf("load review scope: %w", err)
-	}
-	if err := s.require(ctx, principal, workspaceID, modelID, "asset.review"); err != nil {
-		return Item{}, err
-	}
-	row := s.Store.Pool.QueryRow(ctx, `
-		SELECT r.id::text, r.workspace_id::text, r.asset_id::text, r.asset_version_id::text,
-		       v.resource_model_id::text, rm.name, v.title, v.fields, v.quality, r.status, r.comment,
-		       su.id::text, su.display_name, ru.id::text, ru.display_name, r.submitted_at, r.reviewed_at
-		FROM asset.asset_reviews r JOIN asset.asset_versions v ON v.id = r.asset_version_id JOIN model.resource_models rm ON rm.id = v.resource_model_id
-		JOIN identity.users su ON su.id = r.submitted_by LEFT JOIN identity.users ru ON ru.id = r.reviewed_by
-		WHERE r.organization_id = $1::uuid AND r.id = $2::uuid
-	`, principal.OrganizationID, reviewID)
-	return scanItem(row)
-}
-
-func (s Service) Decide(ctx context.Context, principal auth.Principal, reviewID, idempotencyKey, decision string, input DecisionInput) (DecisionResult, error) {
-	if !validID(reviewID) || len(strings.TrimSpace(idempotencyKey)) < 16 {
-		return DecisionResult{}, ErrInvalidInput
-	}
-	item, err := s.Get(ctx, principal, reviewID)
-	if err != nil {
-		return DecisionResult{}, err
-	}
-	if decision != "approve" && decision != "reject" {
-		return DecisionResult{}, ErrInvalidInput
-	}
-	if input.ExpectedVersionID != "" && input.ExpectedVersionID != item.AssetVersionID {
-		return DecisionResult{}, ErrConflict
-	}
-	tx, err := s.Store.Pool.Begin(ctx)
-	if err != nil {
-		return DecisionResult{}, fmt.Errorf("begin review decision: %w", err)
-	}
-	defer tx.Rollback(ctx)
-	var status string
-	if err := tx.QueryRow(ctx, `SELECT status FROM asset.asset_reviews WHERE organization_id = $1::uuid AND id = $2::uuid FOR UPDATE`, principal.OrganizationID, reviewID).Scan(&status); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return DecisionResult{}, ErrNotFound
-		}
-		return DecisionResult{}, fmt.Errorf("lock review: %w", err)
-	}
-	if status != "pending" {
-		return DecisionResult{}, fmt.Errorf("%w: review is already %s", ErrConflict, status)
-	}
-	newStatus := "approved"
-	if decision == "reject" {
-		newStatus = "rejected"
-	}
-	if _, err := tx.Exec(ctx, `UPDATE asset.asset_reviews SET status = $3, reviewed_by = $4::uuid, comment = $5, reviewed_at = now() WHERE organization_id = $1::uuid AND id = $2::uuid`, principal.OrganizationID, reviewID, newStatus, principal.UserID, strings.TrimSpace(input.Comment)); err != nil {
-		return DecisionResult{}, fmt.Errorf("update review: %w", err)
-	}
-	if _, err := tx.Exec(ctx, `UPDATE asset.asset_versions SET review_status = $2 WHERE id = $1::uuid`, item.AssetVersionID, newStatus); err != nil {
-		return DecisionResult{}, fmt.Errorf("update asset review status: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return DecisionResult{}, fmt.Errorf("commit review decision: %w", err)
-	}
-	return DecisionResult{ReviewID: reviewID, AssetID: item.AssetID, AssetVersionID: item.AssetVersionID, Status: newStatus, Decision: decision}, nil
+type DecisionResult struct {
+	Request Request
 }
 
 type BatchItem struct {
-	ReviewID          string `json:"review_id"`
-	Decision          string `json:"decision"`
-	Comment           string `json:"comment"`
-	ExpectedVersionID string `json:"expected_version_id"`
+	RequestID string `json:"request_id"`
+	Comment   string `json:"comment"`
 }
+
 type BatchResult struct {
-	ReviewID  string `json:"review_id"`
-	Status    string `json:"status"`
-	Decision  string `json:"decision,omitempty"`
-	ErrorCode string `json:"error_code,omitempty"`
+	Items []BatchItemResult `json:"items"`
 }
 
-func (s Service) Batch(ctx context.Context, principal auth.Principal, idempotencyKey string, input []BatchItem) []BatchResult {
-	results := make([]BatchResult, 0, len(input))
-	for _, item := range input {
-		result, err := s.Decide(ctx, principal, item.ReviewID, idempotencyKey+item.ReviewID, item.Decision, DecisionInput{Comment: item.Comment, ExpectedVersionID: item.ExpectedVersionID})
-		if err != nil {
-			results = append(results, BatchResult{ReviewID: item.ReviewID, Status: "failed", ErrorCode: reviewErrorCode(err)})
-			continue
-		}
-		results = append(results, BatchResult{ReviewID: result.ReviewID, Status: result.Status, Decision: result.Decision})
-	}
-	return results
+type BatchItemResult struct {
+	RequestID string   `json:"request_id"`
+	OK        bool     `json:"ok"`
+	ErrorCode string   `json:"error_code,omitempty"`
+	Request   *Request `json:"request,omitempty"`
 }
 
-func reviewErrorCode(err error) string {
-	switch {
-	case errors.Is(err, ErrInvalidInput):
-		return "validation_failed"
-	case errors.Is(err, ErrForbidden):
-		return "forbidden"
-	case errors.Is(err, ErrNotFound):
-		return "not_found"
-	case errors.Is(err, ErrConflict):
-		return "conflict"
-	default:
-		return "review_failed"
+func (s Service) require(ctx context.Context, principal auth.Principal, workspaceID, action string) (authz.Scope, error) {
+	if principal.UserType != auth.UserTypeMember || s.Store == nil || s.Store.Pool == nil {
+		return authz.Scope{}, ErrForbidden
 	}
+	if s.Policy == nil {
+		return authz.Scope{}, ErrForbidden
+	}
+	scope, err := s.Policy.Require(ctx, principal, workspaceID, "", action)
+	if errors.Is(err, authz.ErrWorkspaceForbidden) || errors.Is(err, authz.ErrWorkspaceNotFound) {
+		return authz.Scope{}, ErrForbidden
+	}
+	return scope, err
 }
 
-func scanItem(row interface{ Scan(...any) error }) (Item, error) {
-	var item Item
-	var rawFields []byte
-	var reviewerID, reviewerName *string
-	err := row.Scan(&item.ID, &item.WorkspaceID, &item.AssetID, &item.AssetVersionID, &item.ResourceModelID, &item.ResourceModelName, &item.Title, &rawFields, &item.Quality, &item.Status, &item.Comment, &item.SubmittedBy.ID, &item.SubmittedBy.DisplayName, &reviewerID, &reviewerName, &item.SubmittedAt, &item.ReviewedAt)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return Item{}, ErrNotFound
-	}
-	if err != nil {
-		return Item{}, fmt.Errorf("scan review: %w", err)
-	}
-	item.Fields = map[string]any{}
-	_ = json.Unmarshal(rawFields, &item.Fields)
-	item.ETag = item.AssetVersionID
-	if reviewerID != nil {
-		item.ReviewedBy = &Actor{ID: *reviewerID, DisplayName: deref(reviewerName)}
-	}
-	return item, nil
-}
-
-func deref(value *string) string {
-	if value == nil {
-		return ""
-	}
-	return *value
-}
-func validID(value string) bool {
-	value = strings.TrimSpace(value)
+func (s Service) validID(value string) bool {
 	if len(value) != 36 {
 		return false
 	}
@@ -368,4 +142,659 @@ func validID(value string) bool {
 		}
 	}
 	return true
+}
+
+// Submit creates the single pending PublicationRequest for an asset. A dirty
+// draft is materialized into a working version first, so the request always
+// references a sealed snapshot.
+func (s Service) Submit(ctx context.Context, principal auth.Principal, workspaceID, assetID, expectedDraftRevision, idempotencyKey, comment string) (Request, error) {
+	if !s.validID(assetID) {
+		return Request{}, ErrInvalidInput
+	}
+	scope, err := s.require(ctx, principal, workspaceID, authz.ActionPublicationSubmit)
+	if err != nil {
+		return Request{}, err
+	}
+	_ = scope
+	// Materialize the draft snapshot; CommitDraft reverts to the current
+	// working version when the draft is clean.
+	commit, err := s.Committer.CommitDraft(ctx, principal, workspaceID, assetID, expectedDraftRevision)
+	if err != nil {
+		if errors.Is(err, asset.ErrDraftRevisionMismatch) {
+			return Request{}, ErrConflict
+		}
+		return Request{}, mapCommitError(err)
+	}
+	versionID := commit.VersionID
+	tx, err := s.Store.Pool.Begin(ctx)
+	if err != nil {
+		return Request{}, err
+	}
+	defer tx.Rollback(ctx)
+	var assetWorkspace, assetVisibility string
+	err = tx.QueryRow(ctx, `
+		SELECT workspace_id::text, visibility FROM asset.assets
+		WHERE organization_id = $1::uuid AND id = $2::uuid AND deleted_at IS NULL
+	`, principal.OrganizationID, assetID).Scan(&assetWorkspace, &assetVisibility)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Request{}, ErrNotFound
+	}
+	if err != nil {
+		return Request{}, err
+	}
+	if assetVisibility == access.VisibilityPublic && !access.Valid(assetVisibility) {
+		return Request{}, ErrInvalidInput
+	}
+	var request Request
+	var decisionComment, cancelReason *string
+	err = tx.QueryRow(ctx, `
+		INSERT INTO asset.publication_requests
+			(organization_id, workspace_id, asset_id, asset_version_id, status, submitted_by, decision_comment)
+		VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, 'pending', $5::uuid, NULLIF($6, ''))
+		ON CONFLICT DO NOTHING
+		RETURNING id::text, workspace_id::text, asset_id::text, asset_version_id::text, status,
+		          submitted_by::text, decided_by::text, decision_comment, cancelled_by::text,
+		          cancel_reason, submitted_at, decided_at, revision
+	`, principal.OrganizationID, assetWorkspace, assetID, versionID, principal.UserID, comment).Scan(
+		&request.ID, &request.WorkspaceID, &request.AssetID, &request.AssetVersionID, &request.Status,
+		&request.SubmittedBy, &request.DecidedBy, &decisionComment, &request.CancelledBy,
+		&cancelReason, &request.SubmittedAt, &request.DecidedAt, &request.Revision)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// Partial unique index: one pending request per asset.
+		return Request{}, ErrConflict
+	}
+	if err != nil {
+		return Request{}, fmt.Errorf("insert publication request: %w", err)
+	}
+	request.DecisionComment = decisionComment
+	request.CancelReason = cancelReason
+	request.ETag = request.ID
+	if err := s.appendEventTx(ctx, tx, principal, request, publicationEventFor(request.Status, ""), nil); err != nil {
+		return Request{}, err
+	}
+	store.AppendAuditTx(ctx, tx, store.NewAuditEntry("publication.submit", principal.OrganizationID, principal.UserID, "publication_request", request.ID, map[string]any{
+		"workspace_id":     workspaceID,
+		"asset_id":         assetID,
+		"asset_version_id": versionID,
+	}), workspaceID)
+	if err := tx.Commit(ctx); err != nil {
+		return Request{}, err
+	}
+	return request, nil
+}
+
+func mapCommitError(err error) error {
+	switch {
+	case errors.Is(err, asset.ErrNotFound):
+		return ErrNotFound
+	case errors.Is(err, asset.ErrAssetArchived):
+		return ErrConflict
+	case errors.Is(err, asset.ErrForbidden):
+		return ErrForbidden
+	default:
+		return err
+	}
+}
+
+func publicationEventFor(status, _ string) string {
+	switch status {
+	case RequestApproved:
+		return eventing.EventPublicationApproved
+	case RequestRejected:
+		return eventing.EventPublicationRejected
+	case RequestCancelled:
+		return eventing.EventPublicationCancelled
+	default:
+		return eventing.EventPublicationSubmitted
+	}
+}
+
+// appendEventTx writes the publication_request fact + notification rows in the
+// caller's transaction.
+func (s Service) appendEventTx(ctx context.Context, tx pgx.Tx, principal auth.Principal, request Request, eventType string, extra map[string]any) error {
+	if s.Events == nil {
+		return errors.New("event store is not initialized")
+	}
+	payload := eventing.PublicationRequestPayload{
+		RequestID:      request.ID,
+		AssetID:        request.AssetID,
+		AssetVersionID: request.AssetVersionID,
+		WorkspaceID:    request.WorkspaceID,
+	}
+	if request.CancelReason != nil {
+		payload.CancelReason = *request.CancelReason
+	}
+	raw, err := eventing.EncodePayload(payload)
+	if err != nil {
+		return err
+	}
+	actor := eventing.ActorFromPrincipal(principal)
+	_, err = s.Events.AppendTx(ctx, tx, eventing.Event{
+		OrganizationID:   principal.OrganizationID,
+		WorkspaceID:      request.WorkspaceID,
+		EventType:        eventType,
+		AggregateType:    "publication_request",
+		AggregateID:      request.ID,
+		AggregateVersion: request.Revision,
+		PayloadVersion:   eventing.PayloadVersionV1,
+		Actor:            actor,
+		Payload:          raw,
+	})
+	if err != nil {
+		return err
+	}
+	// Notify the submitter (and approver for decisions) through the
+	// notification table; consumers keep delivery idempotent by request id.
+	kind := "publication." + strings.TrimPrefix(eventType, "publication_request.")
+	_, err = tx.Exec(ctx, `
+		INSERT INTO content.notifications (organization_id, workspace_id, recipient_user_id, kind, payload)
+		SELECT organization_id, workspace_id, submitted_by, $3, $4::jsonb
+		FROM asset.publication_requests WHERE id = $1::uuid AND organization_id = $2::uuid
+		  AND submitted_by <> NULLIF($5,'')::uuid
+	`, request.ID, principal.OrganizationID, kind, mustJSON(map[string]any{
+		"request_id": request.ID,
+		"asset_id":   request.AssetID,
+		"status":     request.Status,
+	}), principal.UserID)
+	if err != nil {
+		return fmt.Errorf("record publication notification: %w", err)
+	}
+	_ = extra
+	return nil
+}
+
+func mustJSON(value any) []byte {
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return []byte("{}")
+	}
+	return raw
+}
+
+// ListPage is the review queue. Editors only see their own submissions;
+// reviewer/admin see the workspace queue.
+func (s Service) ListPage(ctx context.Context, principal auth.Principal, workspaceID string, input ListInput) (Page, error) {
+	scope, err := s.require(ctx, principal, workspaceID, authz.ActionPublicationRead)
+	if err != nil {
+		return Page{}, err
+	}
+	limit := input.Limit
+	if limit <= 0 || limit > 100 {
+		limit = 20
+	}
+	switch input.Status {
+	case "", RequestPending, RequestApproved, RequestRejected, RequestCancelled:
+	default:
+		return Page{}, ErrInvalidInput
+	}
+	var cursor struct {
+		SubmittedAt time.Time `json:"submitted_at"`
+		ID          string    `json:"id"`
+	}
+	if strings.TrimSpace(input.Cursor) != "" {
+		raw, err := base64.RawURLEncoding.DecodeString(input.Cursor)
+		if err != nil || json.Unmarshal(raw, &cursor) != nil || !s.validID(cursor.ID) {
+			return Page{}, ErrInvalidInput
+		}
+	}
+	where := []string{
+		"pr.organization_id = $1::uuid",
+		"pr.workspace_id = $2::uuid",
+	}
+	args := []any{principal.OrganizationID, workspaceID}
+	arg := func(value any) string {
+		args = append(args, value)
+		return fmt.Sprintf("$%d", len(args))
+	}
+	if input.Status != "" {
+		where = append(where, "pr.status = "+arg(input.Status))
+	}
+	if input.ResourceModelID != "" && s.validID(input.ResourceModelID) {
+		where = append(where, "a.resource_model_id = "+arg(input.ResourceModelID)+"::uuid")
+	}
+	if scope.Role == authz.WorkspaceRoleEditor {
+		// Editors narrow to their own submissions.
+		where = append(where, "pr.submitted_by = "+arg(principal.UserID)+"::uuid")
+	} else if input.SubmittedBy != "" && s.validID(input.SubmittedBy) {
+		where = append(where, "pr.submitted_by = "+arg(input.SubmittedBy)+"::uuid")
+	}
+	if input.CreatedFrom != "" {
+		where = append(where, "pr.submitted_at >= "+arg(input.CreatedFrom)+"::timestamptz")
+	}
+	if input.CreatedTo != "" {
+		where = append(where, "pr.submitted_at <= "+arg(input.CreatedTo)+"::timestamptz")
+	}
+	if cursor.ID != "" {
+		where = append(where, fmt.Sprintf("(pr.submitted_at, pr.id) < (%s::timestamptz, %s::uuid)", arg(cursor.SubmittedAt.UTC().Format(time.RFC3339Nano)), arg(cursor.ID)))
+	}
+	query := `
+		SELECT pr.id::text, pr.workspace_id::text, pr.asset_id::text, pr.asset_version_id::text,
+		       pr.status, pr.submitted_by::text, pr.decided_by::text, pr.decision_comment,
+		       pr.cancelled_by::text, pr.cancel_reason, pr.submitted_at, pr.decided_at, pr.revision,
+		       COALESCE(v.title, '')
+		FROM asset.publication_requests pr
+		JOIN asset.assets a ON a.organization_id = pr.organization_id AND a.id = pr.asset_id
+		LEFT JOIN asset.asset_versions v ON v.id = pr.asset_version_id
+		WHERE ` + strings.Join(where, " AND ") + `
+		ORDER BY pr.submitted_at DESC, pr.id DESC
+		LIMIT ` + fmt.Sprint(limit+1)
+	rows, err := s.Store.Pool.Query(ctx, query, args...)
+	if err != nil {
+		return Page{}, fmt.Errorf("list publication requests: %w", err)
+	}
+	defer rows.Close()
+	page := Page{Items: make([]Request, 0, limit+1)}
+	for rows.Next() {
+		item, err := scanRequest(rows)
+		if err != nil {
+			return Page{}, err
+		}
+		page.Items = append(page.Items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return Page{}, err
+	}
+	if len(page.Items) > limit {
+		page.HasMore = true
+		page.Items = page.Items[:limit]
+		last := page.Items[len(page.Items)-1]
+		raw, _ := json.Marshal(map[string]string{
+			"submitted_at": last.SubmittedAt.UTC().Format(time.RFC3339Nano),
+			"id":           last.ID,
+		})
+		page.NextCursor = base64.RawURLEncoding.EncodeToString(raw)
+	}
+	return page, nil
+}
+
+func scanRequest(row interface{ Scan(...any) error }) (Request, error) {
+	var item Request
+	var decisionComment, cancelReason *string
+	if err := row.Scan(&item.ID, &item.WorkspaceID, &item.AssetID, &item.AssetVersionID,
+		&item.Status, &item.SubmittedBy, &item.DecidedBy, &decisionComment,
+		&item.CancelledBy, &cancelReason, &item.SubmittedAt, &item.DecidedAt, &item.Revision,
+		&item.Title); err != nil {
+		return Request{}, fmt.Errorf("scan publication request: %w", err)
+	}
+	item.DecisionComment = decisionComment
+	item.CancelReason = cancelReason
+	item.ETag = item.ID
+	return item, nil
+}
+
+// Get returns one request; editors only reach their own submissions.
+func (s Service) Get(ctx context.Context, principal auth.Principal, workspaceID, requestID string) (Request, error) {
+	scope, err := s.require(ctx, principal, workspaceID, authz.ActionPublicationRead)
+	if err != nil {
+		return Request{}, err
+	}
+	if !s.validID(requestID) {
+		return Request{}, ErrInvalidInput
+	}
+	row := s.Store.Pool.QueryRow(ctx, `
+		SELECT pr.id::text, pr.workspace_id::text, pr.asset_id::text, pr.asset_version_id::text,
+		       pr.status, pr.submitted_by::text, pr.decided_by::text, pr.decision_comment,
+		       pr.cancelled_by::text, pr.cancel_reason, pr.submitted_at, pr.decided_at, pr.revision,
+		       COALESCE(v.title, '')
+		FROM asset.publication_requests pr
+		LEFT JOIN asset.asset_versions v ON v.id = pr.asset_version_id
+		WHERE pr.organization_id = $1::uuid AND pr.id = $2::uuid
+	`, principal.OrganizationID, requestID)
+	item, err := scanRequest(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Request{}, ErrNotFound
+	}
+	if err != nil {
+		return Request{}, err
+	}
+	if scope.Role == authz.WorkspaceRoleEditor && item.SubmittedBy != principal.UserID {
+		return Request{}, ErrNotFound
+	}
+	return item, nil
+}
+
+// decide performs approve or reject with every invariant inside one
+// transaction: pending state, no self-approval, working pointer still matches,
+// policy re-check, pointer switch on approval and full audit/event fan-out.
+func (s Service) decide(ctx context.Context, principal auth.Principal, workspaceID, requestID, decision, comment string) (Request, error) {
+	action := authz.ActionPublicationApprove
+	if decision == "reject" {
+		action = authz.ActionPublicationReject
+	}
+	if _, err := s.require(ctx, principal, workspaceID, action); err != nil {
+		return Request{}, err
+	}
+	if !s.validID(requestID) {
+		return Request{}, ErrInvalidInput
+	}
+	tx, err := s.Store.Pool.Begin(ctx)
+	if err != nil {
+		return Request{}, err
+	}
+	defer tx.Rollback(ctx)
+	var status, submittedBy, assetID, versionID, assetWorkspace, assetModel string
+	var revision int64
+	err = tx.QueryRow(ctx, `
+		SELECT pr.status, pr.submitted_by::text, pr.asset_id::text, pr.asset_version_id::text, pr.revision,
+		       a.workspace_id::text, a.resource_model_id::text
+		FROM asset.publication_requests pr
+		JOIN asset.assets a ON a.organization_id = pr.organization_id AND a.id = pr.asset_id
+		WHERE pr.organization_id = $1::uuid AND pr.id = $2::uuid
+		FOR UPDATE OF pr
+	`, principal.OrganizationID, requestID).Scan(&status, &submittedBy, &assetID, &versionID, &revision, &assetWorkspace, &assetModel)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Request{}, ErrNotFound
+	}
+	if err != nil {
+		return Request{}, err
+	}
+	if status != RequestPending {
+		return Request{}, ErrConflict
+	}
+	if decision == "approve" && submittedBy == principal.UserID {
+		return Request{}, ErrSelfApproval
+	}
+	// The request must still reference the asset's current working version.
+	var workingVersion string
+	if err := tx.QueryRow(ctx, `
+		SELECT current_working_version_id::text FROM asset.assets
+		WHERE organization_id = $1::uuid AND id = $2::uuid
+	`, principal.OrganizationID, assetID).Scan(&workingVersion); err != nil {
+		return Request{}, err
+	}
+	if workingVersion != versionID {
+		return Request{}, ErrVersionSuperseded
+	}
+	nextStatus := RequestRejected
+	if decision == "approve" {
+		nextStatus = RequestApproved
+	}
+	commandTag, err := tx.Exec(ctx, `
+		UPDATE asset.publication_requests
+		SET status = $3, decided_by = $4::uuid, decision_comment = NULLIF($5, ''),
+		    decided_at = now(), revision = revision + 1
+		WHERE organization_id = $1::uuid AND id = $2::uuid AND status = 'pending'
+	`, principal.OrganizationID, requestID, nextStatus, principal.UserID, comment)
+	if err != nil {
+		return Request{}, fmt.Errorf("decide publication request: %w", err)
+	}
+	if commandTag.RowsAffected() == 0 {
+		return Request{}, ErrConflict
+	}
+	request := Request{
+		ID: requestID, WorkspaceID: assetWorkspace, AssetID: assetID, AssetVersionID: versionID,
+		Status: nextStatus, SubmittedBy: submittedBy, DecidedBy: strPtr(principal.UserID),
+		Revision: revision + 1,
+	}
+	if comment != "" {
+		request.DecisionComment = strPtr(comment)
+	}
+	now := time.Now().UTC()
+	request.DecidedAt = &now
+	request.ETag = request.ID
+	if decision == "approve" {
+		// Approval switches the published pointer inside the same transaction.
+		row, err := asset.LoadLifecycleTx(ctx, tx, principal.OrganizationID, assetID)
+		if err != nil {
+			return Request{}, err
+		}
+		previous := row.CurrentPublishedVersionID
+		row, err = asset.SetPublishedPointerTx(ctx, tx, row, versionID)
+		if err != nil {
+			if errors.Is(err, asset.ErrInvalidTransition) {
+				return Request{}, ErrVersionSuperseded
+			}
+			return Request{}, err
+		}
+		if err := asset.AppendAssetEventTx(ctx, tx, s.Events, row, principal, eventing.EventAssetPublished, eventing.PayloadVersionV1, eventing.AssetPublishedPayload{
+			AssetID:           row.ID,
+			VersionID:         versionID,
+			PreviousVersionID: deref(previous),
+			WorkspaceID:       row.WorkspaceID,
+		}); err != nil {
+			return Request{}, err
+		}
+	}
+	if err := s.appendEventTx(ctx, tx, principal, request, publicationEventFor(nextStatus, ""), nil); err != nil {
+		return Request{}, err
+	}
+	store.AppendAuditTx(ctx, tx, store.NewAuditEntry("publication."+decision, principal.OrganizationID, principal.UserID, "publication_request", requestID, map[string]any{
+		"workspace_id": assetWorkspace,
+		"asset_id":     assetID,
+		"decision":     decision,
+	}), assetWorkspace)
+	if err := tx.Commit(ctx); err != nil {
+		return Request{}, err
+	}
+	return request, nil
+}
+
+func deref(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
+}
+
+func strPtr(value string) *string { return &value }
+
+// Approve publishes the requested version.
+func (s Service) Approve(ctx context.Context, principal auth.Principal, workspaceID, requestID, comment string) (Request, error) {
+	return s.decide(ctx, principal, workspaceID, requestID, "approve", comment)
+}
+
+// Reject returns the asset to its previous state without touching versions.
+func (s Service) Reject(ctx context.Context, principal auth.Principal, workspaceID, requestID, comment string) (Request, error) {
+	return s.decide(ctx, principal, workspaceID, requestID, "reject", comment)
+}
+
+// Cancel lets the submitter withdraw a pending request; workspace admins may
+// cancel any pending request in their workspace.
+func (s Service) Cancel(ctx context.Context, principal auth.Principal, workspaceID, requestID, reason string) (Request, error) {
+	scope, err := s.require(ctx, principal, workspaceID, authz.ActionPublicationCancel)
+	if err != nil {
+		return Request{}, err
+	}
+	if !s.validID(requestID) {
+		return Request{}, ErrInvalidInput
+	}
+	cancelReason := "user_cancelled"
+	if scope.Role == authz.WorkspaceRoleAdmin && reason == "admin_cancelled" {
+		cancelReason = "admin_cancelled"
+	}
+	tx, err := s.Store.Pool.Begin(ctx)
+	if err != nil {
+		return Request{}, err
+	}
+	defer tx.Rollback(ctx)
+	var status, submittedBy, assetWorkspace string
+	var revision int64
+	err = tx.QueryRow(ctx, `
+		SELECT status, submitted_by::text, revision, workspace_id::text
+		FROM asset.publication_requests
+		WHERE organization_id = $1::uuid AND id = $2::uuid
+		FOR UPDATE
+	`, principal.OrganizationID, requestID).Scan(&status, &submittedBy, &revision, &assetWorkspace)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Request{}, ErrNotFound
+	}
+	if err != nil {
+		return Request{}, err
+	}
+	if status != RequestPending {
+		return Request{}, ErrConflict
+	}
+	if submittedBy != principal.UserID && scope.Role != authz.WorkspaceRoleAdmin {
+		return Request{}, ErrNotFound
+	}
+	commandTag, err := tx.Exec(ctx, `
+		UPDATE asset.publication_requests
+		SET status = 'cancelled', cancelled_by = $3::uuid, cancel_reason = $4,
+		    decided_at = now(), revision = revision + 1
+		WHERE organization_id = $1::uuid AND id = $2::uuid AND status = 'pending'
+	`, principal.OrganizationID, requestID, principal.UserID, cancelReason)
+	if err != nil {
+		return Request{}, err
+	}
+	if commandTag.RowsAffected() == 0 {
+		return Request{}, ErrConflict
+	}
+	request := Request{
+		ID: requestID, WorkspaceID: assetWorkspace, Status: RequestCancelled,
+		SubmittedBy: submittedBy, CancelledBy: strPtr(principal.UserID),
+		CancelReason: strPtr(cancelReason), Revision: revision + 1, ETag: requestID,
+	}
+	if err := s.appendEventTx(ctx, tx, principal, request, eventing.EventPublicationCancelled, nil); err != nil {
+		return Request{}, err
+	}
+	store.AppendAuditTx(ctx, tx, store.NewAuditEntry("publication.cancel", principal.OrganizationID, principal.UserID, "publication_request", requestID, map[string]any{
+		"workspace_id":  assetWorkspace,
+		"cancel_reason": cancelReason,
+	}), assetWorkspace)
+	if err := tx.Commit(ctx); err != nil {
+		return Request{}, err
+	}
+	return request, nil
+}
+
+// Batch applies the same domain command to every item and reports per-item
+// results; failures never abort the remaining items.
+func (s Service) Batch(ctx context.Context, principal auth.Principal, workspaceID, decision string, items []BatchItem) (BatchResult, error) {
+	switch decision {
+	case "approve", "reject":
+	default:
+		return BatchResult{}, ErrInvalidInput
+	}
+	result := BatchResult{Items: make([]BatchItemResult, 0, len(items))}
+	for _, item := range items {
+		var request Request
+		var err error
+		if decision == "approve" {
+			request, err = s.Approve(ctx, principal, workspaceID, item.RequestID, item.Comment)
+		} else {
+			request, err = s.Reject(ctx, principal, workspaceID, item.RequestID, item.Comment)
+		}
+		entry := BatchItemResult{RequestID: item.RequestID}
+		switch {
+		case err == nil:
+			entry.OK = true
+			entry.Request = &request
+		case errors.Is(err, ErrNotFound):
+			entry.ErrorCode = "publication_request_not_found"
+		case errors.Is(err, ErrConflict):
+			entry.ErrorCode = "publication_request_not_pending"
+		case errors.Is(err, ErrSelfApproval):
+			entry.ErrorCode = "self_approval_not_allowed"
+		case errors.Is(err, ErrVersionSuperseded):
+			entry.ErrorCode = "request_version_superseded"
+		case errors.Is(err, ErrForbidden):
+			entry.ErrorCode = "forbidden"
+		default:
+			entry.ErrorCode = "publication_request_error"
+		}
+		result.Items = append(result.Items, entry)
+	}
+	return result, nil
+}
+
+// AddComment appends a discussion entry; the thread stays readable and open
+// under any request status.
+func (s Service) AddComment(ctx context.Context, principal auth.Principal, workspaceID, requestID, body string) (Comment, error) {
+	scope, err := s.require(ctx, principal, workspaceID, authz.ActionPublicationComment)
+	if err != nil {
+		return Comment{}, err
+	}
+	body = strings.TrimSpace(body)
+	if body == "" || !s.validID(requestID) {
+		return Comment{}, ErrInvalidInput
+	}
+	var submittedBy, requestWorkspace string
+	var status string
+	err = s.Store.Pool.QueryRow(ctx, `
+		SELECT submitted_by::text, workspace_id::text, status FROM asset.publication_requests
+		WHERE organization_id = $1::uuid AND id = $2::uuid
+	`, principal.OrganizationID, requestID).Scan(&submittedBy, &requestWorkspace, &status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Comment{}, ErrNotFound
+	}
+	if err != nil {
+		return Comment{}, err
+	}
+	if scope.Role == authz.WorkspaceRoleEditor && submittedBy != principal.UserID {
+		return Comment{}, ErrNotFound
+	}
+	var comment Comment
+	err = s.Store.Pool.QueryRow(ctx, `
+		INSERT INTO asset.publication_request_comments
+			(organization_id, workspace_id, publication_request_id, body, author_user_id)
+		VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5::uuid)
+		RETURNING id::text, publication_request_id::text, body, author_user_id::text, created_at
+	`, principal.OrganizationID, requestWorkspace, requestID, body, principal.UserID).Scan(
+		&comment.ID, &comment.PublicationRequestID, &comment.Body, &comment.AuthorUserID, &comment.CreatedAt)
+	if err != nil {
+		return Comment{}, fmt.Errorf("insert publication comment: %w", err)
+	}
+	return comment, nil
+}
+
+// ListComments returns the discussion thread of one request.
+func (s Service) ListComments(ctx context.Context, principal auth.Principal, workspaceID, requestID, cursor string, limit int) ([]Comment, string, error) {
+	scope, err := s.require(ctx, principal, workspaceID, authz.ActionPublicationRead)
+	if err != nil {
+		return nil, "", err
+	}
+	if !s.validID(requestID) {
+		return nil, "", ErrInvalidInput
+	}
+	if limit <= 0 || limit > 100 {
+		limit = 50
+	}
+	if scope.Role == authz.WorkspaceRoleEditor {
+		var submittedBy string
+		err := s.Store.Pool.QueryRow(ctx, `
+			SELECT submitted_by::text FROM asset.publication_requests
+			WHERE organization_id = $1::uuid AND id = $2::uuid
+		`, principal.OrganizationID, requestID).Scan(&submittedBy)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, "", ErrNotFound
+		}
+		if err != nil {
+			return nil, "", err
+		}
+		if submittedBy != principal.UserID {
+			return nil, "", ErrNotFound
+		}
+	}
+	rows, err := s.Store.Pool.Query(ctx, `
+		SELECT id::text, publication_request_id::text, body, author_user_id::text, created_at
+		FROM asset.publication_request_comments
+		WHERE organization_id = $1::uuid AND publication_request_id = $2::uuid
+		ORDER BY created_at, id
+	`, principal.OrganizationID, requestID)
+	if err != nil {
+		return nil, "", err
+	}
+	defer rows.Close()
+	comments := make([]Comment, 0, limit)
+	for rows.Next() {
+		var comment Comment
+		if err := rows.Scan(&comment.ID, &comment.PublicationRequestID, &comment.Body, &comment.AuthorUserID, &comment.CreatedAt); err != nil {
+			return nil, "", err
+		}
+		comments = append(comments, comment)
+	}
+	return comments, "", rows.Err()
+}
+
+// PendingCount feeds the workspace statistics.
+func (s Service) PendingCount(ctx context.Context, principal auth.Principal, workspaceID string) (int64, error) {
+	if _, err := s.require(ctx, principal, workspaceID, authz.ActionPublicationRead); err != nil {
+		return 0, err
+	}
+	var count int64
+	err := s.Store.Pool.QueryRow(ctx, `
+		SELECT count(*) FROM asset.publication_requests
+		WHERE organization_id = $1::uuid AND workspace_id = $2::uuid AND status = 'pending'
+	`, principal.OrganizationID, workspaceID).Scan(&count)
+	return count, err
 }

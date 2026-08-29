@@ -7,21 +7,24 @@ import (
 	"regexp"
 
 	"agentchunzhi/internal/auth"
+	"agentchunzhi/internal/authz"
 	"agentchunzhi/internal/eventing"
-	"agentchunzhi/internal/retrieval"
 	"agentchunzhi/internal/store"
 
 	"github.com/jackc/pgx/v5"
 )
 
-var ErrNotFound = errors.New("asset or asset version not found")
-var ErrConflict = errors.New("asset state conflict")
-var ErrInvalidInput = errors.New("invalid asset input")
-var ErrForbidden = errors.New("asset access denied")
+func pgxNoRows() error { return pgx.ErrNoRows }
+
+// Agent-facing publish/archive. The lifecycle state machine, pointer
+// invariants, audit and fact events are shared with the member service;
+// retrieval is not contacted here — the worker consumes asset.published /
+// asset.archived facts (phase 0 decoupling).
 
 type Service struct {
 	Store  *store.Store
-	Events eventing.EventStore
+	Events *eventing.EventStore
+	Policy authz.WorkspacePolicy
 }
 
 type PublishResult struct {
@@ -37,8 +40,12 @@ type ArchiveResult struct {
 	PublicationStatus   string `json:"publication_status"`
 }
 
+// Publish points the published marker at the asset's current working version.
+// The agent principal must hold asset.publish for the asset's model through
+// its AgentAccessPolicy; version selection by the caller is not part of the
+// v2 contract.
 func (s Service) Publish(ctx context.Context, principal auth.Principal, allowedModelIDs []string, assetID, versionID string) (PublishResult, error) {
-	if !validID(assetID) || !validID(versionID) || len(allowedModelIDs) == 0 {
+	if !validID(assetID) || len(allowedModelIDs) == 0 {
 		return PublishResult{}, ErrNotFound
 	}
 	if s.Store == nil || s.Store.Pool == nil {
@@ -49,77 +56,56 @@ func (s Service) Publish(ctx context.Context, principal auth.Principal, allowedM
 		return PublishResult{}, fmt.Errorf("begin publish transaction: %w", err)
 	}
 	defer tx.Rollback(ctx)
-	var organizationID, workflowStatus string
-	var previousPublishedID *string
+	var workspaceID, modelID string
 	err = tx.QueryRow(ctx, `
-		SELECT a.organization_id::text, a.current_published_version_id::text, v.workflow_status
-		FROM asset.assets a
-		JOIN asset.asset_versions v ON v.id = $2::uuid AND v.asset_id = a.id
-		WHERE a.id = $1::uuid AND a.organization_id = $3::uuid
-		  AND a.resource_model_id::text = ANY($4::text[])
-		  AND a.current_working_version_id = v.id
-		FOR UPDATE OF a, v
-	`, assetID, versionID, principal.OrganizationID, allowedModelIDs).Scan(&organizationID, &previousPublishedID, &workflowStatus)
-	if errors.Is(err, pgx.ErrNoRows) {
+		SELECT workspace_id::text, resource_model_id::text
+		FROM asset.assets
+		WHERE id = $1::uuid AND organization_id = $2::uuid
+		  AND resource_model_id::text = ANY($3::text[])
+		FOR UPDATE
+	`, assetID, principal.OrganizationID, allowedModelIDs).Scan(&workspaceID, &modelID)
+	if errors.Is(err, pgxNoRows()) {
 		return PublishResult{}, ErrNotFound
 	}
 	if err != nil {
 		return PublishResult{}, fmt.Errorf("load asset for publish: %w", err)
 	}
-	if workflowStatus != "draft" {
-		return PublishResult{}, fmt.Errorf("%w: version is still processing", ErrConflict)
-	}
-	var hasUnsafeAttachments bool
-	if err := tx.QueryRow(ctx, `
-		WITH RECURSIVE version_lineage(id) AS (
-			SELECT $2::uuid
-			UNION ALL
-			SELECT av.parent_version_id
-			FROM asset.asset_versions av
-			JOIN version_lineage child ON av.id = child.id
-			WHERE av.parent_version_id IS NOT NULL
-		)
-		SELECT EXISTS (
-			SELECT 1
-			FROM asset.attachments at
-			WHERE at.organization_id = $1::uuid
-			  AND at.deleted_at IS NULL
-			  AND at.scan_status <> 'clean'
-			  AND (
-				at.asset_version_id IN (SELECT id FROM version_lineage)
-				OR EXISTS (
-					SELECT 1 FROM asset.attachment_links al
-					WHERE al.attachment_id = at.id
-					  AND al.asset_version_id IN (SELECT id FROM version_lineage)
-				)
-			  )
-		)
-	`, principal.OrganizationID, versionID).Scan(&hasUnsafeAttachments); err != nil {
-		return PublishResult{}, fmt.Errorf("check attachment scan status: %w", err)
-	}
-	if hasUnsafeAttachments {
-		return PublishResult{}, fmt.Errorf("%w: all attachments must be clean before publish", ErrConflict)
-	}
-	if _, err := tx.Exec(ctx, `UPDATE asset.assets SET current_published_version_id = $2::uuid, publication_status = 'published', updated_at = now() WHERE id = $1::uuid`, assetID, versionID); err != nil {
-		return PublishResult{}, fmt.Errorf("publish asset: %w", err)
-	}
-	if previousPublishedID != nil && *previousPublishedID != versionID {
-		if err := retrieval.EnqueueProjectionTx(ctx, tx, s.Events, organizationID, *previousPublishedID, retrieval.ProjectionDelete); err != nil {
-			return PublishResult{}, fmt.Errorf("enqueue previous projection deletion: %w", err)
+	if s.Policy != nil {
+		if _, err := s.Policy.Require(ctx, principal, workspaceID, modelID, authz.ActionAssetPublish); err != nil {
+			return PublishResult{}, ErrForbidden
 		}
 	}
-	if err := retrieval.EnqueueProjectionTx(ctx, tx, s.Events, organizationID, versionID, retrieval.ProjectionRebuild); err != nil {
-		return PublishResult{}, fmt.Errorf("enqueue published projection rebuild: %w", err)
+	row, err := LoadLifecycleTx(ctx, tx, principal.OrganizationID, assetID)
+	if err != nil {
+		return PublishResult{}, err
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO audit.audit_log (organization_id, actor_user_id, initiator_user_id, action, resource_type, resource_id, result, metadata) VALUES ($1::uuid, $2::uuid, $2::uuid, 'asset.publish', 'asset', $3::uuid, 'allowed', jsonb_build_object('principal_type', $4::text, 'review_required', false))`, principal.OrganizationID, principal.UserID, assetID, principal.UserType); err != nil {
-		return PublishResult{}, fmt.Errorf("record publish audit: %w", err)
+	if row.PublicationStatus == PublicationArchived {
+		return PublishResult{}, ErrAssetArchived
 	}
+	previous := row.CurrentPublishedVersionID
+	row, err = SetPublishedPointerTx(ctx, tx, row, row.CurrentWorkingVersionID)
+	if err != nil {
+		return PublishResult{}, err
+	}
+	if err := AppendAssetEventTx(ctx, tx, s.Events, row, principal, eventing.EventAssetPublished, eventing.PayloadVersionV1, eventing.AssetPublishedPayload{
+		AssetID:           row.ID,
+		VersionID:         row.CurrentWorkingVersionID,
+		PreviousVersionID: derefOrEmpty(previous),
+		WorkspaceID:       row.WorkspaceID,
+	}); err != nil {
+		return PublishResult{}, err
+	}
+	RecordAssetAuditTx(ctx, tx, row.OrganizationID, row.WorkspaceID, principal, "asset.publish", row.ID, map[string]any{
+		"workspace_id":   row.WorkspaceID,
+		"principal_type": principal.UserType,
+	})
 	if err := tx.Commit(ctx); err != nil {
 		return PublishResult{}, fmt.Errorf("commit publish transaction: %w", err)
 	}
-	return PublishResult{AssetID: assetID, PublishedVersionID: versionID, PreviousPublishedID: previousPublishedID, PublicationStatus: "published"}, nil
+	return PublishResult{AssetID: assetID, PublishedVersionID: row.CurrentWorkingVersionID, PreviousPublishedID: previous, PublicationStatus: PublicationPublished}, nil
 }
 
+// Archive clears the published pointer for an agent-controlled asset.
 func (s Service) Archive(ctx context.Context, principal auth.Principal, allowedModelIDs []string, assetID string) (ArchiveResult, error) {
 	if !validID(assetID) || len(allowedModelIDs) == 0 {
 		return ArchiveResult{}, ErrNotFound
@@ -132,30 +118,52 @@ func (s Service) Archive(ctx context.Context, principal auth.Principal, allowedM
 		return ArchiveResult{}, fmt.Errorf("begin archive transaction: %w", err)
 	}
 	defer tx.Rollback(ctx)
-	var organizationID, previousPublishedID string
+	var workspaceID, modelID string
 	err = tx.QueryRow(ctx, `
-		SELECT organization_id::text, current_published_version_id::text
+		SELECT workspace_id::text, resource_model_id::text
 		FROM asset.assets
 		WHERE id = $1::uuid AND organization_id = $2::uuid
-		  AND resource_model_id::text = ANY($3::text[]) AND current_published_version_id IS NOT NULL
+		  AND resource_model_id::text = ANY($3::text[])
 		FOR UPDATE
-	`, assetID, principal.OrganizationID, allowedModelIDs).Scan(&organizationID, &previousPublishedID)
-	if errors.Is(err, pgx.ErrNoRows) {
+	`, assetID, principal.OrganizationID, allowedModelIDs).Scan(&workspaceID, &modelID)
+	if errors.Is(err, pgxNoRows()) {
 		return ArchiveResult{}, ErrNotFound
 	}
 	if err != nil {
 		return ArchiveResult{}, fmt.Errorf("load asset for archive: %w", err)
 	}
-	if _, err := tx.Exec(ctx, `UPDATE asset.assets SET current_published_version_id = NULL, publication_status = 'archived', updated_at = now() WHERE id = $1::uuid`, assetID); err != nil {
-		return ArchiveResult{}, fmt.Errorf("archive asset: %w", err)
+	if s.Policy != nil {
+		if _, err := s.Policy.Require(ctx, principal, workspaceID, modelID, authz.ActionAssetArchive); err != nil {
+			return ArchiveResult{}, ErrForbidden
+		}
 	}
-	if err := retrieval.EnqueueProjectionTx(ctx, tx, s.Events, organizationID, previousPublishedID, retrieval.ProjectionDelete); err != nil {
-		return ArchiveResult{}, fmt.Errorf("enqueue archived projection deletion: %w", err)
+	row, err := LoadLifecycleTx(ctx, tx, principal.OrganizationID, assetID)
+	if err != nil {
+		return ArchiveResult{}, err
+	}
+	previous := row.CurrentPublishedVersionID
+	if _, err := CancelPendingRequestsTx(ctx, tx, row.OrganizationID, row.ID, principal.UserID, "asset_archived"); err != nil {
+		return ArchiveResult{}, err
+	}
+	row, err = ClearPublishedPointerTx(ctx, tx, row)
+	if err != nil {
+		return ArchiveResult{}, err
+	}
+	if err := AppendAssetEventTx(ctx, tx, s.Events, row, principal, eventing.EventAssetArchived, eventing.PayloadVersionV1, eventing.AssetArchivedPayload{
+		AssetID:           row.ID,
+		PreviousVersionID: derefOrEmpty(previous),
+		WorkspaceID:       row.WorkspaceID,
+	}); err != nil {
+		return ArchiveResult{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return ArchiveResult{}, fmt.Errorf("commit archive transaction: %w", err)
 	}
-	return ArchiveResult{AssetID: assetID, PreviousPublishedID: previousPublishedID, PublicationStatus: "archived"}, nil
+	result := ArchiveResult{AssetID: assetID, PublicationStatus: PublicationArchived}
+	if previous != nil {
+		result.PreviousPublishedID = *previous
+	}
+	return result, nil
 }
 
 func validID(value string) bool { return uuidPattern.MatchString(value) }

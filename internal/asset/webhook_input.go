@@ -12,7 +12,7 @@ import (
 
 	"agentchunzhi/internal/auth"
 	"agentchunzhi/internal/authz"
-	"agentchunzhi/internal/retrieval"
+	"agentchunzhi/internal/eventing"
 	"agentchunzhi/internal/store"
 
 	"github.com/jackc/pgx/v5"
@@ -38,7 +38,6 @@ type WebhookAssetInput struct {
 	Title           *string
 	Markdown        *string
 	Fields          map[string]any
-	Tags            []string
 	ReceivedAt      time.Time
 }
 
@@ -166,12 +165,11 @@ func authorizeWebhookModelAccess(ctx context.Context, policy authz.WorkspacePoli
 	return ErrForbidden
 }
 
-// WebhookAssetInput carries the resolved webhook envelope. CreateFromWebhook
-// walks the same service pipeline as Service.Create (idempotency reservation,
-// raw input record, field validation, version insert, projection enqueue) but
-// marks provenance via asset_versions.source and stores external_ref replays.
-// The caller must have authorized input.ResourceModelID beforehand; it is
-// passed as the sole scoped model to reuse Create's scoping invariants.
+// CreateFromWebhook walks the same pipeline as Service.Create (idempotency
+// reservation, raw input record, field validation, asset + first sealed
+// version + shared draft) with the webhook envelope preserved in the
+// raw_inputs payload and external_ref as the replay key. The caller must have
+// authorized input.ResourceModelID beforehand.
 func (s Service) CreateFromWebhook(ctx context.Context, principal auth.Principal, input WebhookAssetInput) (AssetResult, bool, error) {
 	replay := AssetResult{}
 	resourceModelID := strings.TrimSpace(input.ResourceModelID)
@@ -188,7 +186,7 @@ func (s Service) CreateFromWebhook(ctx context.Context, principal auth.Principal
 		}
 		idempotencyKey = key
 	}
-	if !validID(resourceModelID) || len(allowedModelsFor(resourceModelID)) == 0 {
+	if !validID(resourceModelID) || !validID(input.WorkspaceID) || len(allowedModelsFor(resourceModelID)) == 0 {
 		return replay, false, ErrInvalidInput
 	}
 	if err := validateContent(input.Title, input.Markdown, &input.Fields); err != nil {
@@ -198,17 +196,15 @@ func (s Service) CreateFromWebhook(ctx context.Context, principal auth.Principal
 	if receivedAt.IsZero() {
 		receivedAt = time.Now()
 	}
-	versionSource := BuildWebhookVersionSource(input.ExternalRef, receivedAt)
+	provenance := BuildWebhookVersionSource(input.ExternalRef, receivedAt)
 	if s.Store == nil || s.Store.Pool == nil {
 		return replay, false, errors.New("database store is not initialized")
 	}
-	envelope := struct {
+	requestHash := hashRequest(webhookCreateOperation, struct {
 		Title    *string        `json:"title"`
 		Markdown *string        `json:"markdown"`
 		Fields   map[string]any `json:"fields"`
-		Tags     []string       `json:"tags"`
-	}{input.Title, input.Markdown, input.Fields, input.Tags}
-	requestHash := hashRequest(webhookCreateOperation, envelope)
+	}{input.Title, input.Markdown, input.Fields})
 	tx, err := s.Store.Pool.Begin(ctx)
 	if err != nil {
 		return replay, false, fmt.Errorf("begin webhook asset create: %w", err)
@@ -233,18 +229,7 @@ func (s Service) CreateFromWebhook(ctx context.Context, principal auth.Principal
 		Markdown *string        `json:"markdown"`
 		Fields   map[string]any `json:"fields"`
 	}{input.Title, input.Markdown, fields})
-	sourcePayload, _ := json.Marshal(envelope)
-	var rawInputID string
-	if err := tx.QueryRow(ctx, `
-		INSERT INTO asset.raw_inputs
-			(organization_id, submitted_by, source_type, content_type, payload, content_checksum)
-		VALUES ($1::uuid, $2::uuid, 'api', 'application/json', $3::jsonb, $4)
-		RETURNING id::text
-	`, principal.OrganizationID, principal.UserID, string(sourcePayload), contentChecksum).Scan(&rawInputID); err != nil {
-		return replay, false, fmt.Errorf("record webhook raw input: %w", err)
-	}
-	models := allowedModelsFor(resourceModelID)
-	var modelVersionID, workspaceID string
+	var modelVersionID, modelWorkspace string
 	var fieldSchema []byte
 	if err := tx.QueryRow(ctx, `
 		SELECT mv.id::text, mv.field_schema, rm.workspace_id::text
@@ -252,60 +237,66 @@ func (s Service) CreateFromWebhook(ctx context.Context, principal auth.Principal
 		JOIN model.resource_model_versions mv ON mv.id = rm.current_version_id
 		WHERE rm.id = $1::uuid
 		  AND rm.organization_id = $2::uuid
-		  AND rm.id::text = ANY($3::text[])
 		  AND rm.status = 'active'
-	`, resourceModelID, principal.OrganizationID, models).Scan(&modelVersionID, &fieldSchema, &workspaceID); err != nil {
+	`, resourceModelID, principal.OrganizationID).Scan(&modelVersionID, &fieldSchema, &modelWorkspace); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return replay, false, ErrNotFound
 		}
 		return replay, false, fmt.Errorf("load webhook resource model version: %w", err)
 	}
-	if input.WorkspaceID != "" && input.WorkspaceID != workspaceID {
+	if input.WorkspaceID != modelWorkspace {
 		return replay, false, ErrForbidden
 	}
 	if err := validateFields(fieldSchema, fields); err != nil {
 		return replay, false, err
 	}
-	if err := validateAssetReferences(ctx, tx, principal, workspaceID, fieldSchema, fields); err != nil {
+	if err := validateAssetReferences(ctx, tx, principal, modelWorkspace, fieldSchema, fields); err != nil {
 		return replay, false, err
 	}
-	tagsArg := "[]"
-	if len(input.Tags) > 0 {
-		tagsArg = string(mustJSON(input.Tags))
+	payload := map[string]any{
+		"channel":     provenance["channel"],
+		"received_at": provenance["received_at"],
+		"title":       input.Title,
+		"markdown":    input.Markdown,
+		"fields":      fields,
 	}
-	versionSourceArg := string(mustJSON(versionSource))
-	if len(versionSourceArg) == 0 {
-		versionSourceArg = "{}"
+	if ref, ok := provenance["external_ref"]; ok {
+		payload["external_ref"] = ref
 	}
-	var assetID, versionID string
+	var rawInputID string
 	if err := tx.QueryRow(ctx, `
-		INSERT INTO asset.assets (organization_id, workspace_id, resource_model_id, created_by)
-		VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid)
+		INSERT INTO asset.raw_inputs
+			(organization_id, workspace_id, submitted_by, source_type, content_type, external_ref, payload, content_checksum)
+		VALUES ($1::uuid, $2::uuid, $3::uuid, 'webhook', 'application/json', NULLIF($4,''), $5::jsonb, $6)
 		RETURNING id::text
-	`, principal.OrganizationID, workspaceID, resourceModelID, principal.UserID).Scan(&assetID); err != nil {
-		return replay, false, fmt.Errorf("create webhook asset: %w", err)
+	`, principal.OrganizationID, modelWorkspace, principal.UserID, input.ExternalRef, string(mustJSON(payload)), contentChecksum).Scan(&rawInputID); err != nil {
+		return replay, false, fmt.Errorf("record webhook raw input: %w", err)
 	}
-	if err := tx.QueryRow(ctx, `
-		INSERT INTO asset.asset_versions
-			(organization_id, workspace_id, asset_id, resource_model_id, resource_model_version_id, version_no,
-			 workflow_status, quality, title, markdown, fields, source_raw_input_id, content_checksum, created_by,
-			 tags, source)
-		VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid, 1, 'draft', 'raw', $6, $7, $8::jsonb, $9::uuid, $10, $11::uuid, $12::jsonb, $13::jsonb)
-		RETURNING id::text
-	`, principal.OrganizationID, workspaceID, assetID, resourceModelID, modelVersionID, input.Title, input.Markdown, string(mustJSON(fields)), rawInputID, contentChecksum, principal.UserID, tagsArg, versionSourceArg).Scan(&versionID); err != nil {
-		return replay, false, fmt.Errorf("create webhook asset version: %w", err)
+	assetID, versionID, versionNo, err := createAssetWithFirstVersionTx(ctx, tx,
+		principal.OrganizationID, modelWorkspace, resourceModelID, modelVersionID,
+		rawInputID, OriginHuman, derefString(input.Title), "", derefString(input.Markdown),
+		fields, principal.UserID)
+	if err != nil {
+		return replay, false, err
 	}
-	if _, err := tx.Exec(ctx, `
-		UPDATE asset.assets
-		SET current_working_version_id = $2::uuid, updated_at = now()
-		WHERE id = $1::uuid
-	`, assetID, versionID); err != nil {
-		return replay, false, fmt.Errorf("set webhook working version: %w", err)
+	row, err := LoadLifecycleTx(ctx, tx, principal.OrganizationID, assetID)
+	if err != nil {
+		return replay, false, err
 	}
-	if err := retrieval.EnqueueProjectionTx(ctx, tx, s.Events, principal.OrganizationID, versionID, retrieval.ProjectionRebuild); err != nil {
-		return replay, false, fmt.Errorf("enqueue webhook projection: %w", err)
+	if err := AppendAssetEventTx(ctx, tx, s.Events, row, principal, eventing.EventAssetVersionCreated, eventing.PayloadVersionV1, eventing.AssetVersionCreatedPayload{
+		AssetID:     assetID,
+		VersionID:   versionID,
+		VersionNo:   versionNo,
+		WorkspaceID: modelWorkspace,
+	}); err != nil {
+		return replay, false, err
 	}
-	result, err := loadAssetTx(ctx, tx, assetID)
+	RecordAssetAuditTx(ctx, tx, principal.OrganizationID, modelWorkspace, principal, webhookCreateOperation, assetID, map[string]any{
+		"workspace_id": modelWorkspace,
+		"version_id":   versionID,
+		"external_ref": input.ExternalRef,
+	})
+	result, err := loadAssetTx(ctx, tx, principal.OrganizationID, assetID)
 	if err != nil {
 		return replay, false, err
 	}
@@ -325,8 +316,8 @@ func allowedModelsFor(resourceModelID string) []string {
 	return []string{resourceModelID}
 }
 
-// BuildWebhookVersionSource renders the asset_versions.source marker documenting
-// that this version arrived through the webhook channel.
+// BuildWebhookVersionSource renders the webhook channel provenance stored in
+// the raw_inputs payload: channel marker, receive timestamp and external ref.
 func BuildWebhookVersionSource(externalRef string, receivedAt time.Time) map[string]any {
 	source := map[string]any{
 		"channel":     "webhook",

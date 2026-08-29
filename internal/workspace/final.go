@@ -5,19 +5,17 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"sync"
 	"time"
 
 	"agentchunzhi/internal/auth"
+	"agentchunzhi/internal/authz"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type CreateInput struct {
 	Name                   string `json:"name"`
 	Description            string `json:"description"`
-	DefaultVisibility      string `json:"default_visibility"`
 	DefaultResourceModelID string `json:"default_resource_model_id"`
 }
 
@@ -49,20 +47,28 @@ type InviteInput struct {
 	ExpiresInHours int    `json:"expires_in_hours"`
 }
 
+// Create is reserved to organization admins. The creator receives an explicit
+// workspace admin membership; there is no workspace owner role.
 func (s Service) Create(ctx context.Context, principal auth.Principal, input CreateInput) (Summary, error) {
 	if err := s.validatePrincipal(principal); err != nil {
 		return Summary{}, ErrForbidden
 	}
 	input.Name = strings.TrimSpace(input.Name)
-	input.DefaultVisibility = strings.TrimSpace(input.DefaultVisibility)
 	if input.Name == "" {
 		return Summary{}, ErrInvalidInput
 	}
-	if input.DefaultVisibility == "" {
-		input.DefaultVisibility = "workspace"
+	var admin bool
+	if err := s.Store.Pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM identity.users
+			WHERE organization_id = $1::uuid AND id = $2::uuid
+			  AND user_type = 'member' AND status = 'active' AND organization_role = 'admin'
+		)
+	`, principal.OrganizationID, principal.UserID).Scan(&admin); err != nil {
+		return Summary{}, fmt.Errorf("check organization admin: %w", err)
 	}
-	if input.DefaultVisibility != "public" && input.DefaultVisibility != "login" && input.DefaultVisibility != "private" && input.DefaultVisibility != "workspace" && input.DefaultVisibility != "internal" {
-		return Summary{}, ErrInvalidInput
+	if !admin {
+		return Summary{}, ErrForbidden
 	}
 	tx, err := s.Store.Pool.Begin(ctx)
 	if err != nil {
@@ -72,18 +78,18 @@ func (s Service) Create(ctx context.Context, principal auth.Principal, input Cre
 	var id string
 	err = tx.QueryRow(ctx, `
 		INSERT INTO content.workspaces
-			(organization_id, name, description, default_visibility, default_resource_model_id, created_by)
-		VALUES ($1::uuid, $2, $3, $4, NULLIF($5, '')::uuid, $6::uuid)
+			(organization_id, slug, name, description, default_resource_model_id, created_by)
+		VALUES ($1::uuid, 'ws-' || replace(gen_random_uuid()::text, '-', ''), $2, $3, NULLIF($4, '')::uuid, $5::uuid)
 		RETURNING id::text
-	`, principal.OrganizationID, input.Name, input.Description, input.DefaultVisibility, input.DefaultResourceModelID, principal.UserID).Scan(&id)
+	`, principal.OrganizationID, input.Name, input.Description, input.DefaultResourceModelID, principal.UserID).Scan(&id)
 	if err != nil {
 		return Summary{}, fmt.Errorf("insert workspace: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO content.workspace_members (organization_id, workspace_id, user_id, role)
-		VALUES ($1::uuid, $2::uuid, $3::uuid, 'owner')
+		INSERT INTO content.workspace_members (organization_id, workspace_id, user_id, role, granted_by)
+		VALUES ($1::uuid, $2::uuid, $3::uuid, 'admin', $3::uuid)
 	`, principal.OrganizationID, id, principal.UserID); err != nil {
-		return Summary{}, fmt.Errorf("insert workspace owner: %w", err)
+		return Summary{}, fmt.Errorf("insert workspace admin membership: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return Summary{}, fmt.Errorf("commit workspace create: %w", err)
@@ -125,19 +131,17 @@ func (s Service) Invite(ctx context.Context, principal auth.Principal, workspace
 	if err != nil {
 		return Invitation{}, err
 	}
-	if role != "owner" && role != "admin" {
+	if role != authz.WorkspaceRoleAdmin {
 		return Invitation{}, ErrForbidden
 	}
 	input.Email = strings.TrimSpace(strings.ToLower(input.Email))
 	if input.Email == "" {
 		return Invitation{}, ErrInvalidInput
 	}
-	// Invitations are unusable if the invitee can never present a matching
-	// identity, so obvious non-addresses are rejected outright.
 	if !ValidEmail(input.Email) {
 		return Invitation{}, ErrInvalidEmail
 	}
-	if input.Role == "" || input.Role != "admin" && input.Role != "editor" && input.Role != "reviewer" && input.Role != "viewer" && input.Role != "member" {
+	if !authz.ValidWorkspaceRole(input.Role) {
 		return Invitation{}, ErrInvalidInput
 	}
 	if input.ExpiresInHours <= 0 || input.ExpiresInHours > 720 {
@@ -169,7 +173,7 @@ func (s Service) ListInvitations(ctx context.Context, principal auth.Principal, 
 	if err != nil {
 		return nil, err
 	}
-	if role != "owner" && role != "admin" {
+	if role != authz.WorkspaceRoleAdmin {
 		return nil, ErrForbidden
 	}
 	rows, err := s.Store.Pool.Query(ctx, `
@@ -193,46 +197,16 @@ func (s Service) ListInvitations(ctx context.Context, principal auth.Principal, 
 	return items, rows.Err()
 }
 
-// usersEmailColumnState caches whether identity.users carries an email column.
-// The invitations are matched against the email column when it exists and fall
-// back to login_name matching otherwise, so the probe runs once per process.
-var usersEmailColumnState struct {
-	sync.Mutex
-	known   bool
-	present bool
-}
-
-func identityUsersHasEmailColumn(ctx context.Context, pool *pgxpool.Pool) bool {
-	usersEmailColumnState.Lock()
-	defer usersEmailColumnState.Unlock()
-	if !usersEmailColumnState.known && pool != nil {
-		var count int
-		err := pool.QueryRow(ctx, `
-			SELECT count(*) FROM information_schema.columns
-			WHERE table_schema = 'identity' AND table_name = 'users' AND column_name = 'email'
-		`).Scan(&count)
-		if err == nil {
-			usersEmailColumnState.known = true
-			usersEmailColumnState.present = count > 0
-		}
-	}
-	return usersEmailColumnState.present
-}
-
 // userMatchesInvitedEmail reports whether the acting user presents the invited
-// address. The email column wins when present; otherwise either login_name or
-// (future) email may satisfy the invitation.
+// address. Members own exactly one organization-scoped identity with a
+// normalized email column; the legacy login_name fallback is retired.
 func (s Service) userMatchesInvitedEmail(ctx context.Context, principal auth.Principal, invitedEmail string) (bool, error) {
 	invited := strings.ToLower(strings.TrimSpace(invitedEmail))
-	predicate := "lower(btrim(COALESCE(u.login_name, ''))) = $3"
-	if identityUsersHasEmailColumn(ctx, s.Store.Pool) {
-		predicate = "(lower(btrim(COALESCE(u.email, ''))) = $3 OR lower(btrim(COALESCE(u.login_name, ''))) = $3)"
-	}
 	var count int
 	err := s.Store.Pool.QueryRow(ctx, `
 		SELECT count(*) FROM identity.users u
 		WHERE u.organization_id = $1::uuid AND u.id = $2::uuid AND u.status = 'active'
-		  AND `+predicate+`
+		  AND lower(btrim(COALESCE(u.email, ''))) = $3
 	`, principal.OrganizationID, principal.UserID, invited).Scan(&count)
 	if err != nil {
 		return false, fmt.Errorf("match invited email: %w", err)
@@ -286,9 +260,9 @@ func (s Service) AcceptInvitation(ctx context.Context, principal auth.Principal,
 	}
 	defer tx.Rollback(ctx)
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO content.workspace_members (organization_id, workspace_id, user_id, role)
-		VALUES ($1::uuid, $2::uuid, $3::uuid, $4)
-		ON CONFLICT (workspace_id, user_id) DO UPDATE SET role = EXCLUDED.role
+		INSERT INTO content.workspace_members (organization_id, workspace_id, user_id, role, granted_by)
+		VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $3::uuid)
+		ON CONFLICT (workspace_id, user_id) DO NOTHING
 	`, principal.OrganizationID, workspaceID, principal.UserID, role); err != nil {
 		return MemberDetail{}, err
 	}
@@ -322,7 +296,7 @@ func (s Service) RevokeInvitation(ctx context.Context, principal auth.Principal,
 	if err != nil {
 		return err
 	}
-	if role != "owner" && role != "admin" {
+	if role != authz.WorkspaceRoleAdmin {
 		return ErrForbidden
 	}
 	result, err := s.Store.Pool.Exec(ctx, `UPDATE content.workspace_invitations SET status = 'revoked' WHERE id = $1::uuid AND status = 'pending'`, invitationID)
@@ -392,9 +366,8 @@ func collectMemberRecords(ctx context.Context, rows pgx.Rows) ([]memberRecord, e
 // resolveMemberRecord supports both addressing schemes of
 // /api/frontend/workspace-members/{memberId}: the internal
 // content.workspace_members.id and the user id that every list endpoint
-// exposes. The caller still has to hold owner/admin rights in exactly the
-// workspace the resolved row belongs to — the checks in UpdateMember /
-// RemoveMember operate on record.WorkspaceID only.
+// exposes. The caller still has to hold admin rights in exactly the
+// workspace the resolved row belongs to.
 func (s Service) resolveMemberRecord(ctx context.Context, principal auth.Principal, memberID, workspaceHint string) (memberRecord, error) {
 	records, err := s.resolveMemberRecords(ctx, principal, memberID)
 	if err != nil {
@@ -432,11 +405,19 @@ func (s Service) resolveMemberRecords(ctx context.Context, principal auth.Princi
 }
 
 func validMemberRole(role string) bool {
-	switch role {
-	case "admin", "editor", "reviewer", "viewer", "member", "owner":
-		return true
-	}
-	return false
+	return authz.ValidWorkspaceRole(role)
+}
+
+// otherActiveAdmins counts active admins besides the target user.
+func (s Service) otherActiveAdmins(ctx context.Context, workspaceID, exceptUserID string) (int, error) {
+	var count int
+	err := s.Store.Pool.QueryRow(ctx, `
+		SELECT count(*)
+		FROM content.workspace_members wm
+		JOIN identity.users u ON u.id = wm.user_id AND u.status = 'active'
+		WHERE wm.workspace_id = $1::uuid AND wm.role = 'admin' AND wm.user_id <> $2::uuid
+	`, workspaceID, exceptUserID).Scan(&count)
+	return count, err
 }
 
 func (s Service) UpdateMember(ctx context.Context, principal auth.Principal, memberID, role, workspaceHint string) (MemberDetail, error) {
@@ -452,13 +433,23 @@ func (s Service) UpdateMember(ctx context.Context, principal auth.Principal, mem
 	if err != nil {
 		return MemberDetail{}, err
 	}
-	if actorRole != "owner" && actorRole != "admin" {
+	if actorRole != authz.WorkspaceRoleAdmin {
 		return MemberDetail{}, ErrForbidden
 	}
-	if role == "owner" && actorRole != "owner" {
-		return MemberDetail{}, ErrForbidden
+	if record.Role == authz.WorkspaceRoleAdmin && role != authz.WorkspaceRoleAdmin {
+		admins, err := s.otherActiveAdmins(ctx, record.WorkspaceID, record.UserID)
+		if err != nil {
+			return MemberDetail{}, err
+		}
+		if admins == 0 {
+			return MemberDetail{}, ErrLastAdminRequired
+		}
 	}
-	if _, err := s.Store.Pool.Exec(ctx, `UPDATE content.workspace_members SET role = $3 WHERE organization_id = $1::uuid AND id = $2::uuid`, principal.OrganizationID, record.RowID, role); err != nil {
+	if _, err := s.Store.Pool.Exec(ctx, `
+		UPDATE content.workspace_members
+		SET role = $3, revision = revision + 1, updated_at = now()
+		WHERE organization_id = $1::uuid AND id = $2::uuid
+	`, principal.OrganizationID, record.RowID, role); err != nil {
 		return MemberDetail{}, err
 	}
 	s.writeAuditAsync(NewAuditEntry(AuditMemberRoleChange, "", principal.OrganizationID, principal.UserID,
@@ -480,11 +471,17 @@ func (s Service) RemoveMember(ctx context.Context, principal auth.Principal, mem
 	if err != nil {
 		return err
 	}
-	if actorRole != "owner" && actorRole != "admin" {
+	if actorRole != authz.WorkspaceRoleAdmin {
 		return ErrForbidden
 	}
-	if record.Role == "owner" {
-		return ErrConflict
+	if record.Role == authz.WorkspaceRoleAdmin {
+		admins, err := s.otherActiveAdmins(ctx, record.WorkspaceID, record.UserID)
+		if err != nil {
+			return err
+		}
+		if admins == 0 {
+			return ErrLastAdminRequired
+		}
 	}
 	if record.UserID == principal.UserID {
 		return ErrConflict

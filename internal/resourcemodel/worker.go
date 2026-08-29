@@ -2,14 +2,13 @@ package resourcemodel
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 
+	"agentchunzhi/internal/asset"
 	"agentchunzhi/internal/eventing"
-	"agentchunzhi/internal/retrieval"
 	"agentchunzhi/internal/store"
 
 	"github.com/jackc/pgx/v5"
@@ -64,18 +63,18 @@ func (p MigrationProcessor) process(ctx context.Context, migrationID string) err
 		return fmt.Errorf("begin resource model migration: %w", err)
 	}
 	defer tx.Rollback(ctx)
-	var organizationID, workspaceID, modelID, targetVersionID string
+	var organizationID, workspaceID, modelID, targetVersionID, migrationCreatedBy string
 	var sourceVersionID *string
 	var snapshotRaw, targetSchema []byte
 	if err := tx.QueryRow(ctx, `
 		SELECT m.organization_id::text, m.workspace_id::text, m.resource_model_id::text,
 		       m.from_version_id::text, m.to_version_id::text, m.input_snapshot,
-		       v.field_schema
+		       m.created_by::text, v.field_schema
 		FROM model.resource_model_migrations m
-		JOIN model.resource_model_versions v ON v.id = m.to_version_id
+		JOIN model.resource_model_versions v ON v.organization_id = m.organization_id AND v.id = m.to_version_id
 		WHERE m.id = $1::uuid AND m.status = 'processing'
 		FOR UPDATE OF m
-	`, migrationID).Scan(&organizationID, &workspaceID, &modelID, &sourceVersionID, &targetVersionID, &snapshotRaw, &targetSchema); err != nil {
+	`, migrationID).Scan(&organizationID, &workspaceID, &modelID, &sourceVersionID, &targetVersionID, &snapshotRaw, &migrationCreatedBy, &targetSchema); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrNoPendingMigration
 		}
@@ -93,10 +92,10 @@ func (p MigrationProcessor) process(ctx context.Context, migrationID string) err
 		sourceArg = *sourceVersionID
 	}
 	rows, err := tx.Query(ctx, `
-		SELECT a.id::text, v.id::text, v.version_no, v.title, v.markdown, v.fields,
-		       v.quality, v.tags, v.source, v.created_by::text
+		SELECT a.id::text, v.id::text, COALESCE(v.title, ''), COALESCE(v.summary, ''), COALESCE(v.markdown, ''),
+		       v.fields, v.origin, v.created_by::text
 		FROM asset.assets a
-		JOIN asset.asset_versions v ON v.id = a.current_working_version_id
+		JOIN asset.asset_versions v ON v.organization_id = a.organization_id AND v.id = a.current_working_version_id
 		WHERE a.organization_id = $1::uuid AND a.workspace_id = $2::uuid
 		  AND a.resource_model_id = $3::uuid AND a.publication_status <> 'archived'
 		  AND ($4::uuid IS NULL OR v.resource_model_version_id = $4::uuid)
@@ -109,16 +108,14 @@ func (p MigrationProcessor) process(ctx context.Context, migrationID string) err
 	// Buffer candidates before writing: a pgx Tx is bound to one connection, so
 	// issuing INSERTs while this result set is still open fails with conn busy.
 	type migrationAsset struct {
-		assetID, oldVersionID, createdBy string
-		versionNo                        int
-		title, markdown                  *string
-		fields, tags, source             []byte
-		quality                          string
+		assetID, oldVersionID, origin, createdBy string
+		title, summary, markdown                 string
+		fields                                   []byte
 	}
 	pending := []migrationAsset{}
 	for rows.Next() {
 		var item migrationAsset
-		if err := rows.Scan(&item.assetID, &item.oldVersionID, &item.versionNo, &item.title, &item.markdown, &item.fields, &item.quality, &item.tags, &item.source, &item.createdBy); err != nil {
+		if err := rows.Scan(&item.assetID, &item.oldVersionID, &item.title, &item.summary, &item.markdown, &item.fields, &item.origin, &item.createdBy); err != nil {
 			return fmt.Errorf("scan migration asset: %w", err)
 		}
 		pending = append(pending, item)
@@ -128,8 +125,7 @@ func (p MigrationProcessor) process(ctx context.Context, migrationID string) err
 	}
 	rows.Close()
 	for _, item := range pending {
-		assetID, oldVersionID, createdBy := item.assetID, item.oldVersionID, item.createdBy
-		versionNo := item.versionNo
+		assetID, oldVersionID := item.assetID, item.oldVersionID
 		var fieldMap map[string]any
 		if len(item.fields) > 0 && string(item.fields) != "null" {
 			if err := json.Unmarshal(item.fields, &fieldMap); err != nil {
@@ -140,33 +136,56 @@ func (p MigrationProcessor) process(ctx context.Context, migrationID string) err
 		if err := validateMigrationFields(targetSchema, migrated); err != nil {
 			return fmt.Errorf("asset %s cannot migrate: %w", assetID, err)
 		}
-		checksum := checksumForMigration(item.title, item.markdown, migrated)
-		var newVersionID string
+		// Inherit workspace-scoped tag and attachment identities from the old
+		// working version through the relation tables.
+		var tagIDs, attachmentIDs []string
 		if err := tx.QueryRow(ctx, `
-			INSERT INTO asset.asset_versions
-				(organization_id, workspace_id, asset_id, resource_model_id, resource_model_version_id,
-				 version_no, workflow_status, quality, title, markdown, fields, tags, source,
-				 parent_version_id, content_checksum, created_by, review_status)
-			VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6,
-				'draft', $7, $8, $9, $10::jsonb, $11::jsonb, $12::jsonb,
-				$13::uuid, $14, $15::uuid, 'none')
-			RETURNING id::text
-		`, organizationID, workspaceID, assetID, modelID, targetVersionID, versionNo+1,
-			item.quality, item.title, item.markdown, mustJSON(migrated), jsonOrEmpty(item.tags), jsonOrEmpty(item.source), oldVersionID, checksum, createdBy).Scan(&newVersionID); err != nil {
+			SELECT COALESCE(array_agg(tag_id::text ORDER BY tag_id), '{}')
+			FROM asset.asset_version_tags
+			WHERE organization_id = $1::uuid AND asset_version_id = $2::uuid
+		`, organizationID, oldVersionID).Scan(&tagIDs); err != nil {
+			return fmt.Errorf("load migration version tags: %w", err)
+		}
+		if err := tx.QueryRow(ctx, `
+			SELECT COALESCE(array_agg(attachment_id::text ORDER BY attachment_id), '{}')
+			FROM asset.asset_version_attachments
+			WHERE organization_id = $1::uuid AND asset_version_id = $2::uuid
+		`, organizationID, oldVersionID).Scan(&attachmentIDs); err != nil {
+			return fmt.Errorf("load migration version attachments: %w", err)
+		}
+		createdBy := item.createdBy
+		if migrationCreatedBy != "" {
+			createdBy = migrationCreatedBy
+		}
+		_, _, err := asset.CreateVersionTx(ctx, tx, asset.VersionMaterial{
+			OrganizationID:         organizationID,
+			WorkspaceID:            workspaceID,
+			AssetID:                assetID,
+			ResourceModelID:        modelID,
+			ResourceModelVersionID: targetVersionID,
+			ParentVersionID:        oldVersionID,
+			Origin:                 item.origin,
+			ConfirmationStatus:     asset.ConfirmationUnconfirmed,
+			Title:                  item.title,
+			Summary:                item.summary,
+			Markdown:               item.markdown,
+			Fields:                 migrated,
+			TagIDs:                 tagIDs,
+			AttachmentIDs:          attachmentIDs,
+			CreatedBy:              createdBy,
+		})
+		if err != nil {
 			return fmt.Errorf("create migrated asset version: %w", err)
 		}
-		if _, err := tx.Exec(ctx, `UPDATE asset.assets SET current_working_version_id = $2::uuid, updated_at = now() WHERE id = $1::uuid`, assetID, newVersionID); err != nil {
-			return fmt.Errorf("set migrated working version: %w", err)
+		// The working pointer moved, so pending publication requests for this
+		// asset no longer reference the working version.
+		if _, err := tx.Exec(ctx, `
+			UPDATE asset.publication_requests
+			SET status = 'cancelled', cancel_reason = 'new_version', revision = revision + 1, decided_at = now()
+			WHERE asset_id = $1::uuid AND status = 'pending'
+		`, assetID); err != nil {
+			return fmt.Errorf("cancel migration publication requests: %w", err)
 		}
-		if _, err := tx.Exec(ctx, `UPDATE asset.asset_reviews SET status = 'superseded', reviewed_at = now() WHERE asset_version_id = $1::uuid AND status = 'pending'`, oldVersionID); err != nil {
-			return fmt.Errorf("supersede migration review: %w", err)
-		}
-		if err := retrieval.EnqueueProjectionTx(ctx, tx, p.Events, organizationID, newVersionID, retrieval.ProjectionRebuild); err != nil {
-			return fmt.Errorf("enqueue migrated projection: %w", err)
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("iterate migration assets: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `UPDATE model.resource_model_migrations SET status = 'succeeded', completed_at = now(), error_summary = NULL WHERE id = $1::uuid`, migrationID); err != nil {
 		return fmt.Errorf("complete resource model migration: %w", err)
@@ -313,23 +332,6 @@ func schemaKeys(schema map[string]any) []string {
 		}
 	}
 	return keys
-}
-
-func checksumForMigration(title, markdown *string, fields map[string]any) string {
-	body, _ := json.Marshal(map[string]any{"title": title, "markdown": markdown, "fields": fields})
-	return fmt.Sprintf("%x", sha256Bytes(body))
-}
-
-func sha256Bytes(value []byte) []byte {
-	sum := sha256.Sum256(value)
-	return sum[:]
-}
-
-func jsonOrEmpty(raw []byte) []byte {
-	if len(raw) == 0 || string(raw) == "null" {
-		return []byte("{}")
-	}
-	return raw
 }
 
 func truncateError(err error) string {

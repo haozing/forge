@@ -3,30 +3,47 @@ package review
 import (
 	"errors"
 	"testing"
-	"time"
 )
 
-func TestReviewCursorRoundTrip(t *testing.T) {
-	submittedAt := time.Date(2026, 8, 26, 8, 30, 0, 123000000, time.UTC)
-	id := "00000000-0000-4000-8000-000000000001"
-	encoded := encodeReviewCursor(submittedAt, id)
-	cursor, err := decodeReviewCursor(encoded)
-	if err != nil || cursor.ID != id || cursor.SubmittedAt == "" {
-		t.Fatalf("unexpected cursor: %#v err=%v", cursor, err)
+func TestRequestStatusAndCancelReasonContract(t *testing.T) {
+	for _, status := range []string{RequestPending, RequestApproved, RequestRejected, RequestCancelled} {
+		if !ValidRequestStatus(status) {
+			t.Fatalf("status %s must be valid", status)
+		}
 	}
-	if _, err := decodeReviewCursor("invalid"); !errors.Is(err, ErrInvalidInput) {
-		t.Fatalf("invalid cursor should fail, got %v", err)
+	for _, legacy := range []string{"superseded", "closed", ""} {
+		if ValidRequestStatus(legacy) {
+			t.Fatalf("status %q must be rejected", legacy)
+		}
+	}
+	for _, reason := range []string{CancelUserCancelled, CancelNewVersion, CancelAssetArchived, CancelAdminCancelled} {
+		if !ValidCancelReason(reason) {
+			t.Fatalf("cancel reason %s must be valid", reason)
+		}
+	}
+	if ValidCancelReason("superseded") {
+		t.Fatal("legacy cancel reason must be rejected")
 	}
 }
 
-func TestParseReviewTime(t *testing.T) {
-	if value, err := parseReviewTime(""); err != nil || value != nil {
-		t.Fatalf("empty time should be omitted: %#v %v", value, err)
+func TestBatchResultIsolatesFailures(t *testing.T) {
+	result := BatchResult{Items: []BatchItemResult{
+		{RequestID: "r1", OK: true, Request: &Request{ID: "r1", Status: RequestApproved}},
+		{RequestID: "r2", OK: false, ErrorCode: "publication_request_not_pending"},
+	}}
+	if len(result.Items) != 2 || result.Items[0].OK == result.Items[1].OK {
+		t.Fatal("batch results must be per-item")
 	}
-	if value, err := parseReviewTime("2026-08-26T08:30:00+08:00"); err != nil || value == nil {
-		t.Fatalf("RFC3339 time should parse: %#v %v", value, err)
+	if result.Items[1].ErrorCode == "" {
+		t.Fatal("failed items must carry a stable error code")
 	}
-	if _, err := parseReviewTime("2026-08-26"); !errors.Is(err, ErrInvalidInput) {
-		t.Fatalf("date-only filter should fail, got %v", err)
+}
+
+func TestSentinelErrorsAreDistinct(t *testing.T) {
+	if errors.Is(ErrSelfApproval, ErrConflict) {
+		t.Fatal("self approval is a distinct invariant, not a generic conflict")
+	}
+	if errors.Is(ErrVersionSuperseded, ErrConflict) {
+		t.Fatal("superseded request is a distinct invariant")
 	}
 }

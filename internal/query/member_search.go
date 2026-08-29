@@ -37,10 +37,11 @@ func (s Service) QueryMember(ctx context.Context, principal auth.Principal, req 
 	if mode == "" {
 		mode = "hybrid"
 	}
-	// fulltext is a product-doc alias of lexical; structured allows an empty query.
+	// The internal ranking is stored under its product name fulltext; the
+	// search_sessions CHECK constraint only accepts the final mode vocabulary.
 	switch mode {
 	case "lexical", "fulltext":
-		mode = "lexical"
+		mode = "fulltext"
 	case "structured", "semantic", "hybrid":
 	default:
 		return QueryResponse{}, fmt.Errorf("%w: unsupported member query mode", ErrInvalidQuery)
@@ -103,7 +104,7 @@ func (s Service) QueryMember(ctx context.Context, principal auth.Principal, req 
 	}
 
 	var lexical, vector []candidate
-	if mode == "lexical" || mode == "structured" || mode == "hybrid" {
+	if mode == "structured" || mode == "fulltext" || mode == "hybrid" {
 		lexical, err = s.memberLexicalCandidates(ctx, principal, req, role, q, models, filters)
 		if err != nil {
 			return QueryResponse{}, err
@@ -120,11 +121,11 @@ func (s Service) QueryMember(ctx context.Context, principal auth.Principal, req 
 		}
 	}
 	mergeMode := mode
-	if mode == "lexical" || degraded {
+	if degraded {
 		mergeMode = "fulltext"
 	}
 	merged := mergeCandidates(lexical, vector, mergeMode)
-	method := "lexical"
+	method := "fulltext"
 	if mode == "semantic" {
 		method = "vector"
 	} else if mode == "hybrid" && !degraded {
@@ -164,7 +165,7 @@ func validateMemberQueryEnums(visibility, publication []string) error {
 		return fmt.Errorf("%w: too many enum filters", ErrInvalidQuery)
 	}
 	for _, value := range visibility {
-		if value != "public" && value != "login" && value != "private" && value != "workspace" && value != "internal" {
+		if value != "workspace" && value != "organization" && value != "public" {
 			return fmt.Errorf("%w: invalid visibility", ErrInvalidQuery)
 		}
 	}
@@ -203,9 +204,9 @@ func (s Service) memberQueryScope(ctx context.Context, principal auth.Principal,
 	rows, err := s.Store.Pool.Query(ctx, `
 		SELECT rm.id::text
 		FROM model.resource_models rm
-		JOIN model.resource_model_versions mv ON mv.id = rm.current_version_id AND mv.status = 'published'
+		JOIN model.resource_model_versions mv ON mv.organization_id = rm.organization_id AND mv.id = rm.current_version_id AND mv.status = 'published'
 		WHERE rm.organization_id = $1::uuid AND rm.workspace_id = $2::uuid AND rm.status = 'active'
-		  AND COALESCE(NULLIF(mv.policy #>> '{outlets,workspace,enabled}', '')::boolean, false)
+		  AND COALESCE(NULLIF(mv.policy #>> '{channels,workspace,enabled}', '')::boolean, false)
 		ORDER BY rm.id
 	`, principal.OrganizationID, workspaceID)
 	if err != nil {
@@ -248,23 +249,20 @@ func (s Service) memberLexicalCandidates(ctx context.Context, principal auth.Pri
 		 AND pc.status = 'active' AND pc.active_projection_generation = c.projection_generation
 		 AND pc.chunker_version = c.chunker_version
 		JOIN asset.assets a ON a.id = c.asset_id AND a.current_working_version_id = c.asset_version_id
-		JOIN asset.asset_versions v ON v.id = c.asset_version_id
-		JOIN model.resource_models rm ON rm.id = a.resource_model_id
-		JOIN model.resource_model_versions mv ON mv.id = rm.current_version_id AND mv.status = 'published'
+		JOIN asset.asset_versions v ON v.organization_id = a.organization_id AND v.id = c.asset_version_id
+		JOIN model.resource_models rm ON rm.organization_id = a.organization_id AND rm.id = a.resource_model_id
+		JOIN model.resource_model_versions mv ON mv.organization_id = rm.organization_id AND mv.id = rm.current_version_id AND mv.status = 'published'
 		WHERE c.organization_id = $1::uuid AND c.status = 'ready'
 		  AND a.workspace_id = $2::uuid AND a.deleted_at IS NULL
 		  AND a.publication_status = 'published'
 		  AND a.resource_model_id = ANY($3::uuid[]) AND ($4 = '' OR c.search_text &@~ $4)
 		  AND retrieval.matches_field_filters(v.fields, $5::jsonb)
-		  AND retrieval.matches_field_filters(jsonb_build_object('tags', v.tags), $6::jsonb)
-		  AND ($7::text IN ('owner','admin') OR a.visibility <> 'private' OR a.created_by = $8::uuid)
-		  AND (cardinality($9::text[]) = 0 OR a.visibility = ANY($9::text[]))
-		  AND (cardinality($10::text[]) = 0 OR a.publication_status = ANY($10::text[]))
-		  AND COALESCE(NULLIF(mv.policy #>> '{outlets,workspace,enabled}', '')::boolean, false)
-		  AND retrieval.quality_rank(v.quality) >= retrieval.quality_rank($11)
+		  AND (cardinality($6::text[]) = 0 OR a.visibility = ANY($6::text[]))
+		  AND (cardinality($7::text[]) = 0 OR a.publication_status = ANY($7::text[]))
+		  AND COALESCE(NULLIF(mv.policy #>> '{channels,workspace,enabled}', '')::boolean, false)
 		ORDER BY pgroonga_score(c.tableoid,c.ctid) DESC, a.id, c.id
 		LIMIT 200
-	`, principal.OrganizationID, req.WorkspaceID, models, q, filters.fieldsJSON(), filters.tagsJSON(), role, principal.UserID, req.Visibility, req.PublicationStatus, filters.QualityGTE)
+	`, principal.OrganizationID, req.WorkspaceID, models, q, filters.fieldsJSON(), req.Visibility, req.PublicationStatus)
 	if err != nil {
 		return nil, fmt.Errorf("member lexical recall: %w", err)
 	}
@@ -321,24 +319,21 @@ func (s Service) memberVectorCandidates(ctx context.Context, principal auth.Prin
 		 AND e.model_name=pc.model_name AND e.model_version=pc.model_version
 		 AND e.projection_generation=pc.active_projection_generation
 		JOIN asset.assets a ON a.id=c.asset_id AND a.current_working_version_id=c.asset_version_id
-		JOIN asset.asset_versions v ON v.id=c.asset_version_id
-		JOIN model.resource_models rm ON rm.id=a.resource_model_id
-		JOIN model.resource_model_versions mv ON mv.id=rm.current_version_id AND mv.status='published'
+		JOIN asset.asset_versions v ON v.organization_id=a.organization_id AND v.id=c.asset_version_id
+		JOIN model.resource_models rm ON rm.organization_id=a.organization_id AND rm.id=a.resource_model_id
+		JOIN model.resource_model_versions mv ON mv.organization_id=rm.organization_id AND mv.id=rm.current_version_id AND mv.status='published'
 		WHERE e.organization_id=$1::uuid AND e.status='ready'
 		  AND a.workspace_id=$2::uuid AND a.deleted_at IS NULL
 		  AND a.publication_status='published'
 		  AND a.resource_model_id=ANY($3::uuid[])
 		  AND e.model_name=$5 AND e.model_version=$6
 		  AND retrieval.matches_field_filters(v.fields,$7::jsonb)
-		  AND retrieval.matches_field_filters(jsonb_build_object('tags', v.tags),$8::jsonb)
-		  AND ($9::text IN ('owner','admin') OR a.visibility <> 'private' OR a.created_by=$10::uuid)
-		  AND (cardinality($11::text[])=0 OR a.visibility=ANY($11::text[]))
-		  AND (cardinality($12::text[])=0 OR a.publication_status=ANY($12::text[]))
-		  AND COALESCE(NULLIF(mv.policy #>> '{outlets,workspace,enabled}','')::boolean,false)
-		  AND retrieval.quality_rank(v.quality) >= retrieval.quality_rank($13)
+		  AND (cardinality($8::text[])=0 OR a.visibility=ANY($8::text[]))
+		  AND (cardinality($9::text[])=0 OR a.publication_status=ANY($9::text[]))
+		  AND COALESCE(NULLIF(mv.policy #>> '{channels,workspace,enabled}','')::boolean,false)
 		ORDER BY e.embedding <=> $4::vector(1024), a.id, c.id
 		LIMIT 200
-	`, principal.OrganizationID, req.WorkspaceID, models, literal, modelName, modelVersion, filters.fieldsJSON(), filters.tagsJSON(), role, principal.UserID, req.Visibility, req.PublicationStatus, filters.QualityGTE)
+	`, principal.OrganizationID, req.WorkspaceID, models, literal, modelName, modelVersion, filters.fieldsJSON(), req.Visibility, req.PublicationStatus)
 	if err != nil {
 		return nil, fmt.Errorf("member vector recall: %w", err)
 	}
@@ -432,22 +427,19 @@ func (s Service) pageMemberSession(ctx context.Context, principal auth.Principal
 			JOIN retrieval.projection_configs pc ON pc.id=pr.projection_config_id
 			 AND pc.status='active' AND pc.active_projection_generation=c.projection_generation AND pc.chunker_version=c.chunker_version
 			JOIN asset.assets a ON a.id=i.asset_id AND a.current_working_version_id=i.asset_version_id
-			JOIN asset.asset_versions v ON v.id=i.asset_version_id AND v.content_checksum=c.source_checksum
-			JOIN model.resource_models rm ON rm.id=a.resource_model_id
-			JOIN model.resource_model_versions mv ON mv.id=rm.current_version_id AND mv.status='published'
+			JOIN asset.asset_versions v ON v.organization_id=a.organization_id AND v.id=i.asset_version_id AND v.content_checksum=c.source_checksum
+			JOIN model.resource_models rm ON rm.organization_id=a.organization_id AND rm.id=a.resource_model_id
+			JOIN model.resource_model_versions mv ON mv.organization_id=rm.organization_id AND mv.id=rm.current_version_id AND mv.status='published'
 			WHERE i.session_id=$1::uuid AND i.ordinal >= $2
 			  AND a.organization_id=$3::uuid AND a.workspace_id=$4::uuid AND a.deleted_at IS NULL
 			  AND a.publication_status='published'
 			  AND a.resource_model_id=ANY($5::uuid[])
 			  AND retrieval.matches_field_filters(v.fields,$6::jsonb)
-			  AND retrieval.matches_field_filters(jsonb_build_object('tags', v.tags),$7::jsonb)
-			  AND ($8::text IN ('owner','admin') OR a.visibility <> 'private' OR a.created_by=$9::uuid)
-			  AND (cardinality($10::text[])=0 OR a.visibility=ANY($10::text[]))
-			  AND (cardinality($11::text[])=0 OR a.publication_status=ANY($11::text[]))
-			  AND COALESCE(NULLIF(mv.policy #>> '{outlets,workspace,enabled}','')::boolean,false)
-			  AND retrieval.quality_rank(v.quality) >= retrieval.quality_rank($12)
-			ORDER BY i.ordinal LIMIT $13
-		`, sessionID, offset, principal.OrganizationID, req.WorkspaceID, models, filters.fieldsJSON(), filters.tagsJSON(), role, principal.UserID, req.Visibility, req.PublicationStatus, filters.QualityGTE, topK+1)
+			  AND (cardinality($7::text[])=0 OR a.visibility=ANY($7::text[]))
+			  AND (cardinality($8::text[])=0 OR a.publication_status=ANY($8::text[]))
+			  AND COALESCE(NULLIF(mv.policy #>> '{channels,workspace,enabled}','')::boolean,false)
+			ORDER BY i.ordinal LIMIT $9
+		`, sessionID, offset, principal.OrganizationID, req.WorkspaceID, models, filters.fieldsJSON(), req.Visibility, req.PublicationStatus, topK+1)
 		if err != nil {
 			return QueryResponse{}, fmt.Errorf("page member search session: %w", err)
 		}
@@ -506,9 +498,9 @@ func (s Service) enrichMemberItems(ctx context.Context, principal auth.Principal
 	}
 	rows, err := s.Store.Pool.Query(ctx, `
 		SELECT v.id::text, COALESCE(v.title,''), COALESCE(LEFT(v.markdown,240),''),
-		       v.fields, v.tags, a.updated_at
+		       v.fields, a.updated_at
 		FROM asset.asset_versions v
-		JOIN asset.assets a ON a.id=v.asset_id AND a.current_working_version_id=v.id
+		JOIN asset.assets a ON a.organization_id=v.organization_id AND a.id=v.asset_id AND a.current_working_version_id=v.id
 		WHERE a.organization_id=$1::uuid AND a.workspace_id=$2::uuid AND v.id=ANY($3::uuid[])
 	`, principal.OrganizationID, workspaceID, versionIDs)
 	if err != nil {
@@ -518,21 +510,18 @@ func (s Service) enrichMemberItems(ctx context.Context, principal auth.Principal
 	type metadata struct {
 		title, summary, updatedAt string
 		fields                    map[string]any
-		tags                      []string
 	}
 	byVersion := make(map[string]metadata, len(items))
 	for rows.Next() {
 		var versionID, title, summary string
 		var updatedAt time.Time
-		var fieldsJSON, tagsJSON []byte
-		if err := rows.Scan(&versionID, &title, &summary, &fieldsJSON, &tagsJSON, &updatedAt); err != nil {
+		var fieldsJSON []byte
+		if err := rows.Scan(&versionID, &title, &summary, &fieldsJSON, &updatedAt); err != nil {
 			return err
 		}
 		fields := map[string]any{}
-		tags := []string{}
 		_ = json.Unmarshal(fieldsJSON, &fields)
-		_ = json.Unmarshal(tagsJSON, &tags)
-		byVersion[versionID] = metadata{title: title, summary: summary, updatedAt: updatedAt.UTC().Format(time.RFC3339Nano), fields: fields, tags: tags}
+		byVersion[versionID] = metadata{title: title, summary: summary, updatedAt: updatedAt.UTC().Format(time.RFC3339Nano), fields: fields}
 	}
 	if err := rows.Err(); err != nil {
 		return err
@@ -545,7 +534,9 @@ func (s Service) enrichMemberItems(ctx context.Context, principal auth.Principal
 		items[index].Title = value.title
 		items[index].Summary = value.summary
 		items[index].Fields = value.fields
-		items[index].Tags = value.tags
+		// Tags become relation-backed in a later phase; the field stays an
+		// empty array until then.
+		items[index].Tags = []string{}
 		items[index].Highlights = map[string]any{}
 		items[index].UpdatedAt = value.updatedAt
 	}

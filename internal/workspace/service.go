@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"agentchunzhi/internal/auth"
+	"agentchunzhi/internal/authz"
 	"agentchunzhi/internal/store"
 
 	"github.com/jackc/pgx/v5"
@@ -20,6 +21,8 @@ var (
 	ErrForbidden    = errors.New("workspace access denied")
 	ErrNotFound     = errors.New("workspace not found")
 	ErrConflict     = errors.New("workspace conflict")
+	// ErrLastAdminRequired protects the final workspace admin.
+	ErrLastAdminRequired = errors.New("last workspace admin required")
 	// ErrInvalidEmail marks an invitation email that fails the format check.
 	ErrInvalidEmail = errors.New("invalid invitation email")
 	// ErrAmbiguousMember is returned when a member reference matches several
@@ -72,7 +75,6 @@ type Summary struct {
 	Description          string    `json:"description"`
 	Role                 string    `json:"role"`
 	DefaultResourceModel string    `json:"default_resource_model_id,omitempty"`
-	DefaultVisibility    string    `json:"default_visibility"`
 	Counts               Counts    `json:"counts"`
 	UpdatedAt            time.Time `json:"updated_at"`
 }
@@ -98,13 +100,12 @@ type AgentApplication struct {
 
 type Settings struct {
 	Name                   string `json:"name"`
-	DefaultVisibility      string `json:"default_visibility"`
 	DefaultResourceModelID string `json:"default_resource_model_id,omitempty"`
 	Description            string `json:"description"`
 }
 
 func (s Service) validatePrincipal(principal auth.Principal) error {
-	if principal.UserType != "member" || strings.TrimSpace(principal.UserID) == "" || strings.TrimSpace(principal.OrganizationID) == "" {
+	if principal.UserType != auth.UserTypeMember || strings.TrimSpace(principal.UserID) == "" || strings.TrimSpace(principal.OrganizationID) == "" {
 		return ErrForbidden
 	}
 	if s.Store == nil || s.Store.Pool == nil {
@@ -155,6 +156,9 @@ func (s Service) membership(ctx context.Context, principal auth.Principal, works
 	if err != nil {
 		return "", fmt.Errorf("load workspace membership: %w", err)
 	}
+	if !authz.ValidWorkspaceRole(role) {
+		return "", ErrForbidden
+	}
 	return role, nil
 }
 
@@ -164,15 +168,15 @@ func (s Service) List(ctx context.Context, principal auth.Principal) ([]Summary,
 	}
 	rows, err := s.Store.Pool.Query(ctx, `
 		SELECT w.id::text, w.name, w.description, wm.role,
-		       COALESCE(w.default_resource_model_id::text, ''), w.default_visibility,
+		       COALESCE(w.default_resource_model_id::text, ''),
 		       w.updated_at,
 		       (SELECT count(*) FROM content.conversations c
 		          WHERE c.organization_id = w.organization_id AND c.workspace_id = w.id AND c.status = 'active'),
 		       (SELECT count(*) FROM content.containers c
 		          WHERE c.organization_id = w.organization_id AND c.workspace_id = w.id
 		            AND c.kind = 'document' AND c.status = 'active'),
-		       (SELECT count(*) FROM asset.asset_reviews ar
-		          WHERE ar.organization_id = w.organization_id AND ar.workspace_id = w.id AND ar.status = 'pending'),
+		       (SELECT count(*) FROM asset.publication_requests pr
+		          WHERE pr.organization_id = w.organization_id AND pr.workspace_id = w.id AND pr.status = 'pending'),
 		       (SELECT count(*) FROM automation.runs r
 		        WHERE r.organization_id = w.organization_id AND r.workspace_id = w.id AND r.status IN ('queued', 'running'))
 		FROM content.workspaces w
@@ -188,7 +192,7 @@ func (s Service) List(ctx context.Context, principal auth.Principal) ([]Summary,
 	for rows.Next() {
 		var item Summary
 		if err := rows.Scan(&item.ID, &item.Name, &item.Description, &item.Role,
-			&item.DefaultResourceModel, &item.DefaultVisibility, &item.UpdatedAt,
+			&item.DefaultResourceModel, &item.UpdatedAt,
 			&item.Counts.PendingConversations, &item.Counts.Documents,
 			&item.Counts.PendingReviews, &item.Counts.RunningTaskRuns); err != nil {
 			return nil, fmt.Errorf("scan workspace: %w", err)
@@ -208,17 +212,17 @@ func (s Service) Get(ctx context.Context, principal auth.Principal, workspaceID 
 	var item Summary
 	err := s.Store.Pool.QueryRow(ctx, `
 		SELECT w.id::text, w.name, w.description, wm.role,
-		       COALESCE(w.default_resource_model_id::text, ''), w.default_visibility,
+		       COALESCE(w.default_resource_model_id::text, ''),
 		       w.updated_at,
 		       (SELECT count(*) FROM content.conversations c WHERE c.organization_id = w.organization_id AND c.workspace_id = w.id AND c.status = 'active'),
 		       (SELECT count(*) FROM content.containers c WHERE c.organization_id = w.organization_id AND c.workspace_id = w.id AND c.kind = 'document' AND c.status = 'active'),
-		       (SELECT count(*) FROM asset.asset_reviews ar WHERE ar.organization_id = w.organization_id AND ar.workspace_id = w.id AND ar.status = 'pending'),
+		       (SELECT count(*) FROM asset.publication_requests pr WHERE pr.organization_id = w.organization_id AND pr.workspace_id = w.id AND pr.status = 'pending'),
 		       (SELECT count(*) FROM automation.runs r WHERE r.organization_id = w.organization_id AND r.workspace_id = w.id AND r.status IN ('queued', 'running'))
 		FROM content.workspaces w
 		JOIN content.workspace_members wm ON wm.organization_id = w.organization_id AND wm.workspace_id = w.id AND wm.user_id = $3::uuid
 		WHERE w.organization_id = $1::uuid AND w.id = $2::uuid AND w.status = 'active'
 	`, principal.OrganizationID, workspaceID, principal.UserID).Scan(&item.ID, &item.Name, &item.Description, &item.Role,
-		&item.DefaultResourceModel, &item.DefaultVisibility, &item.UpdatedAt,
+		&item.DefaultResourceModel, &item.UpdatedAt,
 		&item.Counts.PendingConversations, &item.Counts.Documents, &item.Counts.PendingReviews, &item.Counts.RunningTaskRuns)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Summary{}, ErrNotFound
@@ -294,11 +298,11 @@ func (s Service) Settings(ctx context.Context, principal auth.Principal, workspa
 	}
 	var result Settings
 	err := s.Store.Pool.QueryRow(ctx, `
-		SELECT w.name, w.default_visibility, COALESCE(w.default_resource_model_id::text, ''), w.description
+		SELECT w.name, COALESCE(w.default_resource_model_id::text, ''), w.description
 		FROM content.workspaces w
 		JOIN content.workspace_members wm ON wm.organization_id = w.organization_id AND wm.workspace_id = w.id AND wm.user_id = $3::uuid
 		WHERE w.organization_id = $1::uuid AND w.id = $2::uuid
-	`, principal.OrganizationID, workspaceID, principal.UserID).Scan(&result.Name, &result.DefaultVisibility, &result.DefaultResourceModelID, &result.Description)
+	`, principal.OrganizationID, workspaceID, principal.UserID).Scan(&result.Name, &result.DefaultResourceModelID, &result.Description)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Settings{}, ErrNotFound
 	}
@@ -313,12 +317,11 @@ func (s Service) UpdateSettings(ctx context.Context, principal auth.Principal, w
 	if err != nil {
 		return Settings{}, err
 	}
-	if role != "owner" && role != "admin" {
+	if role != authz.WorkspaceRoleAdmin {
 		return Settings{}, ErrForbidden
 	}
 	input.Name = strings.TrimSpace(input.Name)
-	input.DefaultVisibility = strings.TrimSpace(input.DefaultVisibility)
-	if input.Name == "" || (input.DefaultVisibility != "public" && input.DefaultVisibility != "login" && input.DefaultVisibility != "private" && input.DefaultVisibility != "workspace" && input.DefaultVisibility != "internal") {
+	if input.Name == "" {
 		return Settings{}, ErrInvalidInput
 	}
 	tx, err := s.Store.Pool.Begin(ctx)
@@ -326,19 +329,20 @@ func (s Service) UpdateSettings(ctx context.Context, principal auth.Principal, w
 		return Settings{}, fmt.Errorf("begin workspace settings update: %w", err)
 	}
 	defer tx.Rollback(ctx)
-	var revision int64
 	err = tx.QueryRow(ctx, `
 		UPDATE content.workspaces
-		SET name = $3, description = $4, default_visibility = $5, default_resource_model_id = NULLIF($6, '')::uuid, updated_at = now()
+		SET name = $3, description = $4, default_resource_model_id = NULLIF($5, '')::uuid,
+		    revision = revision + 1, updated_at = now()
 		WHERE organization_id = $1::uuid AND id = $2::uuid
-		RETURNING name, default_visibility, COALESCE(default_resource_model_id::text, ''), description
-	`, principal.OrganizationID, workspaceID, input.Name, input.Description, input.DefaultVisibility, input.DefaultResourceModelID).Scan(&input.Name, &input.DefaultVisibility, &input.DefaultResourceModelID, &input.Description)
+		RETURNING name, COALESCE(default_resource_model_id::text, ''), description
+	`, principal.OrganizationID, workspaceID, input.Name, input.Description, input.DefaultResourceModelID).Scan(&input.Name, &input.DefaultResourceModelID, &input.Description)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Settings{}, ErrNotFound
 	}
 	if err != nil {
 		return Settings{}, fmt.Errorf("update workspace settings: %w", err)
 	}
+	var revision int64
 	if err := tx.QueryRow(ctx, `
 		SELECT COALESCE(max(revision), 0) + 1 FROM content.workspace_settings_revisions WHERE organization_id = $1::uuid AND workspace_id = $2::uuid
 	`, principal.OrganizationID, workspaceID).Scan(&revision); err != nil {
@@ -358,7 +362,6 @@ func (s Service) UpdateSettings(ctx context.Context, principal auth.Principal, w
 		AuditResourceWorkspace, workspaceID, map[string]any{
 			"workspace_id":              workspaceID,
 			"name":                      input.Name,
-			"default_visibility":        input.DefaultVisibility,
 			"default_resource_model_id": input.DefaultResourceModelID,
 		}))
 	return input, nil
@@ -381,7 +384,7 @@ func (s Service) Stats(ctx context.Context, principal auth.Principal, workspaceI
 		SELECT
 		  (SELECT count(*) FROM asset.assets WHERE organization_id = $1::uuid AND workspace_id = $2::uuid),
 		  (SELECT count(*) FROM asset.assets WHERE organization_id = $1::uuid AND workspace_id = $2::uuid AND publication_status = 'published'),
-		  (SELECT count(*) FROM asset.asset_reviews WHERE organization_id = $1::uuid AND workspace_id = $2::uuid AND status = 'pending'),
+		  (SELECT count(*) FROM asset.publication_requests WHERE organization_id = $1::uuid AND workspace_id = $2::uuid AND status = 'pending'),
 		  (SELECT count(*) FROM asset.assets WHERE organization_id = $1::uuid AND workspace_id = $2::uuid AND created_at >= date_trunc('month', now())),
 		  (SELECT count(*) FROM content.containers WHERE organization_id = $1::uuid AND workspace_id = $2::uuid AND kind = 'document' AND status = 'active'),
 		  COALESCE((SELECT count(*) FILTER (WHERE status = 'succeeded')::float8 / NULLIF(count(*) FILTER (WHERE status IN ('succeeded', 'failed')), 0) FROM automation.runs WHERE organization_id = $1::uuid AND workspace_id = $2::uuid), 0)

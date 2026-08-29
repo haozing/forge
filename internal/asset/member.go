@@ -9,11 +9,10 @@ import (
 	"strings"
 	"time"
 
+	"agentchunzhi/internal/access"
 	"agentchunzhi/internal/auth"
 	"agentchunzhi/internal/authz"
 	"agentchunzhi/internal/eventing"
-	"agentchunzhi/internal/resourcemodel"
-	"agentchunzhi/internal/retrieval"
 	"agentchunzhi/internal/store"
 
 	"github.com/jackc/pgx/v5"
@@ -21,7 +20,7 @@ import (
 
 type MemberService struct {
 	Store  *store.Store
-	Events eventing.EventStore
+	Events *eventing.EventStore
 	Policy authz.WorkspacePolicy
 }
 
@@ -52,6 +51,7 @@ type MemberAssetInput struct {
 	ResourceModelID string         `json:"resource_model_id"`
 	Visibility      string         `json:"visibility"`
 	Title           *string        `json:"title"`
+	Summary         *string        `json:"summary"`
 	Markdown        *string        `json:"markdown"`
 	Fields          map[string]any `json:"fields"`
 	Tags            []string       `json:"tags"`
@@ -62,6 +62,7 @@ type MemberAssetInput struct {
 
 type MemberAssetPatch struct {
 	Title         *string         `json:"title"`
+	Summary       *string         `json:"summary"`
 	Markdown      *string         `json:"markdown"`
 	Fields        *map[string]any `json:"fields"`
 	Tags          *[]string       `json:"tags"`
@@ -105,31 +106,25 @@ type MemberAsset struct {
 	Summary                   string         `json:"summary"`
 	Markdown                  *string        `json:"markdown,omitempty"`
 	Fields                    map[string]any `json:"fields"`
-	Tags                      []string       `json:"tags"`
-	Source                    map[string]any `json:"source"`
 	Visibility                string         `json:"visibility"`
 	PublicationStatus         string         `json:"publication_status"`
-	ReviewStatus              string         `json:"review_status"`
-	Quality                   string         `json:"quality"`
+	Origin                    string         `json:"origin"`
+	ConfirmationStatus        string         `json:"confirmation_status"`
 	CurrentWorkingVersionID   string         `json:"current_working_version_id"`
 	CurrentPublishedVersionID *string        `json:"current_published_version_id"`
+	DraftRevision             int64          `json:"draft_revision"`
+	DraftCommittedRevision    int64          `json:"draft_committed_revision"`
 	ContainerIDs              []string       `json:"container_ids"`
 	ParentAssetID             *string        `json:"parent_asset_id"`
 	CreatedBy                 Actor          `json:"created_by"`
+	PublishedAt               *time.Time     `json:"published_at,omitempty"`
 	UpdatedAt                 time.Time      `json:"updated_at"`
 	ETag                      string         `json:"etag"`
 	sortValue                 string
 }
 
-type ReviewSubmission struct {
-	ReviewID       string `json:"review_id"`
-	AssetID        string `json:"asset_id"`
-	AssetVersionID string `json:"asset_version_id"`
-	Status         string `json:"status"`
-}
-
 func (s MemberService) require(ctx context.Context, principal auth.Principal, workspaceID, modelID, action string) (authz.Scope, error) {
-	if principal.UserType != "member" || s.Store == nil || s.Store.Pool == nil {
+	if principal.UserType != auth.UserTypeMember || s.Store == nil || s.Store.Pool == nil {
 		return authz.Scope{}, ErrForbidden
 	}
 	if s.Policy == nil {
@@ -150,6 +145,64 @@ func (s MemberService) List(ctx context.Context, principal auth.Principal, works
 	return page.Items, nil
 }
 
+type memberAssetCursor struct {
+	Sort      string `json:"sort"`
+	UpdatedAt string `json:"updated_at"`
+	Value     string `json:"value"`
+	ID        string `json:"id"`
+}
+
+type memberAssetSort struct {
+	Name  string
+	Desc  bool
+	Expr  string
+	Value string
+}
+
+func normalizeMemberAssetSort(value string) (memberAssetSort, error) {
+	switch value {
+	case "", "updated_at:desc":
+		return memberAssetSort{Name: "updated_at:desc", Desc: true, Expr: "a.updated_at", Value: "a.updated_at"}, nil
+	case "updated_at:asc":
+		return memberAssetSort{Name: "updated_at:asc", Expr: "a.updated_at", Value: "a.updated_at"}, nil
+	case "title:asc":
+		return memberAssetSort{Name: "title:asc", Expr: "v.title", Value: "v.title"}, nil
+	case "title:desc":
+		return memberAssetSort{Name: "title:desc", Desc: true, Expr: "v.title", Value: "v.title"}, nil
+	default:
+		return memberAssetSort{}, ErrInvalidInput
+	}
+}
+
+func encodeAssetCursor(sortName string, item MemberAsset) string {
+	updatedAt := item.UpdatedAt.UTC().Format(time.RFC3339Nano)
+	value := updatedAt
+	if strings.HasPrefix(sortName, "title") {
+		if item.Title != nil {
+			value = *item.Title
+		} else {
+			value = ""
+		}
+	}
+	raw, _ := json.Marshal(memberAssetCursor{Sort: sortName, UpdatedAt: updatedAt, Value: value, ID: item.ID})
+	return base64.RawURLEncoding.EncodeToString(raw)
+}
+
+func decodeAssetCursor(value, sortName string) (memberAssetCursor, error) {
+	raw, err := base64.RawURLEncoding.DecodeString(value)
+	if err != nil {
+		return memberAssetCursor{}, ErrInvalidInput
+	}
+	var cursor memberAssetCursor
+	if err := json.Unmarshal(raw, &cursor); err != nil {
+		return memberAssetCursor{}, ErrInvalidInput
+	}
+	if cursor.Sort != sortName || !validID(cursor.ID) {
+		return memberAssetCursor{}, ErrInvalidInput
+	}
+	return cursor, nil
+}
+
 func (s MemberService) ListPage(ctx context.Context, principal auth.Principal, workspaceID string, input MemberAssetListInput) (MemberAssetPage, error) {
 	if !validID(workspaceID) || (input.ResourceModelID != "" && !validID(input.ResourceModelID)) ||
 		(input.ContainerID != "" && !validID(input.ContainerID)) || (input.ParentAssetID != "" && !validID(input.ParentAssetID)) {
@@ -158,142 +211,180 @@ func (s MemberService) ListPage(ctx context.Context, principal auth.Principal, w
 	if !validMemberAssetListEnums(input) {
 		return MemberAssetPage{}, ErrInvalidInput
 	}
-	scope, err := s.require(ctx, principal, workspaceID, input.ResourceModelID, "asset.read")
+	scope, err := s.require(ctx, principal, workspaceID, input.ResourceModelID, authz.ActionAssetRead)
 	if err != nil {
 		return MemberAssetPage{}, err
 	}
 	limit := input.Limit
 	if limit <= 0 || limit > 100 {
-		limit = 50
+		limit = 20
 	}
-	input.Query = strings.TrimSpace(input.Query)
-	sortSpec, err := normalizeMemberAssetSort(input.Sort)
+	sortKey, err := normalizeMemberAssetSort(input.Sort)
 	if err != nil {
 		return MemberAssetPage{}, err
 	}
-	cursor, err := decodeAssetCursor(input.Cursor, sortSpec.Name)
-	if err != nil {
-		return MemberAssetPage{}, err
+	var cursor memberAssetCursor
+	if strings.TrimSpace(input.Cursor) != "" {
+		cursor, err = decodeAssetCursor(input.Cursor, sortKey.Name)
+		if err != nil {
+			return MemberAssetPage{}, ErrInvalidInput
+		}
 	}
-	fieldFilters, tagFilters, err := normalizeMemberFilters(input.Filters, input.Tags)
-	if err != nil {
-		return MemberAssetPage{}, err
+	// Working scope: CMS lists read the current working version of every
+	// non-deleted asset visible to the membership.
+	join := "JOIN asset.asset_versions v ON v.organization_id = a.organization_id AND v.id = a.current_working_version_id"
+	cursorColumn := "a.updated_at"
+	if strings.HasPrefix(sortKey.Name, "title") {
+		cursorColumn = "v.title"
 	}
-	if err := s.validateMemberFilterFields(ctx, principal.OrganizationID, workspaceID, input.ResourceModelID, fieldFilters); err != nil {
-		return MemberAssetPage{}, err
+	direction := "DESC"
+	if !sortKey.Desc {
+		direction = "ASC"
 	}
-	querySQL := `
-		SELECT a.id::text, a.workspace_id::text, a.resource_model_id::text, rm.content_kind, v.resource_model_version_id::text,
-		       v.title, COALESCE(left(v.markdown, 240), ''), v.markdown, v.fields, v.tags, v.source,
-		       a.visibility, a.publication_status, v.review_status, v.quality,
-		       a.current_working_version_id::text, a.current_published_version_id,
-		       u.id::text, u.display_name, a.updated_at,
-		       COALESCE((SELECT jsonb_agg(ca.container_id::text ORDER BY ca.container_id) FROM content.container_assets ca WHERE ca.organization_id = a.organization_id AND ca.workspace_id = a.workspace_id AND ca.asset_id = a.id), '[]'::jsonb),
-		       (SELECT dp.parent_asset_id::text FROM content.document_parents dp WHERE dp.organization_id = a.organization_id AND dp.workspace_id = a.workspace_id AND dp.child_asset_id = a.id),
-		       ` + sortSpec.Expression + `
+	orderBy := fmt.Sprintf("(%s %s, a.id %s)", cursorColumn, direction, direction)
+	where := []string{
+		"a.organization_id = $1::uuid",
+		"a.workspace_id = $2::uuid",
+		"a.deleted_at IS NULL",
+		"w.status = 'active'",
+	}
+	args := []any{principal.OrganizationID, workspaceID}
+	arg := func(value any) string {
+		args = append(args, value)
+		return fmt.Sprintf("$%d", len(args))
+	}
+	if input.ResourceModelID != "" {
+		where = append(where, "a.resource_model_id = "+arg(input.ResourceModelID)+"::uuid")
+	}
+	if input.Visibility != "" {
+		where = append(where, "a.visibility = "+arg(input.Visibility))
+	}
+	if input.PublicationStatus != "" {
+		where = append(where, "a.publication_status = "+arg(input.PublicationStatus))
+	}
+	if input.CreatedBy != "" {
+		if !validID(input.CreatedBy) {
+			return MemberAssetPage{}, ErrInvalidInput
+		}
+		where = append(where, "a.created_by = "+arg(input.CreatedBy)+"::uuid")
+	}
+	if input.Query != "" {
+		pattern := "%" + strings.ToLower(input.Query) + "%"
+		where = append(where, "(lower(v.title) LIKE "+arg(pattern)+" OR lower(v.markdown) LIKE "+arg(pattern)+")")
+	}
+	if len(input.Filters) > 0 {
+		predicatesRaw, _, err := normalizeMemberFilters(input.Filters, nil)
+		if err != nil {
+			return MemberAssetPage{}, err
+		}
+		predicates := predicatesRaw
+		if err != nil {
+			return MemberAssetPage{}, err
+		}
+		if len(predicates) > 0 {
+			where = append(where, "retrieval.matches_field_filters(v.fields, "+arg(string(predicates))+")")
+		}
+	}
+	if input.ContainerID != "" {
+		where = append(where, `EXISTS (SELECT 1 FROM content.container_assets ca
+			WHERE ca.organization_id = a.organization_id AND ca.asset_id = a.id
+			  AND ca.container_id = `+arg(input.ContainerID)+"::uuid)")
+	}
+	if input.ParentAssetID != "" {
+		where = append(where, `EXISTS (SELECT 1 FROM content.document_parents dp
+			WHERE dp.organization_id = a.organization_id AND dp.child_asset_id = a.id
+			  AND dp.parent_asset_id = `+arg(input.ParentAssetID)+"::uuid)")
+	}
+	if cursor.ID != "" {
+		comparison := "<"
+		if !sortKey.Desc {
+			comparison = ">"
+		}
+		where = append(where, fmt.Sprintf(
+			"(%s, a.id) %s (%s::text, %s::uuid)", cursorColumn, comparison, arg(cursor.Value), arg(cursor.ID)))
+	}
+	query := fmt.Sprintf(`
+		SELECT a.id::text, a.workspace_id::text, a.resource_model_id::text,
+		       COALESCE(rm.content_kind, ''), v.resource_model_version_id::text,
+		       v.title, v.summary, v.markdown, v.fields, a.visibility,
+		       a.publication_status, v.origin, v.confirmation_status,
+		       a.current_working_version_id::text, a.current_published_version_id::text,
+		       d.revision, d.committed_revision,
+		       a.published_at, a.updated_at, v.content_checksum,
+		       COALESCE(u.display_name, ''), a.created_by::text
 		FROM asset.assets a
-		JOIN asset.asset_versions v ON v.id = a.current_working_version_id
-		JOIN identity.users u ON u.id = a.created_by
-		JOIN model.resource_models rm ON rm.id = a.resource_model_id
-		WHERE a.organization_id = $1::uuid AND a.workspace_id = $2::uuid AND a.deleted_at IS NULL
-		  AND ($3 = '' OR a.resource_model_id = NULLIF($3, '')::uuid)
-		  AND ($4 = '' OR v.title ILIKE '%' || $4 || '%' OR v.markdown ILIKE '%' || $4 || '%')
-		  AND ($5 = '' OR a.visibility = $5)
-		  AND ($6 = '' OR a.publication_status = $6)
-		  AND ($7 = '' OR v.review_status = $7)
-		  AND ($8 = '' OR ($8 = 'me' AND a.created_by = $9::uuid) OR ($8 <> 'me' AND a.created_by = NULLIF($8, '')::uuid))
-		  AND ($10 IN ('owner', 'admin') OR a.visibility <> 'private' OR a.created_by = $9::uuid)
-		  AND ($11 = '' OR rm.content_kind = $11)
-		  AND ($12 = '' OR EXISTS (SELECT 1 FROM content.container_assets ca WHERE ca.organization_id = a.organization_id AND ca.workspace_id = a.workspace_id AND ca.asset_id = a.id AND ca.container_id = NULLIF($12, '')::uuid))
-		  AND ($13 = '' OR EXISTS (SELECT 1 FROM content.document_parents dp WHERE dp.organization_id = a.organization_id AND dp.workspace_id = a.workspace_id AND dp.child_asset_id = a.id AND dp.parent_asset_id = NULLIF($13, '')::uuid))
-		  AND retrieval.matches_field_filters(v.fields, $14::jsonb)
-		  AND retrieval.matches_field_filters(jsonb_build_object('tags', v.tags), $15::jsonb)
-		  AND ($16 = false OR ` + sortSpec.CursorPredicate + `)
-		ORDER BY ` + sortSpec.OrderBy + `
-		LIMIT $20`
-	rows, err := s.Store.Pool.Query(ctx, querySQL, principal.OrganizationID, workspaceID, input.ResourceModelID, input.Query, input.Visibility, input.PublicationStatus, input.ReviewStatus, input.CreatedBy, principal.UserID, scope.Role, input.ContentKind, input.ContainerID, input.ParentAssetID, string(fieldFilters), string(tagFilters), input.Cursor != "", cursor.UpdatedAt, cursor.Value, cursor.ID, limit+1)
+		JOIN content.workspaces w ON w.organization_id = a.organization_id AND w.id = a.workspace_id
+		JOIN asset.asset_drafts d ON d.organization_id = a.organization_id AND d.asset_id = a.id
+		%s
+		LEFT JOIN model.resource_models rm ON rm.organization_id = a.organization_id AND rm.id = a.resource_model_id
+		LEFT JOIN identity.users u ON u.id = a.created_by
+		WHERE %s
+		ORDER BY %s
+		LIMIT %d
+	`, join, strings.Join(where, " AND "), orderBy, limit+1)
+	rows, err := s.Store.Pool.Query(ctx, query, args...)
 	if err != nil {
 		return MemberAssetPage{}, fmt.Errorf("list member assets: %w", err)
 	}
 	defer rows.Close()
-	items := make([]MemberAsset, 0, limit+1)
+	page := MemberAssetPage{Items: make([]MemberAsset, 0, limit+1)}
 	for rows.Next() {
-		item, err := scanMemberAsset(rows)
+		item, err := scanMemberAssetRow(rows)
 		if err != nil {
 			return MemberAssetPage{}, err
 		}
-		items = append(items, item)
+		page.Items = append(page.Items, item)
 	}
 	if err := rows.Err(); err != nil {
 		return MemberAssetPage{}, fmt.Errorf("iterate member assets: %w", err)
 	}
-	page := MemberAssetPage{Items: items}
 	if len(page.Items) > limit {
 		page.HasMore = true
 		page.Items = page.Items[:limit]
 		last := page.Items[len(page.Items)-1]
-		page.NextCursor = encodeAssetCursor(sortSpec.Name, last)
+		page.NextCursor = encodeAssetCursor(sortKey.Name, last)
 	}
+	_ = scope.Role
 	return page, nil
 }
 
-type memberAssetCursor struct {
-	Sort      string `json:"sort"`
-	UpdatedAt string `json:"updated_at,omitempty"`
-	Value     string `json:"value,omitempty"`
-	ID        string `json:"id"`
+func scanMemberAssetRow(rows interface{ Scan(...any) error }) (MemberAsset, error) {
+	var item MemberAsset
+	var publishedAt *time.Time
+	var createdByName string
+	if err := rows.Scan(&item.ID, &item.WorkspaceID, &item.ResourceModelID,
+		&item.ContentKind, &item.ResourceModelVersionID,
+		&item.Title, &item.Summary, &item.Markdown, &item.Fields, &item.Visibility,
+		&item.PublicationStatus, &item.Origin, &item.ConfirmationStatus,
+		&item.CurrentWorkingVersionID, &item.CurrentPublishedVersionID,
+		&item.DraftRevision, &item.DraftCommittedRevision,
+		&publishedAt, &item.UpdatedAt, &item.ETag,
+		&createdByName, &item.CreatedBy.ID); err != nil {
+		return MemberAsset{}, fmt.Errorf("scan member asset: %w", err)
+	}
+	if item.Fields == nil {
+		item.Fields = map[string]any{}
+	}
+	item.CreatedBy.DisplayName = createdByName
+	item.PublishedAt = publishedAt
+	return item, nil
 }
 
-type memberAssetSort struct {
-	Name            string
-	Expression      string
-	CursorPredicate string
-	OrderBy         string
-}
-
-func normalizeMemberAssetSort(value string) (memberAssetSort, error) {
-	value = strings.ToLower(strings.TrimSpace(value))
-	switch value {
-	case "", "updated_at:desc", "updated_at_desc", "-updated_at":
-		return memberAssetSort{Name: "updated_at:desc", Expression: "a.updated_at::text", CursorPredicate: "(a.updated_at, a.id) < (NULLIF($17, '')::timestamptz, NULLIF($19, '')::uuid) AND $18::text = $18::text", OrderBy: "a.updated_at DESC, a.id DESC"}, nil
-	case "updated_at:asc", "updated_at_asc", "updated_at":
-		return memberAssetSort{Name: "updated_at:asc", Expression: "a.updated_at::text", CursorPredicate: "(a.updated_at, a.id) > (NULLIF($17, '')::timestamptz, NULLIF($19, '')::uuid) AND $18::text = $18::text", OrderBy: "a.updated_at ASC, a.id ASC"}, nil
-	case "title:asc", "title_asc", "title":
-		return memberAssetSort{Name: "title:asc", Expression: "lower(COALESCE(v.title, ''))", CursorPredicate: "(lower(COALESCE(v.title, '')), a.id) > ($18::text, NULLIF($19, '')::uuid) AND NULLIF($17::text, '') IS NULL", OrderBy: "lower(COALESCE(v.title, '')) ASC, a.id ASC"}, nil
-	case "title:desc", "title_desc", "-title":
-		return memberAssetSort{Name: "title:desc", Expression: "lower(COALESCE(v.title, ''))", CursorPredicate: "(lower(COALESCE(v.title, '')), a.id) < ($18::text, NULLIF($19, '')::uuid) AND NULLIF($17::text, '') IS NULL", OrderBy: "lower(COALESCE(v.title, '')) DESC, a.id DESC"}, nil
+func validMemberAssetListEnums(input MemberAssetListInput) bool {
+	if input.Visibility != "" && !access.Valid(input.Visibility) {
+		return false
+	}
+	switch input.PublicationStatus {
+	case "", PublicationDraft, PublicationPublished, PublicationArchived:
 	default:
-		return memberAssetSort{}, ErrInvalidInput
+		return false
 	}
-}
-
-func encodeAssetCursor(sortName string, item MemberAsset) string {
-	payload := memberAssetCursor{Sort: sortName, ID: item.ID, Value: item.sortValue}
-	if strings.HasPrefix(sortName, "updated_at:") {
-		payload.UpdatedAt = item.UpdatedAt.UTC().Format(time.RFC3339Nano)
+	switch input.Sort {
+	case "", "updated_at:desc", "updated_at:asc", "title:asc", "title:desc":
+	default:
+		return false
 	}
-	raw, _ := json.Marshal(payload)
-	return base64.RawURLEncoding.EncodeToString(raw)
-}
-
-func decodeAssetCursor(value, sortName string) (memberAssetCursor, error) {
-	if strings.TrimSpace(value) == "" {
-		return memberAssetCursor{}, nil
-	}
-	raw, err := base64.RawURLEncoding.DecodeString(value)
-	if err != nil {
-		return memberAssetCursor{}, ErrInvalidInput
-	}
-	var payload memberAssetCursor
-	if err := json.Unmarshal(raw, &payload); err != nil || !validID(payload.ID) || payload.Sort != sortName {
-		return memberAssetCursor{}, ErrInvalidInput
-	}
-	if strings.HasPrefix(sortName, "updated_at:") {
-		if _, err := time.Parse(time.RFC3339Nano, payload.UpdatedAt); err != nil {
-			return memberAssetCursor{}, ErrInvalidInput
-		}
-	}
-	return payload, nil
+	return true
 }
 
 func (s MemberService) Get(ctx context.Context, principal auth.Principal, assetID string) (MemberAsset, error) {
@@ -301,677 +392,678 @@ func (s MemberService) Get(ctx context.Context, principal auth.Principal, assetI
 		return MemberAsset{}, ErrInvalidInput
 	}
 	var workspaceID, modelID string
-	err := s.Store.Pool.QueryRow(ctx, `SELECT COALESCE(workspace_id::text, ''), resource_model_id::text FROM asset.assets WHERE organization_id = $1::uuid AND id = $2::uuid`, principal.OrganizationID, assetID).Scan(&workspaceID, &modelID)
-	if errors.Is(err, pgx.ErrNoRows) || workspaceID == "" {
-		return MemberAsset{}, ErrNotFound
-	}
-	if err != nil {
-		return MemberAsset{}, fmt.Errorf("load member asset scope: %w", err)
-	}
-	scope, err := s.require(ctx, principal, workspaceID, modelID, "asset.read")
-	if err != nil {
-		return MemberAsset{}, err
-	}
-	row := s.Store.Pool.QueryRow(ctx, `
-		SELECT a.id::text, a.workspace_id::text, a.resource_model_id::text, rm.content_kind, v.resource_model_version_id::text,
-		       v.title, COALESCE(left(v.markdown, 240), ''), v.markdown, v.fields, v.tags, v.source,
-		       a.visibility, a.publication_status, v.review_status, v.quality,
-		       a.current_working_version_id::text, a.current_published_version_id,
-		       u.id::text, u.display_name, a.updated_at,
-		       COALESCE((SELECT jsonb_agg(ca.container_id::text ORDER BY ca.container_id) FROM content.container_assets ca WHERE ca.organization_id = a.organization_id AND ca.workspace_id = a.workspace_id AND ca.asset_id = a.id), '[]'::jsonb),
-		       (SELECT dp.parent_asset_id::text FROM content.document_parents dp WHERE dp.organization_id = a.organization_id AND dp.workspace_id = a.workspace_id AND dp.child_asset_id = a.id),
-		       a.updated_at::text
-		FROM asset.assets a JOIN asset.asset_versions v ON v.id = a.current_working_version_id JOIN identity.users u ON u.id = a.created_by JOIN model.resource_models rm ON rm.id = a.resource_model_id
-		WHERE a.organization_id = $1::uuid AND a.id = $2::uuid AND a.workspace_id = $3::uuid AND a.deleted_at IS NULL
-	`, principal.OrganizationID, assetID, workspaceID)
-	item, err := scanMemberAsset(row)
-	if err != nil {
-		return MemberAsset{}, err
-	}
-	if item.Visibility == "private" && item.CreatedBy.ID != principal.UserID && scope.Role != "owner" && scope.Role != "admin" {
-		return MemberAsset{}, ErrNotFound
-	}
-	return item, nil
-}
-
-func (s MemberService) Create(ctx context.Context, principal auth.Principal, workspaceID, idempotencyKey string, input MemberAssetInput) (MemberAsset, error) {
-	if _, err := s.require(ctx, principal, workspaceID, input.ResourceModelID, "asset.write"); err != nil {
-		return MemberAsset{}, err
-	}
-	if !validIdempotencyKey(idempotencyKey) || !validID(input.ResourceModelID) {
-		return MemberAsset{}, ErrInvalidInput
-	}
-	input.Visibility = strings.TrimSpace(input.Visibility)
-	if input.Fields == nil {
-		input.Fields = map[string]any{}
-	}
-	if input.Tags == nil {
-		input.Tags = []string{}
-	}
-	if input.Source == nil {
-		input.Source = map[string]any{}
-	}
-	var modelVersionID, contentKind string
-	var fieldSchema, formSchema, listSchema, policy []byte
 	err := s.Store.Pool.QueryRow(ctx, `
-		SELECT mv.id::text, rm.content_kind, mv.field_schema, mv.form_schema, mv.list_schema, mv.policy
-		FROM model.resource_models rm JOIN model.resource_model_versions mv ON mv.id = rm.current_version_id
-		WHERE rm.organization_id = $1::uuid AND rm.workspace_id = $2::uuid AND rm.id = $3::uuid AND rm.status = 'active' AND mv.status = 'published'
-	`, principal.OrganizationID, workspaceID, input.ResourceModelID).Scan(&modelVersionID, &contentKind, &fieldSchema, &formSchema, &listSchema, &policy)
+		SELECT workspace_id::text, resource_model_id::text FROM asset.assets
+		WHERE organization_id = $1::uuid AND id = $2::uuid AND deleted_at IS NULL
+	`, principal.OrganizationID, assetID).Scan(&workspaceID, &modelID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return MemberAsset{}, ErrNotFound
 	}
 	if err != nil {
-		return MemberAsset{}, fmt.Errorf("load member asset model version: %w", err)
+		return MemberAsset{}, err
 	}
-	input.Visibility, err = memberAssetVisibility(policy, input.Visibility)
+	if _, err := s.require(ctx, principal, workspaceID, modelID, authz.ActionAssetRead); err != nil {
+		return MemberAsset{}, err
+	}
+	rows, err := s.Store.Pool.Query(ctx, `
+		SELECT a.id::text, a.workspace_id::text, a.resource_model_id::text,
+		       COALESCE(rm.content_kind, ''), v.resource_model_version_id::text,
+		       v.title, v.summary, v.markdown, v.fields, a.visibility,
+		       a.publication_status, v.origin, v.confirmation_status,
+		       a.current_working_version_id::text, a.current_published_version_id::text,
+		       d.revision, d.committed_revision,
+		       a.published_at, a.updated_at, v.content_checksum,
+		       COALESCE(u.display_name, ''), a.created_by::text
+		FROM asset.assets a
+		JOIN asset.asset_versions v ON v.organization_id = a.organization_id AND v.id = a.current_working_version_id
+		JOIN asset.asset_drafts d ON d.organization_id = a.organization_id AND d.asset_id = a.id
+		LEFT JOIN model.resource_models rm ON rm.organization_id = a.organization_id AND rm.id = a.resource_model_id
+		LEFT JOIN identity.users u ON u.id = a.created_by
+		WHERE a.organization_id = $1::uuid AND a.id = $2::uuid
+	`, principal.OrganizationID, assetID)
 	if err != nil {
 		return MemberAsset{}, err
 	}
-	if err := resourcemodel.Validate(contentKind, decodeJSONMap(fieldSchema), decodeJSONMap(formSchema), decodeJSONMap(listSchema), decodeJSONMap(policy)); err != nil {
-		return MemberAsset{}, err
-	}
-	if err := validateContent(input.Title, input.Markdown, &input.Fields); err != nil {
-		return MemberAsset{}, err
-	}
-	if err := validateFields(fieldSchema, input.Fields); err != nil {
-		return MemberAsset{}, err
-	}
-	checksum := hashRequest("member.asset.content", struct {
-		Title    *string
-		Markdown *string
-		Fields   map[string]any
-		Tags     []string
-		Source   map[string]any
-	}{input.Title, input.Markdown, input.Fields, input.Tags, input.Source})
-	requestHash := hashRequest("member.asset.create", struct {
-		WorkspaceID string
-		Input       MemberAssetInput
-	}{workspaceID, input})
-	tx, err := s.Store.Pool.Begin(ctx)
-	if err != nil {
-		return MemberAsset{}, fmt.Errorf("begin member asset create: %w", err)
-	}
-	defer tx.Rollback(ctx)
-	if err := validateAssetReferences(ctx, tx, principal, workspaceID, fieldSchema, input.Fields); err != nil {
-		return MemberAsset{}, err
-	}
-	if body, replay, err := reserveMemberIdempotency(ctx, tx, principal, "member.asset.create", idempotencyKey, requestHash); err != nil {
-		return MemberAsset{}, err
-	} else if replay {
-		var item MemberAsset
-		if err := json.Unmarshal(body, &item); err != nil {
-			return MemberAsset{}, fmt.Errorf("decode idempotent member asset response: %w", err)
+	defer rows.Close()
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return MemberAsset{}, err
 		}
-		return item, nil
+		return MemberAsset{}, ErrNotFound
 	}
-	var assetID, versionID string
-	if err := tx.QueryRow(ctx, `INSERT INTO asset.assets (organization_id, workspace_id, resource_model_id, visibility, publication_status, created_by) VALUES ($1::uuid, $2::uuid, $3::uuid, $4, 'draft', $5::uuid) RETURNING id::text`, principal.OrganizationID, workspaceID, input.ResourceModelID, input.Visibility, principal.UserID).Scan(&assetID); err != nil {
-		return MemberAsset{}, fmt.Errorf("create member asset: %w", err)
-	}
-	if err := tx.QueryRow(ctx, `INSERT INTO asset.asset_versions (organization_id, workspace_id, asset_id, resource_model_id, resource_model_version_id, version_no, workflow_status, quality, title, markdown, fields, tags, source, content_checksum, created_by) VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid, 1, 'draft', 'raw', $6, $7, $8::jsonb, $9::jsonb, $10::jsonb, $11, $12::uuid) RETURNING id::text`, principal.OrganizationID, workspaceID, assetID, input.ResourceModelID, modelVersionID, input.Title, input.Markdown, mustJSON(input.Fields), mustJSON(input.Tags), mustJSON(input.Source), checksum, principal.UserID).Scan(&versionID); err != nil {
-		return MemberAsset{}, fmt.Errorf("create member asset version: %w", err)
-	}
-	if _, err := tx.Exec(ctx, `UPDATE asset.assets SET current_working_version_id = $2::uuid, updated_at = now() WHERE id = $1::uuid`, assetID, versionID); err != nil {
-		return MemberAsset{}, fmt.Errorf("set member asset working version: %w", err)
-	}
-	if err := replaceMemberAssetRelationsTx(ctx, tx, principal, workspaceID, assetID, contentKind, input.ContainerIDs, input.ParentAssetID); err != nil {
-		return MemberAsset{}, err
-	}
-	if err := retrieval.EnqueueProjectionTx(ctx, tx, s.Events, principal.OrganizationID, versionID, retrieval.ProjectionRebuild); err != nil {
-		return MemberAsset{}, fmt.Errorf("enqueue member asset projection: %w", err)
-	}
-	if _, err := tx.Exec(ctx, `INSERT INTO audit.audit_log (organization_id, actor_user_id, initiator_user_id, action, resource_type, resource_id, result, metadata) VALUES ($1::uuid, $2::uuid, $2::uuid, 'asset.create', 'asset', $3::uuid, 'allowed', jsonb_build_object('workspace_id', $4::text, 'principal_type', 'member'))`, principal.OrganizationID, principal.UserID, assetID, workspaceID); err != nil {
-		return MemberAsset{}, fmt.Errorf("record member asset create audit: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return MemberAsset{}, fmt.Errorf("commit member asset create: %w", err)
-	}
-	result, err := s.Get(ctx, principal, assetID)
+	item, err := scanMemberAssetRow(rows)
 	if err != nil {
 		return MemberAsset{}, err
 	}
-	if err := saveMemberIdempotency(ctx, s.Store, principal, "member.asset.create", idempotencyKey, result, httpCreated); err != nil {
-		return MemberAsset{}, err
-	}
-	return result, nil
-}
-
-func (s MemberService) Update(ctx context.Context, principal auth.Principal, assetID, expectedVersionID, idempotencyKey string, input MemberAssetPatch) (MemberAsset, error) {
-	if !validID(assetID) || !validID(expectedVersionID) || !validIdempotencyKey(idempotencyKey) {
-		return MemberAsset{}, ErrInvalidInput
-	}
-	current, err := s.Get(ctx, principal, assetID)
+	containerIDs, parentID, err := loadMemberAssetRelations(ctx, s.Store, principal.OrganizationID, assetID)
 	if err != nil {
 		return MemberAsset{}, err
 	}
-	if _, err := s.require(ctx, principal, current.WorkspaceID, current.ResourceModelID, "asset.write"); err != nil {
-		return MemberAsset{}, err
-	}
-	if current.CurrentWorkingVersionID != expectedVersionID && strings.Trim(expectedVersionID, "\"") != current.ETag {
-		return MemberAsset{}, ErrConflict
-	}
-	title, markdown, fields, tags, source := current.Title, current.Markdown, current.Fields, current.Tags, current.Source
-	containerIDs, parentAssetID := current.ContainerIDs, current.ParentAssetID
-	visibility := current.Visibility
-	if input.Title != nil {
-		title = input.Title
-	}
-	if input.Markdown != nil {
-		markdown = input.Markdown
-	}
-	if input.Fields != nil {
-		fields = *input.Fields
-	}
-	if input.Tags != nil {
-		tags = *input.Tags
-	}
-	if input.Source != nil {
-		source = *input.Source
-	}
-	if input.Visibility != nil {
-		visibility = strings.TrimSpace(*input.Visibility)
-	}
-	if input.ContainerIDs != nil {
-		containerIDs = *input.ContainerIDs
-	}
-	if input.ParentAssetID.Set {
-		parentAssetID = input.ParentAssetID.Value
-	}
-	var contentKind, modelVersionID string
-	var fieldSchema, formSchema, listSchema, policy []byte
-	if err := s.Store.Pool.QueryRow(ctx, `SELECT rm.content_kind, mv.id::text, mv.field_schema, mv.form_schema, mv.list_schema, mv.policy FROM model.resource_models rm JOIN model.resource_model_versions mv ON mv.id = rm.current_version_id WHERE rm.organization_id = $1::uuid AND rm.id = $2::uuid AND rm.status = 'active' AND mv.status = 'published'`, principal.OrganizationID, current.ResourceModelID).Scan(&contentKind, &modelVersionID, &fieldSchema, &formSchema, &listSchema, &policy); err != nil {
-		return MemberAsset{}, fmt.Errorf("load member asset schema: %w", err)
-	}
-	visibility, err = memberAssetVisibility(policy, visibility)
-	if err != nil {
-		return MemberAsset{}, err
-	}
-	if err := resourcemodel.Validate(contentKind, decodeJSONMap(fieldSchema), decodeJSONMap(formSchema), decodeJSONMap(listSchema), decodeJSONMap(policy)); err != nil {
-		return MemberAsset{}, err
-	}
-	if err := validateContent(title, markdown, &fields); err != nil {
-		return MemberAsset{}, err
-	}
-	if err := validateFields(fieldSchema, fields); err != nil {
-		return MemberAsset{}, err
-	}
-	checksum := hashRequest("member.asset.content", struct {
-		Title    *string
-		Markdown *string
-		Fields   map[string]any
-		Tags     []string
-		Source   map[string]any
-	}{title, markdown, fields, tags, source})
-	requestHash := hashRequest("member.asset.update", struct {
-		AssetID         string
-		ExpectedVersion string
-		Input           MemberAssetPatch
-	}{assetID, expectedVersionID, input})
-	tx, err := s.Store.Pool.Begin(ctx)
-	if err != nil {
-		return MemberAsset{}, fmt.Errorf("begin member asset update: %w", err)
-	}
-	defer tx.Rollback(ctx)
-	if err := validateAssetReferences(ctx, tx, principal, current.WorkspaceID, fieldSchema, fields); err != nil {
-		return MemberAsset{}, err
-	}
-	if body, replay, err := reserveMemberIdempotency(ctx, tx, principal, "member.asset.update", idempotencyKey, requestHash); err != nil {
-		return MemberAsset{}, err
-	} else if replay {
-		var item MemberAsset
-		if err := json.Unmarshal(body, &item); err != nil {
-			return MemberAsset{}, fmt.Errorf("decode idempotent member asset update response: %w", err)
-		}
-		return item, nil
-	}
-	var versionNo int
-	if err := tx.QueryRow(ctx, `SELECT version_no FROM asset.asset_versions WHERE id = $1::uuid AND asset_id = $2::uuid FOR UPDATE`, expectedVersionID, assetID).Scan(&versionNo); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return MemberAsset{}, ErrConflict
-		}
-		return MemberAsset{}, fmt.Errorf("lock member asset version: %w", err)
-	}
-	var versionID string
-	if err := tx.QueryRow(ctx, `INSERT INTO asset.asset_versions (organization_id, workspace_id, asset_id, resource_model_id, resource_model_version_id, version_no, workflow_status, quality, title, markdown, fields, tags, source, parent_version_id, content_checksum, created_by) VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6, 'draft', 'raw', $7, $8, $9::jsonb, $10::jsonb, $11::jsonb, $12::uuid, $13, $14::uuid) RETURNING id::text`, principal.OrganizationID, current.WorkspaceID, assetID, current.ResourceModelID, modelVersionID, versionNo+1, title, markdown, mustJSON(fields), mustJSON(tags), mustJSON(source), expectedVersionID, checksum, principal.UserID).Scan(&versionID); err != nil {
-		return MemberAsset{}, fmt.Errorf("create member asset revision: %w", err)
-	}
-	if _, err := tx.Exec(ctx, `UPDATE asset.assets SET current_working_version_id = $2::uuid, visibility = $3, updated_at = now() WHERE id = $1::uuid`, assetID, versionID, visibility); err != nil {
-		return MemberAsset{}, fmt.Errorf("set member asset revision: %w", err)
-	}
-	if err := replaceMemberAssetRelationsTx(ctx, tx, principal, current.WorkspaceID, assetID, contentKind, containerIDs, parentAssetID); err != nil {
-		return MemberAsset{}, err
-	}
-	if err := retrieval.EnqueueProjectionTx(ctx, tx, s.Events, principal.OrganizationID, versionID, retrieval.ProjectionRebuild); err != nil {
-		return MemberAsset{}, fmt.Errorf("enqueue updated member asset projection: %w", err)
-	}
-	if _, err := tx.Exec(ctx, `UPDATE asset.asset_reviews SET status = 'superseded', reviewed_at = now() WHERE asset_version_id = $1::uuid AND status = 'pending'`, expectedVersionID); err != nil {
-		return MemberAsset{}, fmt.Errorf("supersede member asset review: %w", err)
-	}
-	if _, err := tx.Exec(ctx, `INSERT INTO audit.audit_log (organization_id, actor_user_id, initiator_user_id, action, resource_type, resource_id, result, metadata) VALUES ($1::uuid, $2::uuid, $2::uuid, 'asset.update', 'asset', $3::uuid, 'allowed', jsonb_build_object('workspace_id', $4::text, 'principal_type', 'member'))`, principal.OrganizationID, principal.UserID, assetID, current.WorkspaceID); err != nil {
-		return MemberAsset{}, fmt.Errorf("record member asset update audit: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return MemberAsset{}, fmt.Errorf("commit member asset update: %w", err)
-	}
-	result, err := s.Get(ctx, principal, assetID)
-	if err != nil {
-		return MemberAsset{}, err
-	}
-	if err := saveMemberIdempotency(ctx, s.Store, principal, "member.asset.update", idempotencyKey, result, httpOK); err != nil {
-		return MemberAsset{}, err
-	}
-	return result, nil
-}
-
-func (s MemberService) SubmitReview(ctx context.Context, principal auth.Principal, assetID, versionID, idempotencyKey string, comment string) (ReviewSubmission, error) {
-	if !validID(assetID) || !validID(versionID) || !validIdempotencyKey(idempotencyKey) {
-		return ReviewSubmission{}, ErrInvalidInput
-	}
-	current, err := s.Get(ctx, principal, assetID)
-	if err != nil {
-		return ReviewSubmission{}, err
-	}
-	if current.CurrentWorkingVersionID != versionID {
-		return ReviewSubmission{}, ErrConflict
-	}
-	if _, err := s.require(ctx, principal, current.WorkspaceID, current.ResourceModelID, "asset.write"); err != nil {
-		return ReviewSubmission{}, err
-	}
-	tx, err := s.Store.Pool.Begin(ctx)
-	if err != nil {
-		return ReviewSubmission{}, fmt.Errorf("begin review submission: %w", err)
-	}
-	defer tx.Rollback(ctx)
-	var reviewID string
-	err = tx.QueryRow(ctx, `INSERT INTO asset.asset_reviews (organization_id, workspace_id, asset_id, asset_version_id, status, submitted_by, comment) VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, 'pending', $5::uuid, $6) RETURNING id::text`, principal.OrganizationID, current.WorkspaceID, assetID, versionID, principal.UserID, strings.TrimSpace(comment)).Scan(&reviewID)
-	if err != nil {
-		if strings.Contains(strings.ToLower(err.Error()), "duplicate") {
-			return ReviewSubmission{}, ErrConflict
-		}
-		return ReviewSubmission{}, fmt.Errorf("create asset review: %w", err)
-	}
-	if _, err := tx.Exec(ctx, `UPDATE asset.asset_versions SET review_status = 'pending' WHERE id = $1::uuid`, versionID); err != nil {
-		return ReviewSubmission{}, fmt.Errorf("mark asset review pending: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return ReviewSubmission{}, fmt.Errorf("commit review submission: %w", err)
-	}
-	return ReviewSubmission{ReviewID: reviewID, AssetID: assetID, AssetVersionID: versionID, Status: "pending"}, nil
-}
-
-func (s MemberService) Archive(ctx context.Context, principal auth.Principal, assetID, idempotencyKey string) (MemberAsset, error) {
-	if !validID(assetID) || !validIdempotencyKey(idempotencyKey) {
-		return MemberAsset{}, ErrInvalidInput
-	}
-	current, err := s.Get(ctx, principal, assetID)
-	if err != nil {
-		return MemberAsset{}, err
-	}
-	if _, err := s.require(ctx, principal, current.WorkspaceID, current.ResourceModelID, "asset.archive"); err != nil {
-		return MemberAsset{}, err
-	}
-	tx, err := s.Store.Pool.Begin(ctx)
-	if err != nil {
-		return MemberAsset{}, fmt.Errorf("begin member asset archive: %w", err)
-	}
-	defer tx.Rollback(ctx)
-	var previousPublishedID *string
-	if err := tx.QueryRow(ctx, `SELECT current_published_version_id::text FROM asset.assets WHERE organization_id = $1::uuid AND id = $2::uuid FOR UPDATE`, principal.OrganizationID, assetID).Scan(&previousPublishedID); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return MemberAsset{}, ErrNotFound
-		}
-		return MemberAsset{}, fmt.Errorf("lock member asset for archive: %w", err)
-	}
-	if _, err := tx.Exec(ctx, `UPDATE asset.assets SET publication_status = 'archived', current_published_version_id = NULL, updated_at = now() WHERE organization_id = $1::uuid AND id = $2::uuid`, principal.OrganizationID, assetID); err != nil {
-		return MemberAsset{}, fmt.Errorf("archive member asset: %w", err)
-	}
-	if previousPublishedID != nil {
-		if err := retrieval.EnqueueProjectionTx(ctx, tx, s.Events, principal.OrganizationID, *previousPublishedID, retrieval.ProjectionDelete); err != nil {
-			return MemberAsset{}, fmt.Errorf("enqueue archived member asset projection deletion: %w", err)
-		}
-	}
-	if _, err := tx.Exec(ctx, `INSERT INTO audit.audit_log (organization_id, actor_user_id, initiator_user_id, action, resource_type, resource_id, result, metadata) VALUES ($1::uuid, $2::uuid, $2::uuid, 'asset.archive', 'asset', $3::uuid, 'allowed', jsonb_build_object('workspace_id', $4::text, 'principal_type', 'member'))`, principal.OrganizationID, principal.UserID, assetID, current.WorkspaceID); err != nil {
-		return MemberAsset{}, fmt.Errorf("record member asset archive audit: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return MemberAsset{}, fmt.Errorf("commit member asset archive: %w", err)
-	}
-	return s.Get(ctx, principal, assetID)
-}
-
-func (s MemberService) Publish(ctx context.Context, principal auth.Principal, assetID, versionID, idempotencyKey string) (MemberAsset, error) {
-	if !validID(assetID) || !validID(versionID) || !validIdempotencyKey(idempotencyKey) {
-		return MemberAsset{}, ErrInvalidInput
-	}
-	current, err := s.Get(ctx, principal, assetID)
-	if err != nil {
-		return MemberAsset{}, err
-	}
-	if current.CurrentWorkingVersionID != versionID {
-		return MemberAsset{}, ErrConflict
-	}
-	if _, err := s.require(ctx, principal, current.WorkspaceID, current.ResourceModelID, "asset.publish"); err != nil {
-		return MemberAsset{}, err
-	}
-	tx, err := s.Store.Pool.Begin(ctx)
-	if err != nil {
-		return MemberAsset{}, fmt.Errorf("begin member asset publish: %w", err)
-	}
-	defer tx.Rollback(ctx)
-	var hasUnsafeAttachments bool
-	if err := tx.QueryRow(ctx, `
-		WITH RECURSIVE version_lineage(id) AS (
-			SELECT $2::uuid
-			UNION ALL
-			SELECT av.parent_version_id
-			FROM asset.asset_versions av
-			JOIN version_lineage child ON av.id = child.id
-			WHERE av.parent_version_id IS NOT NULL
-		)
-		SELECT EXISTS (
-			SELECT 1
-			FROM asset.attachments at
-			WHERE at.organization_id = $1::uuid
-			  AND at.deleted_at IS NULL
-			  AND at.scan_status <> 'clean'
-			  AND (
-				at.asset_version_id IN (SELECT id FROM version_lineage)
-				OR EXISTS (
-					SELECT 1 FROM asset.attachment_links al
-					WHERE al.attachment_id = at.id
-					  AND al.asset_version_id IN (SELECT id FROM version_lineage)
-				)
-			  )
-		)
-	`, principal.OrganizationID, versionID).Scan(&hasUnsafeAttachments); err != nil {
-		return MemberAsset{}, fmt.Errorf("check member attachment scan status: %w", err)
-	}
-	if hasUnsafeAttachments {
-		return MemberAsset{}, fmt.Errorf("%w: all attachments must be clean before publish", ErrConflict)
-	}
-	previousPublishedID := current.CurrentPublishedVersionID
-	if _, err := tx.Exec(ctx, `UPDATE asset.assets SET current_published_version_id = $2::uuid, publication_status = 'published', updated_at = now() WHERE organization_id = $1::uuid AND id = $3::uuid`, principal.OrganizationID, versionID, assetID); err != nil {
-		return MemberAsset{}, fmt.Errorf("publish member asset: %w", err)
-	}
-	if _, err := tx.Exec(ctx, `UPDATE asset.asset_versions SET quality = 'human_confirmed' WHERE id = $1::uuid`, versionID); err != nil {
-		return MemberAsset{}, fmt.Errorf("mark member asset quality: %w", err)
-	}
-	// Publishing finalizes the version's workflow lifecycle so downstream
-	// prepare/automation pipelines stop treating it as a draft candidate.
-	if _, err := tx.Exec(ctx, `UPDATE asset.asset_versions SET workflow_status = 'published' WHERE id = $1::uuid AND workflow_status <> 'published'`, versionID); err != nil {
-		return MemberAsset{}, fmt.Errorf("mark member asset workflow status: %w", err)
-	}
-	if previousPublishedID != nil && *previousPublishedID != versionID {
-		if err := retrieval.EnqueueProjectionTx(ctx, tx, s.Events, principal.OrganizationID, *previousPublishedID, retrieval.ProjectionDelete); err != nil {
-			return MemberAsset{}, fmt.Errorf("enqueue previous member asset projection deletion: %w", err)
-		}
-	}
-	if err := retrieval.EnqueueProjectionTx(ctx, tx, s.Events, principal.OrganizationID, versionID, retrieval.ProjectionRebuild); err != nil {
-		return MemberAsset{}, fmt.Errorf("enqueue published member asset projection: %w", err)
-	}
-	if _, err := tx.Exec(ctx, `INSERT INTO audit.audit_log (organization_id, actor_user_id, initiator_user_id, action, resource_type, resource_id, result, metadata) VALUES ($1::uuid, $2::uuid, $2::uuid, 'asset.publish', 'asset', $3::uuid, 'allowed', jsonb_build_object('workspace_id', $4::text, 'principal_type', 'member', 'review_required', false))`, principal.OrganizationID, principal.UserID, assetID, current.WorkspaceID); err != nil {
-		return MemberAsset{}, fmt.Errorf("record member asset publish audit: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return MemberAsset{}, fmt.Errorf("commit member asset publish: %w", err)
-	}
-	return s.Get(ctx, principal, assetID)
-}
-
-func scanMemberAsset(row interface{ Scan(...any) error }) (MemberAsset, error) {
-	var item MemberAsset
-	var fields, tags, source, containerIDs []byte
-	err := row.Scan(&item.ID, &item.WorkspaceID, &item.ResourceModelID, &item.ContentKind, &item.ResourceModelVersionID, &item.Title, &item.Summary, &item.Markdown, &fields, &tags, &source, &item.Visibility, &item.PublicationStatus, &item.ReviewStatus, &item.Quality, &item.CurrentWorkingVersionID, &item.CurrentPublishedVersionID, &item.CreatedBy.ID, &item.CreatedBy.DisplayName, &item.UpdatedAt, &containerIDs, &item.ParentAssetID, &item.sortValue)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return MemberAsset{}, ErrNotFound
-		}
-		return MemberAsset{}, fmt.Errorf("scan member asset: %w", err)
-	}
-	item.Fields = decodeJSONMap(fields)
-	item.Source = decodeJSONMap(source)
-	item.Tags = decodeStringSlice(tags)
-	item.ContainerIDs = decodeStringSlice(containerIDs)
-	item.ETag = item.CurrentWorkingVersionID
+	item.ContainerIDs = containerIDs
+	item.ParentAssetID = parentID
 	return item, nil
 }
 
-func decodeJSONMap(raw []byte) map[string]any {
-	result := map[string]any{}
-	if len(raw) > 0 {
-		_ = json.Unmarshal(raw, &result)
+func loadMemberAssetRelations(ctx context.Context, db *store.Store, organizationID, assetID string) ([]string, *string, error) {
+	containerIDs := []string{}
+	rows, err := db.Pool.Query(ctx, `
+		SELECT container_id::text FROM content.container_assets
+		WHERE organization_id = $1::uuid AND asset_id = $2::uuid
+		ORDER BY container_id
+	`, organizationID, assetID)
+	if err != nil {
+		return nil, nil, err
 	}
-	return result
-}
-func decodeStringSlice(raw []byte) []string {
-	result := []string{}
-	if len(raw) > 0 {
-		_ = json.Unmarshal(raw, &result)
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, nil, err
+		}
+		containerIDs = append(containerIDs, id)
 	}
-	return result
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+	var parent *string
+	err = db.Pool.QueryRow(ctx, `
+		SELECT parent_asset_id::text FROM content.document_parents
+		WHERE organization_id = $1::uuid AND child_asset_id = $2::uuid
+	`, organizationID, assetID).Scan(&parent)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil, err
+	}
+	return containerIDs, parent, nil
 }
 
-func normalizeMemberFilters(filters map[string]any, directTags []string) ([]byte, []byte, error) {
-	for key := range filters {
-		if key != "fields" && key != "tags" {
-			return nil, nil, ErrInvalidInput
-		}
+// Create inserts the asset, its first sealed version and the shared draft in
+// one transaction. The draft starts clean at revision 1.
+func (s MemberService) Create(ctx context.Context, principal auth.Principal, workspaceID, idempotencyKey string, input MemberAssetInput) (MemberAsset, error) {
+	if !validID(workspaceID) || !validID(input.ResourceModelID) {
+		return MemberAsset{}, ErrInvalidInput
 	}
-	fieldPredicates := make([]map[string]any, 0)
-	if rawFields, ok := filters["fields"]; ok {
-		fields, ok := rawFields.(map[string]any)
-		if !ok || len(fields) > 20 {
-			return nil, nil, ErrInvalidInput
+	scope, err := s.require(ctx, principal, workspaceID, input.ResourceModelID, authz.ActionAssetWrite)
+	if err != nil {
+		return MemberAsset{}, err
+	}
+	visibility := input.Visibility
+	if visibility == "" {
+		visibility = memberScopeVisibility(scope)
+	}
+	if !access.Valid(visibility) {
+		return MemberAsset{}, ErrInvalidVisibility
+	}
+	var title string
+	if input.Title != nil {
+		title = strings.TrimSpace(*input.Title)
+	}
+	var summary string
+	if input.Summary != nil {
+		summary = strings.TrimSpace(*input.Summary)
+	}
+	var markdown string
+	if input.Markdown != nil {
+		markdown = *input.Markdown
+	}
+	fields := input.Fields
+	if fields == nil {
+		fields = map[string]any{}
+	}
+	if err := ValidateContent(&title, &markdown, &fields); err != nil {
+		return MemberAsset{}, ErrInvalidInput
+	}
+	var resourceModelVersionID string
+	if err := s.Store.Pool.QueryRow(ctx, `
+		SELECT COALESCE(current_version_id::text, '') FROM model.resource_models
+		WHERE organization_id = $1::uuid AND id = $2::uuid AND status = 'active'
+	`, principal.OrganizationID, input.ResourceModelID).Scan(&resourceModelVersionID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return MemberAsset{}, ErrInvalidInput
 		}
-		for field, rawOperations := range fields {
-			predicates, err := normalizeAssetPredicate(field, rawOperations, false)
-			if err != nil {
-				return nil, nil, err
+		return MemberAsset{}, err
+	}
+	if resourceModelVersionID == "" {
+		return MemberAsset{}, ErrInvalidInput
+	}
+	var schemaBytes []byte
+	if err := s.Store.Pool.QueryRow(ctx, `
+		SELECT field_schema FROM model.resource_model_versions WHERE id = $1::uuid
+	`, resourceModelVersionID).Scan(&schemaBytes); err != nil {
+		return MemberAsset{}, err
+	}
+	if err := ValidateFields(schemaBytes, fields); err != nil {
+		return MemberAsset{}, ErrInvalidInput
+	}
+
+	tx, err := s.Store.Pool.Begin(ctx)
+	if err != nil {
+		return MemberAsset{}, err
+	}
+	defer tx.Rollback(ctx)
+	// Working pointer and draft are set after version 1 exists; deferred
+	// constraint triggers refuse to commit an asset without them.
+	var assetID string
+	if err := tx.QueryRow(ctx, `
+		INSERT INTO asset.assets (organization_id, workspace_id, resource_model_id, visibility, created_by)
+		VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5::uuid)
+		RETURNING id::text
+	`, principal.OrganizationID, workspaceID, input.ResourceModelID, visibility, principal.UserID).Scan(&assetID); err != nil {
+		return MemberAsset{}, fmt.Errorf("insert asset: %w", err)
+	}
+	material := VersionMaterial{
+		OrganizationID:         principal.OrganizationID,
+		WorkspaceID:            workspaceID,
+		AssetID:                assetID,
+		ResourceModelID:        input.ResourceModelID,
+		ResourceModelVersionID: resourceModelVersionID,
+		Origin:                 OriginHuman,
+		ConfirmationStatus:     ConfirmationUnconfirmed,
+		Title:                  title,
+		Summary:                summary,
+		Markdown:               markdown,
+		Fields:                 fields,
+		CreatedBy:              principal.UserID,
+	}
+	versionID, _, err := CreateVersionTx(ctx, tx, material)
+	if err != nil {
+		return MemberAsset{}, err
+	}
+	if err := attachRelationsTx(ctx, tx, principal, workspaceID, assetID, input.ContainerIDs, input.ParentAssetID); err != nil {
+		return MemberAsset{}, err
+	}
+	var draftID string
+	if err := tx.QueryRow(ctx, `
+		INSERT INTO asset.asset_drafts
+			(organization_id, workspace_id, asset_id, base_version_id, revision, committed_revision,
+			 title, summary, markdown, fields, origin, updated_by)
+		VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, 1, 1, $5, $6, $7, $8::jsonb, $9, $10::uuid)
+		RETURNING id::text
+	`, principal.OrganizationID, workspaceID, assetID, versionID, title, summary, markdown, string(mustJSON(fields)), OriginHuman, principal.UserID).Scan(&draftID); err != nil {
+		return MemberAsset{}, fmt.Errorf("insert draft: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE asset.assets
+		SET current_working_version_id = $3::uuid, draft_id = $4::uuid
+		WHERE organization_id = $1::uuid AND id = $2::uuid
+	`, principal.OrganizationID, assetID, versionID, draftID); err != nil {
+		return MemberAsset{}, fmt.Errorf("link asset pointers: %w", err)
+	}
+	row, err := LoadLifecycleTx(ctx, tx, principal.OrganizationID, assetID)
+	if err != nil {
+		return MemberAsset{}, err
+	}
+	if err := AppendAssetEventTx(ctx, tx, s.Events, row, principal, eventing.EventAssetVersionCreated, eventing.PayloadVersionV1, eventing.AssetVersionCreatedPayload{
+		AssetID:     assetID,
+		VersionID:   versionID,
+		VersionNo:   1,
+		WorkspaceID: workspaceID,
+	}); err != nil {
+		return MemberAsset{}, err
+	}
+	RecordAssetAuditTx(ctx, tx, principal.OrganizationID, workspaceID, principal, "asset.create", assetID, map[string]any{
+		"workspace_id": workspaceID,
+		"version_id":   versionID,
+	})
+	if err := tx.Commit(ctx); err != nil {
+		return MemberAsset{}, err
+	}
+	return s.Get(ctx, principal, assetID)
+}
+
+// Update autosaves the shared draft; versions are only created by commit
+// paths. expectedVersionID carries the If-Match draft revision from handler
+// middleware.
+func (s MemberService) Update(ctx context.Context, principal auth.Principal, assetID, expectedRevision, idempotencyKey string, input MemberAssetPatch) (MemberAsset, error) {
+	if !validID(assetID) {
+		return MemberAsset{}, ErrInvalidInput
+	}
+	patch := DraftPatch{Title: input.Title, Summary: input.Summary, Markdown: input.Markdown, Fields: input.Fields, Visibility: input.Visibility}
+	if _, err := s.AutosaveDraft(ctx, principal, assetID, expectedRevision, patch); err != nil {
+		return MemberAsset{}, err
+	}
+	if input.ContainerIDs != nil || input.ParentAssetID.Set {
+		var workspaceID, modelID string
+		err := s.Store.Pool.QueryRow(ctx, `
+			SELECT workspace_id::text, resource_model_id::text FROM asset.assets
+			WHERE organization_id = $1::uuid AND id = $2::uuid
+		`, principal.OrganizationID, assetID).Scan(&workspaceID, &modelID)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return MemberAsset{}, ErrNotFound
 			}
-			fieldPredicates = append(fieldPredicates, predicates...)
+			return MemberAsset{}, err
+		}
+		if _, err := s.require(ctx, principal, workspaceID, modelID, authz.ActionAssetWrite); err != nil {
+			return MemberAsset{}, err
+		}
+		tx, err := s.Store.Pool.Begin(ctx)
+		if err != nil {
+			return MemberAsset{}, err
+		}
+		defer tx.Rollback(ctx)
+		if err := attachRelationsTx(ctx, tx, principal, workspaceID, assetID, derefStringSlice(input.ContainerIDs), optionalValue(input.ParentAssetID)); err != nil {
+			return MemberAsset{}, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return MemberAsset{}, err
 		}
 	}
-	tagPredicates := make([]map[string]any, 0)
-	if rawTags, ok := filters["tags"]; ok {
-		predicates, err := normalizeAssetPredicate("tags", rawTags, true)
+	return s.Get(ctx, principal, assetID)
+}
+
+func derefStringSlice(value *[]string) []string {
+	if value == nil {
+		return nil
+	}
+	return *value
+}
+
+func optionalValue(value OptionalString) *string {
+	if !value.Set {
+		return nil
+	}
+	return value.Value
+}
+
+// publishPolicy is the publishing block of the bound model version policy.
+type publishPolicy struct {
+	Mode                     string
+	RequiredFields           []string
+	RequireCleanAttachments  bool
+	RequireHumanConfirmation bool
+}
+
+func loadPublishPolicyTx(ctx context.Context, tx pgx.Tx, organizationID, modelID string) (publishPolicy, error) {
+	var raw []byte
+	err := tx.QueryRow(ctx, `
+		SELECT COALESCE(v.policy, '{}'::jsonb)
+		FROM model.resource_models m
+		JOIN model.resource_model_versions v ON v.organization_id = m.organization_id AND v.id = m.current_version_id
+		WHERE m.organization_id = $1::uuid AND m.id = $2::uuid
+	`, organizationID, modelID).Scan(&raw)
+	if err != nil {
+		return publishPolicy{}, fmt.Errorf("load publishing policy: %w", err)
+	}
+	var document struct {
+		Publishing struct {
+			Mode                     string   `json:"mode"`
+			RequiredFields           []string `json:"required_fields"`
+			RequireCleanAttachments  bool     `json:"require_clean_attachments"`
+			RequireHumanConfirmation bool     `json:"require_human_confirmation"`
+		} `json:"publishing"`
+	}
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &document); err != nil {
+			return publishPolicy{}, fmt.Errorf("decode publishing policy: %w", err)
+		}
+	}
+	policy := publishPolicy{
+		Mode:                     document.Publishing.Mode,
+		RequiredFields:           document.Publishing.RequiredFields,
+		RequireCleanAttachments:  document.Publishing.RequireCleanAttachments,
+		RequireHumanConfirmation: document.Publishing.RequireHumanConfirmation,
+	}
+	if policy.Mode == "" {
+		policy.Mode = PublishingModeDirect
+	}
+	return policy, nil
+}
+
+// Publish executes a direct-policy publish: commit the dirty draft, then
+// switch the published pointer. Approval-policy assets return a conflict and
+// must go through a PublicationRequest.
+func (s MemberService) Publish(ctx context.Context, principal auth.Principal, workspaceID, assetID, expectedDraftRevision, idempotencyKey string) (MemberAsset, error) {
+	if !validID(assetID) {
+		return MemberAsset{}, ErrInvalidInput
+	}
+	var modelID string
+	if err := s.Store.Pool.QueryRow(ctx, `
+		SELECT resource_model_id::text FROM asset.assets
+		WHERE organization_id = $1::uuid AND id = $2::uuid AND deleted_at IS NULL
+	`, principal.OrganizationID, assetID).Scan(&modelID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return MemberAsset{}, ErrNotFound
+		}
+		return MemberAsset{}, err
+	}
+	if _, err := s.require(ctx, principal, workspaceID, modelID, authz.ActionAssetPublish); err != nil {
+		return MemberAsset{}, err
+	}
+	tx, err := s.Store.Pool.Begin(ctx)
+	if err != nil {
+		return MemberAsset{}, err
+	}
+	defer tx.Rollback(ctx)
+	row, err := LoadLifecycleTx(ctx, tx, principal.OrganizationID, assetID)
+	if err != nil {
+		return MemberAsset{}, err
+	}
+	if row.PublicationStatus == PublicationArchived {
+		return MemberAsset{}, ErrAssetArchived
+	}
+	policy, err := loadPublishPolicyTx(ctx, tx, row.OrganizationID, row.ResourceModelID)
+	if err != nil {
+		return MemberAsset{}, err
+	}
+	if policy.Mode != PublishingModeDirect {
+		return MemberAsset{}, ErrApprovalRequired
+	}
+	draft, err := LoadDraftTx(ctx, tx, row.OrganizationID, assetID, expectedDraftRevision)
+	if err != nil {
+		return MemberAsset{}, err
+	}
+	commit, err := commitDraftTx(ctx, tx, s.Events, principal, row, draft)
+	if err != nil {
+		return MemberAsset{}, err
+	}
+	row = commit.Asset
+	if policy.RequireHumanConfirmation {
+		var confirmed bool
+		if err := tx.QueryRow(ctx, `
+			SELECT confirmation_status = 'human_confirmed' FROM asset.asset_versions WHERE id = $1::uuid
+		`, row.CurrentWorkingVersionID).Scan(&confirmed); err != nil {
+			return MemberAsset{}, err
+		}
+		if !confirmed {
+			return MemberAsset{}, ErrConfirmationRequired
+		}
+	}
+	previous := row.CurrentPublishedVersionID
+	row, err = SetPublishedPointerTx(ctx, tx, row, row.CurrentWorkingVersionID)
+	if err != nil {
+		return MemberAsset{}, err
+	}
+	if err := AppendAssetEventTx(ctx, tx, s.Events, row, principal, eventing.EventAssetPublished, eventing.PayloadVersionV1, eventing.AssetPublishedPayload{
+		AssetID:           row.ID,
+		VersionID:         row.CurrentWorkingVersionID,
+		PreviousVersionID: derefOrEmpty(previous),
+		WorkspaceID:       row.WorkspaceID,
+	}); err != nil {
+		return MemberAsset{}, err
+	}
+	RecordAssetAuditTx(ctx, tx, row.OrganizationID, row.WorkspaceID, principal, "asset.publish", row.ID, map[string]any{
+		"workspace_id": row.WorkspaceID,
+		"version_id":   row.CurrentWorkingVersionID,
+	})
+	if err := tx.Commit(ctx); err != nil {
+		return MemberAsset{}, err
+	}
+	return s.Get(ctx, principal, assetID)
+}
+
+func derefOrEmpty(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
+}
+
+// Archive clears the published pointer, cancels pending publication requests
+// and keeps the draft frozen but intact.
+func (s MemberService) Archive(ctx context.Context, principal auth.Principal, assetID, idempotencyKey string) (MemberAsset, error) {
+	if !validID(assetID) {
+		return MemberAsset{}, ErrInvalidInput
+	}
+	var workspaceID, modelID string
+	if err := s.Store.Pool.QueryRow(ctx, `
+		SELECT workspace_id::text, resource_model_id::text FROM asset.assets
+		WHERE organization_id = $1::uuid AND id = $2::uuid AND deleted_at IS NULL
+	`, principal.OrganizationID, assetID).Scan(&workspaceID, &modelID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return MemberAsset{}, ErrNotFound
+		}
+		return MemberAsset{}, err
+	}
+	if _, err := s.require(ctx, principal, workspaceID, modelID, authz.ActionAssetArchive); err != nil {
+		return MemberAsset{}, err
+	}
+	tx, err := s.Store.Pool.Begin(ctx)
+	if err != nil {
+		return MemberAsset{}, err
+	}
+	defer tx.Rollback(ctx)
+	row, err := LoadLifecycleTx(ctx, tx, principal.OrganizationID, assetID)
+	if err != nil {
+		return MemberAsset{}, err
+	}
+	if row.PublicationStatus == PublicationArchived {
+		return MemberAsset{}, ErrConflict
+	}
+	previous := row.CurrentPublishedVersionID
+	if _, err := CancelPendingRequestsTx(ctx, tx, row.OrganizationID, row.ID, principal.UserID, "asset_archived"); err != nil {
+		return MemberAsset{}, err
+	}
+	row, err = ClearPublishedPointerTx(ctx, tx, row)
+	if err != nil {
+		return MemberAsset{}, err
+	}
+	if err := AppendAssetEventTx(ctx, tx, s.Events, row, principal, eventing.EventAssetArchived, eventing.PayloadVersionV1, eventing.AssetArchivedPayload{
+		AssetID:           row.ID,
+		PreviousVersionID: derefOrEmpty(previous),
+		WorkspaceID:       row.WorkspaceID,
+	}); err != nil {
+		return MemberAsset{}, err
+	}
+	RecordAssetAuditTx(ctx, tx, row.OrganizationID, row.WorkspaceID, principal, "asset.archive", row.ID, map[string]any{
+		"workspace_id": row.WorkspaceID,
+	})
+	if err := tx.Commit(ctx); err != nil {
+		return MemberAsset{}, err
+	}
+	return s.Get(ctx, principal, assetID)
+}
+
+// Restore returns an archived asset to draft; it never republishes.
+func (s MemberService) Restore(ctx context.Context, principal auth.Principal, assetID, idempotencyKey string) (MemberAsset, error) {
+	if !validID(assetID) {
+		return MemberAsset{}, ErrInvalidInput
+	}
+	var workspaceID, modelID string
+	if err := s.Store.Pool.QueryRow(ctx, `
+		SELECT workspace_id::text, resource_model_id::text FROM asset.assets
+		WHERE organization_id = $1::uuid AND id = $2::uuid AND deleted_at IS NULL
+	`, principal.OrganizationID, assetID).Scan(&workspaceID, &modelID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return MemberAsset{}, ErrNotFound
+		}
+		return MemberAsset{}, err
+	}
+	if _, err := s.require(ctx, principal, workspaceID, modelID, authz.ActionAssetArchive); err != nil {
+		return MemberAsset{}, err
+	}
+	tx, err := s.Store.Pool.Begin(ctx)
+	if err != nil {
+		return MemberAsset{}, err
+	}
+	defer tx.Rollback(ctx)
+	row, err := LoadLifecycleTx(ctx, tx, principal.OrganizationID, assetID)
+	if err != nil {
+		return MemberAsset{}, err
+	}
+	row, err = RestoreToDraftTx(ctx, tx, row)
+	if err != nil {
+		return MemberAsset{}, err
+	}
+	if err := AppendAssetEventTx(ctx, tx, s.Events, row, principal, eventing.EventAssetRestored, eventing.PayloadVersionV1, eventing.AssetRestoredPayload{
+		AssetID:     row.ID,
+		WorkspaceID: row.WorkspaceID,
+	}); err != nil {
+		return MemberAsset{}, err
+	}
+	RecordAssetAuditTx(ctx, tx, row.OrganizationID, row.WorkspaceID, principal, "asset.restore", row.ID, map[string]any{
+		"workspace_id": row.WorkspaceID,
+	})
+	if err := tx.Commit(ctx); err != nil {
+		return MemberAsset{}, err
+	}
+	return s.Get(ctx, principal, assetID)
+}
+
+// ConfirmVersion creates a derived version of an unconfirmed snapshot and
+// records the human confirmation on the new snapshot only.
+func (s MemberService) ConfirmVersion(ctx context.Context, principal auth.Principal, versionID, idempotencyKey string) (MemberAssetVersion, error) {
+	if !validID(versionID) {
+		return MemberAssetVersion{}, ErrInvalidInput
+	}
+	var organizationID, workspaceID, assetID, modelID string
+	var origin, title, summary, markdown string
+	var fields []byte
+	var confirmed bool
+	err := s.Store.Pool.QueryRow(ctx, `
+		SELECT v.organization_id::text, v.workspace_id::text, v.asset_id::text, v.resource_model_id::text,
+		       v.origin, v.title, v.summary, v.markdown, v.fields,
+		       (v.confirmation_status = 'human_confirmed')
+		FROM asset.asset_versions v
+		WHERE v.id = $1::uuid
+	`, versionID).Scan(&organizationID, &workspaceID, &assetID, &modelID,
+		&origin, &title, &summary, &markdown, &fields, &confirmed)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return MemberAssetVersion{}, ErrNotFound
+	}
+	if err != nil {
+		return MemberAssetVersion{}, err
+	}
+	if confirmed {
+		return MemberAssetVersion{}, ErrConflict
+	}
+	if _, err := s.require(ctx, principal, workspaceID, modelID, authz.ActionAssetConfirm); err != nil {
+		return MemberAssetVersion{}, err
+	}
+	tx, err := s.Store.Pool.Begin(ctx)
+	if err != nil {
+		return MemberAssetVersion{}, err
+	}
+	defer tx.Rollback(ctx)
+	row, err := LoadLifecycleTx(ctx, tx, organizationID, assetID)
+	if err != nil {
+		return MemberAssetVersion{}, err
+	}
+	if row.PublicationStatus == PublicationArchived {
+		return MemberAssetVersion{}, ErrAssetArchived
+	}
+	tagIDs, err := loadVersionTagIDs(ctx, tx, versionID)
+	if err != nil {
+		return MemberAssetVersion{}, err
+	}
+	attachmentIDs, err := loadVersionAttachmentIDs(ctx, tx, versionID)
+	if err != nil {
+		return MemberAssetVersion{}, err
+	}
+	var modelVersionID string
+	if err := tx.QueryRow(ctx, `
+		SELECT COALESCE(m.current_version_id::text, '') FROM model.resource_models m
+		WHERE m.organization_id = $1::uuid AND m.id = $2::uuid
+	`, organizationID, modelID).Scan(&modelVersionID); err != nil {
+		return MemberAssetVersion{}, err
+	}
+	decodedFields := map[string]any{}
+	_ = json.Unmarshal(fields, &decodedFields)
+	newVersionID, _, err := CreateVersionTx(ctx, tx, VersionMaterial{
+		OrganizationID:         organizationID,
+		WorkspaceID:            workspaceID,
+		AssetID:                assetID,
+		ResourceModelID:        modelID,
+		ResourceModelVersionID: modelVersionID,
+		ParentVersionID:        versionID,
+		Origin:                 origin,
+		ConfirmationStatus:     ConfirmationHumanConfirmed,
+		Title:                  title,
+		Summary:                summary,
+		Markdown:               markdown,
+		Fields:                 decodedFields,
+		TagIDs:                 tagIDs,
+		AttachmentIDs:          attachmentIDs,
+		CreatedBy:              principal.UserID,
+	})
+	if err != nil {
+		return MemberAssetVersion{}, err
+	}
+	// The confirmed snapshot becomes the working copy and the draft rebases;
+	// pending requests must be re-submitted against the new version.
+	if _, err := CancelPendingRequestsTx(ctx, tx, organizationID, assetID, principal.UserID, reviewCancelReasonNewVersion); err != nil {
+		return MemberAssetVersion{}, err
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE asset.asset_drafts
+		SET base_version_id = $3::uuid, revision = revision + 1, committed_revision = revision,
+		    updated_by = $4::uuid, updated_at = now()
+		WHERE organization_id = $1::uuid AND asset_id = $2::uuid
+	`, organizationID, assetID, newVersionID, principal.UserID); err != nil {
+		return MemberAssetVersion{}, fmt.Errorf("rebase draft after confirm: %w", err)
+	}
+	RecordAssetAuditTx(ctx, tx, organizationID, workspaceID, principal, "asset.version.confirmed", assetID, map[string]any{
+		"workspace_id":      workspaceID,
+		"source_version_id": versionID,
+		"version_id":        newVersionID,
+	})
+	if err := tx.Commit(ctx); err != nil {
+		return MemberAssetVersion{}, err
+	}
+	return s.GetVersion(ctx, principal, newVersionID)
+}
+
+// memberScopeVisibility derives the asset visibility from the caller's role:
+// only workspace admins may publish to organization or public boundaries.
+func memberScopeVisibility(scope authz.Scope) string {
+	if scope.Role == authz.WorkspaceRoleAdmin {
+		return access.VisibilityWorkspace
+	}
+	return access.VisibilityWorkspace
+}
+
+// normalizeMemberFilters converts the dynamic field-filter input into the
+// predicate array consumed by the fixed SQL function. Tags are no longer a
+// JSON field: relational tag filters arrive with the tag domain.
+func normalizeMemberFilters(filters map[string]any, directTags []string) ([]byte, []byte, error) {
+	_ = directTags
+	if len(filters) == 0 {
+		return nil, nil, nil
+	}
+	fields, _ := filters["fields"].(map[string]any)
+	if len(fields) == 0 {
+		return nil, nil, nil
+	}
+	predicates := make([]map[string]any, 0)
+	for field, rawOperations := range fields {
+		operations, err := normalizeAssetPredicate(field, rawOperations)
 		if err != nil {
 			return nil, nil, err
 		}
-		tagPredicates = append(tagPredicates, predicates...)
+		predicates = append(predicates, operations...)
 	}
-	if len(directTags) > 0 {
-		if len(directTags) > 100 {
-			return nil, nil, ErrInvalidInput
-		}
-		values := make([]string, 0, len(directTags))
-		for _, raw := range directTags {
-			value := strings.TrimSpace(raw)
-			if value == "" || len([]rune(value)) > 100 {
-				return nil, nil, ErrInvalidInput
-			}
-			values = append(values, value)
-		}
-		tagPredicates = append(tagPredicates, map[string]any{"field": "tags", "operator": "contains_any", "value": values})
+	if len(predicates) == 0 {
+		return nil, nil, nil
 	}
-	if len(fieldPredicates) > 40 || len(tagPredicates) > 8 {
-		return nil, nil, ErrInvalidInput
-	}
-	return mustJSON(fieldPredicates), mustJSON(tagPredicates), nil
+	raw, err := json.Marshal(predicates)
+	return raw, nil, err
 }
 
-func normalizeAssetPredicate(field string, rawOperations any, tags bool) ([]map[string]any, error) {
-	field = strings.TrimSpace(field)
+func normalizeAssetPredicate(field string, rawOperations any) ([]map[string]any, error) {
 	operations, ok := rawOperations.(map[string]any)
-	if field == "" || len(field) > 100 || !ok || len(operations) == 0 || len(operations) > 8 {
+	if !ok {
 		return nil, ErrInvalidInput
 	}
-	result := make([]map[string]any, 0, len(operations))
-	for operator, value := range operations {
-		if operator != "eq" && operator != "neq" && operator != "in" && operator != "contains" && operator != "contains_any" && operator != "gte" && operator != "lte" && operator != "exists" {
-			return nil, ErrInvalidInput
-		}
-		if tags && operator != "eq" && operator != "neq" && operator != "in" && operator != "contains" && operator != "contains_any" && operator != "exists" {
-			return nil, ErrInvalidInput
-		}
-		if operator == "in" || operator == "contains_any" {
-			if count, ok := filterArrayLength(value); !ok || count < 1 || count > 100 {
-				return nil, ErrInvalidInput
-			}
-		}
-		if (operator == "gte" || operator == "lte") && !assetFilterComparable(value) {
-			return nil, ErrInvalidInput
-		}
-		if operator == "exists" {
-			if _, ok := value.(bool); !ok {
-				return nil, ErrInvalidInput
-			}
-		}
-		if tags && !validTagFilterValue(operator, value) {
-			return nil, ErrInvalidInput
-		}
-		result = append(result, map[string]any{"field": field, "operator": operator, "value": value})
-	}
-	return result, nil
-}
-
-func filterArrayLength(value any) (int, bool) {
-	switch values := value.(type) {
-	case []any:
-		return len(values), true
-	case []string:
-		return len(values), true
-	default:
-		return 0, false
-	}
-}
-
-func assetFilterComparable(value any) bool {
-	if _, ok := value.(string); ok {
-		return true
-	}
-	_, ok := numericValue(value)
-	return ok
-}
-
-func validTagFilterValue(operator string, value any) bool {
-	if operator == "exists" {
-		_, ok := value.(bool)
-		return ok
-	}
-	if operator == "in" || operator == "contains_any" {
-		switch values := value.(type) {
-		case []any:
-			for _, item := range values {
-				if _, ok := item.(string); !ok {
-					return false
-				}
-			}
-			return true
-		case []string:
-			return true
+	predicates := make([]map[string]any, 0, len(operations))
+	for operator, rawValue := range operations {
+		switch operator {
+		case "eq", "neq", "in", "contains", "contains_any", "gte", "lte", "exists":
 		default:
-			return false
+			return nil, ErrInvalidInput
 		}
-	}
-	_, ok := value.(string)
-	return ok
-}
-
-func validMemberAssetListEnums(input MemberAssetListInput) bool {
-	if input.Visibility != "" && input.Visibility != "public" && input.Visibility != "login" && input.Visibility != "private" && input.Visibility != "workspace" && input.Visibility != "internal" {
-		return false
-	}
-	if input.PublicationStatus != "" && input.PublicationStatus != "draft" && input.PublicationStatus != "published" && input.PublicationStatus != "archived" {
-		return false
-	}
-	if input.ReviewStatus != "" && input.ReviewStatus != "none" && input.ReviewStatus != "pending" && input.ReviewStatus != "approved" && input.ReviewStatus != "rejected" && input.ReviewStatus != "superseded" {
-		return false
-	}
-	if input.ContentKind != "" && input.ContentKind != "record" && input.ContentKind != "document" && input.ContentKind != "faq" && input.ContentKind != "note" {
-		return false
-	}
-	return input.CreatedBy == "" || input.CreatedBy == "me" || validID(input.CreatedBy)
-}
-
-func (s MemberService) validateMemberFilterFields(ctx context.Context, organizationID, workspaceID, resourceModelID string, raw []byte) error {
-	var predicates []struct {
-		Field string `json:"field"`
-	}
-	if err := json.Unmarshal(raw, &predicates); err != nil {
-		return ErrInvalidInput
-	}
-	for _, predicate := range predicates {
-		var allowed bool
-		if err := s.Store.Pool.QueryRow(ctx, `
-			SELECT count(*) > 0 AND COALESCE(bool_and(
-				COALESCE(mv.field_schema->'properties', '{}'::jsonb) ? $4
-				OR EXISTS (
-					SELECT 1 FROM jsonb_array_elements(COALESCE(mv.field_schema->'fields', '[]'::jsonb)) field
-					WHERE field->>'key' = $4
-				)
-			), false)
-			FROM model.resource_models rm
-			JOIN model.resource_model_versions mv ON mv.id = rm.current_version_id AND mv.status = 'published'
-			WHERE rm.organization_id = $1::uuid AND rm.workspace_id = $2::uuid AND rm.status = 'active'
-			  AND ($3 = '' OR rm.id = NULLIF($3, '')::uuid)
-		`, organizationID, workspaceID, resourceModelID, predicate.Field).Scan(&allowed); err != nil {
-			return fmt.Errorf("validate member asset filter schema: %w", err)
+		if value, ok := rawValue.([]any); ok {
+			if len(value) == 0 || len(value) > 100 {
+				return nil, ErrInvalidInput
+			}
 		}
-		if !allowed {
-			return ErrInvalidInput
-		}
+		predicates = append(predicates, map[string]any{"field": field, "operator": operator, "value": rawValue})
 	}
-	return nil
+	if len(predicates) == 0 || len(predicates) > 8 {
+		return nil, ErrInvalidInput
+	}
+	return predicates, nil
 }
 
-func reserveMemberIdempotency(ctx context.Context, tx pgx.Tx, principal auth.Principal, operation, key, requestHash string) ([]byte, bool, error) {
-	var id string
-	err := tx.QueryRow(ctx, `
-		INSERT INTO system.idempotency_keys
-			(organization_id, subject_id, operation, idempotency_key, request_hash, expires_at)
-		VALUES ($1::uuid, $2::uuid, $3, $4, $5, now() + interval '24 hours')
-		ON CONFLICT (organization_id, subject_id, operation, idempotency_key) DO NOTHING
-		RETURNING id::text
-	`, principal.OrganizationID, principal.UserID, operation, key, requestHash).Scan(&id)
-	if err == nil {
-		return nil, false, nil
-	}
-	if !errors.Is(err, pgx.ErrNoRows) {
-		return nil, false, fmt.Errorf("reserve member idempotency key: %w", err)
-	}
-	var storedHash string
-	var body []byte
-	if err := tx.QueryRow(ctx, `
-		SELECT request_hash, response_body
-		FROM system.idempotency_keys
-		WHERE organization_id = $1::uuid AND subject_id = $2::uuid
-		  AND operation = $3 AND idempotency_key = $4
-		FOR UPDATE
-	`, principal.OrganizationID, principal.UserID, operation, key).Scan(&storedHash, &body); err != nil {
-		return nil, false, fmt.Errorf("load member idempotency key: %w", err)
-	}
-	if storedHash != requestHash {
-		return nil, false, ErrConflict
-	}
-	if len(body) == 0 {
-		return nil, false, ErrConflict
-	}
-	return body, true, nil
-}
-
-func saveMemberIdempotency(ctx context.Context, db *store.Store, principal auth.Principal, operation, key string, response any, status int) error {
-	body, err := json.Marshal(response)
-	if err != nil {
-		return fmt.Errorf("encode member idempotent response: %w", err)
-	}
-	if _, err := db.Pool.Exec(ctx, `
-		UPDATE system.idempotency_keys
-		SET response_status = $5, response_body = $6::jsonb
-		WHERE organization_id = $1::uuid AND subject_id = $2::uuid
-		  AND operation = $3 AND idempotency_key = $4
-	`, principal.OrganizationID, principal.UserID, operation, key, status, string(body)); err != nil {
-		return fmt.Errorf("save member idempotent response: %w", err)
-	}
-	return nil
-}
+var (
+	ErrApprovalRequired     = errors.New("publication requires approval")
+	ErrConfirmationRequired = errors.New("version requires human confirmation")
+)

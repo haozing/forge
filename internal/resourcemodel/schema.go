@@ -1,6 +1,7 @@
 package resourcemodel
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -19,7 +20,6 @@ var reservedFieldKeys = map[string]struct{}{
 	"id": {}, "title": {}, "markdown": {}, "summary": {}, "tags": {},
 	"source": {}, "attachments": {}, "created_at": {}, "updated_at": {},
 	"created_by": {}, "updated_by": {}, "visibility": {}, "publication_status": {},
-	"review_status": {}, "quality": {},
 }
 
 type ValidationIssue struct {
@@ -41,38 +41,215 @@ func (e *SchemaValidationError) Error() string {
 
 func (e *SchemaValidationError) Unwrap() error { return ErrSchemaInvalid }
 
+// ChannelPolicy is one publication channel on the policy JSON. ContentScope is
+// only meaningful for the agent/open_api channels and must be published or all.
+type ChannelPolicy struct {
+	Enabled      bool   `json:"enabled"`
+	ContentScope string `json:"content_scope,omitempty"`
+}
+
+// EnablePolicy is the retrieval toggle shape ({enabled: bool}).
+type EnablePolicy struct {
+	Enabled bool `json:"enabled"`
+}
+
+// PublishingPolicy is the publishing section of the policy JSON.
+type PublishingPolicy struct {
+	Mode                     string   `json:"mode"`
+	RequiredFields           []string `json:"required_fields"`
+	RequireCleanAttachments  bool     `json:"require_clean_attachments"`
+	RequireHumanConfirmation bool     `json:"require_human_confirmation"`
+}
+
+// PolicyVisibility is the visibility section of the policy JSON.
+type PolicyVisibility struct {
+	Default string   `json:"default"`
+	Allowed []string `json:"allowed"`
+}
+
+// Policy is the final (phase 0 v2) resource model policy structure. The legacy
+// channel shape is rejected on parse — it is never normalized.
+type Policy struct {
+	Visibility PolicyVisibility         `json:"visibility"`
+	Channels   map[string]ChannelPolicy `json:"channels"`
+	Retrieval  map[string]EnablePolicy  `json:"retrieval"`
+	Publishing PublishingPolicy         `json:"publishing"`
+}
+
+var allowedChannelKeys = map[string]struct{}{
+	"workspace": {}, "public_site": {}, "agent": {}, "open_api": {},
+}
+
+var scopedChannelKeys = map[string]struct{}{
+	"agent": {}, "open_api": {},
+}
+
+var allowedContentScopes = map[string]struct{}{
+	"published": {}, "all": {},
+}
+
+var allowedVisibilityValues = map[string]struct{}{
+	"workspace": {}, "organization": {}, "public": {},
+}
+
+var allowedPublishingModes = map[string]struct{}{
+	"direct": {}, "approval": {},
+}
+
+// PolicyFromJSON parses and validates the final policy structure. The legacy
+// outlet shape and any unknown section are rejected explicitly — nothing is
+// normalized or converted.
+func PolicyFromJSON(raw []byte) (Policy, error) {
+	var probe map[string]json.RawMessage
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	if err := decoder.Decode(&probe); err != nil {
+		return Policy{}, fmt.Errorf("%w: policy must be a JSON object", ErrSchemaInvalid)
+	}
+	for key := range probe {
+		switch key {
+		case "visibility", "channels", "retrieval", "publishing":
+		default:
+			return Policy{}, fmt.Errorf("%w: policy.%s is not a known policy section; the legacy outlet shape was removed", ErrSchemaInvalid, key)
+		}
+	}
+	policy := Policy{}
+	// Sections are decoded individually with unknown-field rejection because
+	// json.Decoder cannot DisallowUnknownFields across map values.
+	if rawVisibility, ok := probe["visibility"]; ok {
+		var visibility PolicyVisibility
+		if err := decodeStrict(rawVisibility, &visibility); err != nil {
+			return Policy{}, fmt.Errorf("%w: policy.visibility is invalid: %v", ErrSchemaInvalid, err)
+		}
+		policy.Visibility = visibility
+	}
+	if rawChannels, ok := probe["channels"]; ok {
+		var channels map[string]ChannelPolicy
+		if err := decodeStrict(rawChannels, &channels); err != nil {
+			return Policy{}, fmt.Errorf("%w: policy.channels is invalid: %v", ErrSchemaInvalid, err)
+		}
+		policy.Channels = channels
+	}
+	if rawRetrieval, ok := probe["retrieval"]; ok {
+		var retrieval map[string]EnablePolicy
+		if err := decodeStrict(rawRetrieval, &retrieval); err != nil {
+			return Policy{}, fmt.Errorf("%w: policy.retrieval is invalid: %v", ErrSchemaInvalid, err)
+		}
+		policy.Retrieval = retrieval
+	}
+	if rawPublishing, ok := probe["publishing"]; ok {
+		var publishing PublishingPolicy
+		if err := decodeStrict(rawPublishing, &publishing); err != nil {
+			return Policy{}, fmt.Errorf("%w: policy.publishing is invalid: %v", ErrSchemaInvalid, err)
+		}
+		policy.Publishing = publishing
+	}
+	if err := policy.Validate(); err != nil {
+		return Policy{}, err
+	}
+	return policy, nil
+}
+
+func decodeStrict(raw json.RawMessage, target any) error {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	return decoder.Decode(target)
+}
+
+// Validate checks the canonical policy invariants.
+func (p Policy) Validate() error {
+	if p.Visibility.Default != "" {
+		if _, ok := allowedVisibilityValues[p.Visibility.Default]; !ok {
+			return fmt.Errorf("%w: policy.visibility.default must be workspace, organization, or public", ErrSchemaInvalid)
+		}
+	}
+	seenAllowed := map[string]struct{}{}
+	for _, value := range p.Visibility.Allowed {
+		if _, ok := allowedVisibilityValues[value]; !ok {
+			return fmt.Errorf("%w: policy.visibility.allowed must only contain workspace, organization, or public", ErrSchemaInvalid)
+		}
+		if _, dup := seenAllowed[value]; dup {
+			return fmt.Errorf("%w: policy.visibility.allowed contains a duplicate value", ErrSchemaInvalid)
+		}
+		seenAllowed[value] = struct{}{}
+	}
+	if p.Visibility.Default != "" {
+		if _, ok := seenAllowed[p.Visibility.Default]; !ok {
+			return fmt.Errorf("%w: policy.visibility.default must be listed in policy.visibility.allowed", ErrSchemaInvalid)
+		}
+	}
+	channels := p.Channels
+	if channels == nil {
+		channels = map[string]ChannelPolicy{}
+	}
+	keys := make([]string, 0, len(channels))
+	for key := range channels {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if _, ok := allowedChannelKeys[key]; !ok {
+			return fmt.Errorf("%w: policy.channels.%s is not a known channel", ErrSchemaInvalid, key)
+		}
+		channel := channels[key]
+		_, scoped := scopedChannelKeys[key]
+		if channel.ContentScope != "" {
+			if !scoped {
+				return fmt.Errorf("%w: policy.channels.%s.content_scope is only allowed on agent and open_api", ErrSchemaInvalid, key)
+			}
+			if _, ok := allowedContentScopes[channel.ContentScope]; !ok {
+				return fmt.Errorf("%w: policy.channels.%s.content_scope must be published or all", ErrSchemaInvalid, key)
+			}
+		}
+	}
+	retrieval := p.Retrieval
+	if retrieval == nil {
+		retrieval = map[string]EnablePolicy{}
+	}
+	retrievalKeys := make([]string, 0, len(retrieval))
+	for key := range retrieval {
+		retrievalKeys = append(retrievalKeys, key)
+	}
+	sort.Strings(retrievalKeys)
+	for _, key := range retrievalKeys {
+		if key != "structured" && key != "fulltext" && key != "semantic" {
+			return fmt.Errorf("%w: policy.retrieval.%s is not a known retrieval channel", ErrSchemaInvalid, key)
+		}
+	}
+	if p.Publishing.Mode != "" {
+		if _, ok := allowedPublishingModes[p.Publishing.Mode]; !ok {
+			return fmt.Errorf("%w: policy.publishing.mode must be direct or approval", ErrSchemaInvalid)
+		}
+	}
+	return nil
+}
+
+// ToJSON renders the canonical policy JSON.
+func (p Policy) ToJSON() []byte {
+	body, err := json.Marshal(p)
+	if err != nil {
+		return []byte("{}")
+	}
+	return body
+}
+
 func Validate(contentKind string, fieldSchema, formSchema, listSchema, policy map[string]any) error {
 	issues := make([]ValidationIssue, 0)
-	canonicalPolicy, normalizeErr := NormalizePolicy(policy)
-	if normalizeErr != nil {
-		var schemaErr *SchemaValidationError
-		if errors.As(normalizeErr, &schemaErr) {
-			issues = append(issues, schemaErr.Issues...)
-		} else {
-			issues = append(issues, issue("policy", "invalid_policy", normalizeErr.Error()))
-		}
-	} else {
-		policy = canonicalPolicy
-	}
+	validatePolicy(policy, &issues)
 	if contentKind != "record" && contentKind != "document" && contentKind != "faq" && contentKind != "note" {
 		issues = append(issues, issue("content_kind", "invalid_content_kind", "content_kind must be record, document, faq, or note"))
 	}
 	fields := fieldDefinitions(fieldSchema, &issues)
 	validateForm(formSchema, fields, &issues)
 	validateList(listSchema, fields, &issues)
-	validatePolicy(policy, &issues)
 	if len(issues) > 0 {
 		return &SchemaValidationError{Issues: issues}
 	}
 	return nil
 }
 
+// SchemaChecksum keeps the historical map-based signature. The policy is
+// validated and canonically marshaled as-is — no alias normalization happens.
 func SchemaChecksum(contentKind string, fieldSchema, formSchema, listSchema, policy map[string]any) (string, error) {
-	canonicalPolicy, err := NormalizePolicy(policy)
-	if err != nil {
-		return "", err
-	}
-	policy = canonicalPolicy
 	if err := Validate(contentKind, fieldSchema, formSchema, listSchema, policy); err != nil {
 		return "", err
 	}
@@ -88,45 +265,6 @@ func SchemaChecksum(contentKind string, fieldSchema, formSchema, listSchema, pol
 	}
 	sum := sha256.Sum256(payload)
 	return hex.EncodeToString(sum[:]), nil
-}
-
-// NormalizePolicy keeps persisted outlet names aligned with the query layer.
-// Older contracts used external/open_api for Agent access and member_search
-// for workspace search. They are accepted as aliases and stored canonically.
-func NormalizePolicy(policy map[string]any) (map[string]any, error) {
-	if policy == nil {
-		return nil, nil
-	}
-	result := make(map[string]any, len(policy))
-	for key, value := range policy {
-		result[key] = value
-	}
-	rawOutlets, ok := policy["outlets"]
-	if !ok {
-		return result, nil
-	}
-	outlets, ok := rawOutlets.(map[string]any)
-	if !ok {
-		return result, nil
-	}
-	canonicalOutlets := make(map[string]any, len(outlets))
-	for key, value := range outlets {
-		canonicalOutlets[key] = value
-	}
-	for alias, canonical := range map[string]string{
-		"external":      "agent_tool",
-		"open_api":      "agent_tool",
-		"member_search": "workspace",
-	} {
-		if value, exists := canonicalOutlets[alias]; exists {
-			if _, alreadyCanonical := canonicalOutlets[canonical]; !alreadyCanonical {
-				canonicalOutlets[canonical] = value
-			}
-			delete(canonicalOutlets, alias)
-		}
-	}
-	result["outlets"] = canonicalOutlets
-	return result, nil
 }
 
 func issue(path, code, message string) ValidationIssue {
@@ -178,7 +316,7 @@ func validateField(key string, definition map[string]any, path string, issues *[
 	allowedTypes := map[string]struct{}{
 		"string": {}, "text": {}, "markdown": {}, "block": {}, "integer": {}, "number": {}, "currency": {},
 		"boolean": {}, "date": {}, "datetime": {}, "enum": {}, "multiselect": {}, "object": {}, "json": {},
-		"array": {}, "asset_reference": {}, "relation": {}, "person": {}, "department": {}, "tags": {},
+		"array": {}, "asset_reference": {}, "relation": {}, "person": {}, "department": {},
 		"attachment": {}, "image": {}, "video": {}, "location": {}, "calculated": {},
 	}
 	if _, ok := allowedTypes[fieldType]; fieldType != "" && !ok {
@@ -340,38 +478,20 @@ func reservedListKey(key string) bool {
 	return ok || key == "id"
 }
 
+// validatePolicy parses the final policy structure strictly. Legacy shapes are
+// rejected with an explicit issue — nothing is converted.
 func validatePolicy(policy map[string]any, issues *[]ValidationIssue) {
 	if policy == nil {
 		*issues = append(*issues, issue("policy", "required", "policy must be an object"))
 		return
 	}
-	if outlets, ok := policy["outlets"]; ok {
-		outletMap, ok := outlets.(map[string]any)
-		if !ok {
-			*issues = append(*issues, issue("policy.outlets", "invalid_outlets", "outlets must be an object"))
-			return
-		}
-		keys := make([]string, 0, len(outletMap))
-		for key := range outletMap {
-			keys = append(keys, key)
-		}
-		sort.Strings(keys)
-		for _, key := range keys {
-			if key != "workspace" && key != "agent_tool" && key != "fulltext" && key != "semantic" && key != "frontend" {
-				*issues = append(*issues, issue("policy.outlets."+key, "invalid_outlet", "outlet must be workspace, agent_tool, fulltext, semantic, or frontend"))
-				continue
-			}
-			value, ok := outletMap[key].(map[string]any)
-			if !ok {
-				*issues = append(*issues, issue("policy.outlets."+key, "invalid_outlet", "outlet policy must be an object"))
-				continue
-			}
-			if enabled, exists := value["enabled"]; exists {
-				if _, ok := enabled.(bool); !ok {
-					*issues = append(*issues, issue("policy.outlets."+key+".enabled", "invalid_boolean", "enabled must be boolean"))
-				}
-			}
-		}
+	raw, err := json.Marshal(policy)
+	if err != nil {
+		*issues = append(*issues, issue("policy", "invalid_policy", "policy must be a JSON object"))
+		return
+	}
+	if _, err := PolicyFromJSON(raw); err != nil {
+		*issues = append(*issues, issue("policy", "invalid_policy", err.Error()))
 	}
 }
 

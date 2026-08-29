@@ -39,7 +39,7 @@ type AssetReference struct {
 }
 
 // Reference returns only the current published version visible to the Agent
-// user and enabled for the agent_tool outlet.
+// user and enabled for the agent channel.
 func (s Service) Reference(ctx context.Context, principal auth.Principal, assetID string, allowedModelIDs []string) (AssetReference, error) {
 	if !ValidUUID(assetID) || len(allowedModelIDs) == 0 {
 		return AssetReference{}, ErrReferenceNotFound
@@ -53,24 +53,14 @@ func (s Service) Reference(ctx context.Context, principal auth.Principal, assetI
 		       LEFT(COALESCE(v.markdown, ''), 500),
 		       a.updated_at::text
 		FROM asset.assets a
-		JOIN asset.asset_versions v ON v.id = a.current_published_version_id
-		JOIN model.resource_model_versions mv ON mv.id = v.resource_model_version_id
+		JOIN asset.asset_versions v ON v.organization_id = a.organization_id AND v.id = a.current_published_version_id
+		JOIN model.resource_model_versions mv ON mv.organization_id = a.organization_id AND mv.id = v.resource_model_version_id
 		WHERE a.id = $1::uuid
 		  AND a.organization_id = $2::uuid
 		  AND a.resource_model_id::text = ANY($3::text[])
 		  AND a.publication_status = 'published'
 		  AND a.current_published_version_id IS NOT NULL
-		  AND COALESCE(NULLIF(mv.policy #>> '{outlets,agent_tool,enabled}', '')::boolean, false)
-		  AND CASE v.quality
-				WHEN 'raw' THEN 1
-					WHEN 'ai_generated' THEN 2
-						WHEN 'human_confirmed' THEN 3
-			END >= CASE COALESCE(NULLIF(mv.policy #>> '{outlets,agent_tool,min_quality}', ''), 'raw')
-				WHEN 'raw' THEN 1
-						WHEN 'ai_generated' THEN 2
-						WHEN 'human_confirmed' THEN 3
-				ELSE 99
-			END
+		  AND COALESCE(NULLIF(mv.policy #>> '{channels,agent,enabled}', '')::boolean, false)
 	`, assetID, principal.OrganizationID, allowedModelIDs).Scan(
 		&result.AssetID, &result.AssetVersionID, &result.Title,
 		&result.SourceExcerpt, &result.UpdatedAt,

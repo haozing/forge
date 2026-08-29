@@ -20,12 +20,7 @@ func presignedAttachmentDownloadFinal(deps Dependencies) http.HandlerFunc {
 			return
 		}
 		id := r.PathValue("attachmentId")
-		allowed, err := deps.ScopeResolver.AllowedModelIDs(r.Context(), principal, "attachment.read")
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "authorization_scope_failed")
-			return
-		}
-		if _, err := deps.AttachmentService.Status(r.Context(), principal, id, allowed); err != nil {
+		if _, err := deps.AttachmentService.Status(r.Context(), principal, id); err != nil {
 			writeError(w, http.StatusNotFound, "attachment_not_found")
 			return
 		}

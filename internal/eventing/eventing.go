@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strings"
 
+	"agentchunzhi/internal/auth"
+
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/riverqueue/river"
@@ -125,8 +127,17 @@ func eventKey(eventType string, payloadVersion int) string {
 func DefaultRegistry() (Registry, error) {
 	return NewRegistry([]ConsumerManifest{
 		{
-			Key:             "retrieval.projection",
-			EventVersions:   map[string]int{"asset.retrieval_projection_requested": 1},
+			// Phase 0 temporary consumer: the projector reacts to asset facts
+			// instead of receiving downstream commands. Phase 3 replaces this
+			// adapter with the final run/pointer model.
+			Key: "retrieval.projection",
+			EventVersions: map[string]int{
+				EventAssetPublished:               PayloadVersionV1,
+				EventAssetArchived:                PayloadVersionV1,
+				EventAssetVisibilityChanged:       PayloadVersionV1,
+				EventTagUpdated:                   PayloadVersionV1,
+				EventResourceModelPolicyPublished: PayloadVersionV1,
+			},
 			IdempotencyNote: "asset version chunk and embedding projection is idempotent",
 			FailureMode:     "retry_then_dead",
 		},
@@ -156,12 +167,35 @@ type EventStore struct {
 
 type Event struct {
 	OrganizationID   string
+	WorkspaceID      string
 	EventType        string
 	AggregateType    string
 	AggregateID      string
-	AggregateVersion int
+	AggregateVersion int64
 	PayloadVersion   int
-	Payload          any
+	// Actor describes who caused the fact: {"type":"member"|"agent"|"system","id":...}.
+	Actor   map[string]any
+	Payload any
+}
+
+// ActorFromPrincipal renders the event actor without fabricating user IDs.
+func ActorFromPrincipal(principal auth.Principal) map[string]any {
+	if principal.UserID == "" {
+		return map[string]any{"type": "system"}
+	}
+	kind := principal.UserType
+	if kind == "" {
+		kind = "system"
+	}
+	return map[string]any{"type": kind, "id": principal.UserID}
+}
+
+// EncodePayload marshals a typed catalog payload for the envelope.
+func EncodePayload(payload any) ([]byte, error) {
+	if payload == nil {
+		return []byte("{}"), nil
+	}
+	return json.Marshal(payload)
 }
 
 // AppendTx writes the immutable event, its declared consumer deliveries, and
@@ -179,15 +213,19 @@ func (s EventStore) AppendTx(ctx context.Context, tx pgx.Tx, event Event) (strin
 	if err != nil {
 		return "", fmt.Errorf("encode event payload: %w", err)
 	}
+	actorJSON, err := json.Marshal(event.Actor)
+	if err != nil {
+		return "", fmt.Errorf("encode event actor: %w", err)
+	}
 	checksum := sha256.Sum256(payload)
 	var eventID string
 	if err := tx.QueryRow(ctx, `
 		INSERT INTO audit.outbox_events
-			(organization_id, event_type, aggregate_type, aggregate_id, aggregate_version, payload_version, payload, payload_checksum)
-		VALUES ($1::uuid, $2, $3, $4::uuid, $5, $6, $7::jsonb, $8)
+			(organization_id, workspace_id, event_type, aggregate_type, aggregate_id, aggregate_version, payload_version, actor, payload, payload_checksum)
+		VALUES ($1::uuid, NULLIF($2,'')::uuid, $3, $4, $5::uuid, $6, $7, $8::jsonb, $9::jsonb, $10)
 		RETURNING id::text
-	`, event.OrganizationID, event.EventType, event.AggregateType, event.AggregateID,
-		event.AggregateVersion, event.PayloadVersion, string(payload), hex.EncodeToString(checksum[:])).Scan(&eventID); err != nil {
+	`, event.OrganizationID, event.WorkspaceID, event.EventType, event.AggregateType, event.AggregateID,
+		event.AggregateVersion, event.PayloadVersion, string(actorJSON), string(payload), hex.EncodeToString(checksum[:])).Scan(&eventID); err != nil {
 		return "", fmt.Errorf("record outbox event: %w", err)
 	}
 	consumers := s.Registry.ConsumersFor(event.EventType, event.PayloadVersion)

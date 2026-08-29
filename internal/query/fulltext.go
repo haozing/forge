@@ -171,7 +171,7 @@ func (s Service) Query(ctx context.Context, principal auth.Principal, req QueryR
 		mergeMode = "fulltext"
 	}
 	merged := mergeCandidates(lexical, vector, mergeMode)
-	method := "lexical"
+	method := "fulltext"
 	if mode == "semantic" {
 		method = "vector"
 	} else if mode == "hybrid" && !degraded {
@@ -218,24 +218,18 @@ func (s Service) lexicalCandidates(ctx context.Context, p auth.Principal, q stri
 		 AND pc.status='active' AND pc.active_projection_generation=c.projection_generation
 		 AND pc.chunker_version=c.chunker_version
 		JOIN asset.assets a ON a.id=c.asset_id AND a.current_published_version_id=c.asset_version_id
-		JOIN asset.asset_versions v ON v.id=c.asset_version_id
-		JOIN model.resource_model_versions mv ON mv.id=v.resource_model_version_id AND mv.status='published'
+		JOIN asset.asset_versions v ON v.organization_id=a.organization_id AND v.id=c.asset_version_id
+		JOIN model.resource_model_versions mv ON mv.organization_id=a.organization_id AND mv.id=v.resource_model_version_id AND mv.status='published'
 		WHERE c.organization_id=$1::uuid AND c.status='ready'
-		  AND a.publication_status='published' AND a.resource_model_id=ANY($3::uuid[])
-		  AND ($2 = '' OR c.search_text &@~ $2)
+		  AND a.publication_status='published' AND a.resource_model_id=ANY($2::uuid[])
+		  AND ($3 = '' OR c.search_text &@~ $3)
 		  AND retrieval.matches_field_filters(v.fields,$4::jsonb)
-		  AND retrieval.matches_field_filters(jsonb_build_object('tags',v.tags),$5::jsonb)
-		  AND COALESCE(NULLIF(mv.policy #>> '{outlets,agent_tool,enabled}','')::boolean,false)
-		  AND COALESCE(NULLIF(mv.policy #>> '{outlets,fulltext,enabled}','')::boolean,false)
-		  AND (NOT $7::boolean OR COALESCE(NULLIF(mv.policy #>> '{outlets,semantic,enabled}','')::boolean,false))
-		  AND retrieval.quality_rank(v.quality) >= GREATEST(
-		        retrieval.quality_rank(COALESCE(NULLIF(mv.policy #>> '{outlets,agent_tool,min_quality}',''),'raw')),
-		        retrieval.quality_rank(COALESCE(NULLIF(mv.policy #>> '{outlets,fulltext,min_quality}',''),'raw')),
-		        retrieval.quality_rank($6),
-		        CASE WHEN $7::boolean THEN retrieval.quality_rank(COALESCE(NULLIF(mv.policy #>> '{outlets,semantic,min_quality}',''),'raw')) ELSE 1 END)
+		  AND COALESCE(NULLIF(mv.policy #>> '{channels,agent,enabled}','')::boolean,false)
+		  AND COALESCE(NULLIF(mv.policy #>> '{retrieval,fulltext,enabled}','')::boolean,false)
+		  AND (NOT $5::boolean OR COALESCE(NULLIF(mv.policy #>> '{retrieval,semantic,enabled}','')::boolean,false))
 		ORDER BY pgroonga_score(c.tableoid,c.ctid) DESC,a.id,c.id
 		LIMIT 100
-	`, p.OrganizationID, q, models, filters.fieldsJSON(), filters.tagsJSON(), filters.QualityGTE, hybrid)
+	`, p.OrganizationID, models, q, filters.fieldsJSON(), hybrid)
 	if err != nil {
 		return nil, fmt.Errorf("lexical recall: %w", err)
 	}
@@ -298,24 +292,18 @@ func (s Service) vectorCandidates(ctx context.Context, p auth.Principal, q strin
 		 AND e.model_name=pc.model_name AND e.model_version=pc.model_version
 		 AND e.projection_generation=pc.active_projection_generation
 		JOIN asset.assets a ON a.id=c.asset_id AND a.current_published_version_id=c.asset_version_id
-		JOIN asset.asset_versions v ON v.id=c.asset_version_id
-		JOIN model.resource_model_versions mv ON mv.id=v.resource_model_version_id AND mv.status='published'
+		JOIN asset.asset_versions v ON v.organization_id=a.organization_id AND v.id=c.asset_version_id
+		JOIN model.resource_model_versions mv ON mv.organization_id=a.organization_id AND mv.id=v.resource_model_version_id AND mv.status='published'
 		WHERE e.organization_id=$1::uuid AND e.status='ready'
-		  AND e.model_name=$7 AND e.model_version=$8
+		  AND e.model_name=$5 AND e.model_version=$6
 		  AND a.publication_status='published' AND a.resource_model_id=ANY($3::uuid[])
 		  AND retrieval.matches_field_filters(v.fields,$4::jsonb)
-		  AND retrieval.matches_field_filters(jsonb_build_object('tags',v.tags),$5::jsonb)
-		  AND COALESCE(NULLIF(mv.policy #>> '{outlets,agent_tool,enabled}','')::boolean,false)
-		  AND COALESCE(NULLIF(mv.policy #>> '{outlets,semantic,enabled}','')::boolean,false)
-		  AND (NOT $9::boolean OR COALESCE(NULLIF(mv.policy #>> '{outlets,fulltext,enabled}','')::boolean,false))
-		  AND retrieval.quality_rank(v.quality) >= GREATEST(
-		        retrieval.quality_rank(COALESCE(NULLIF(mv.policy #>> '{outlets,agent_tool,min_quality}',''),'raw')),
-		        retrieval.quality_rank(COALESCE(NULLIF(mv.policy #>> '{outlets,semantic,min_quality}',''),'raw')),
-		        retrieval.quality_rank($6),
-		        CASE WHEN $9::boolean THEN retrieval.quality_rank(COALESCE(NULLIF(mv.policy #>> '{outlets,fulltext,min_quality}',''),'raw')) ELSE 1 END)
+		  AND COALESCE(NULLIF(mv.policy #>> '{channels,agent,enabled}','')::boolean,false)
+		  AND COALESCE(NULLIF(mv.policy #>> '{retrieval,semantic,enabled}','')::boolean,false)
+		  AND (NOT $7::boolean OR COALESCE(NULLIF(mv.policy #>> '{retrieval,fulltext,enabled}','')::boolean,false))
 		ORDER BY e.embedding <=> $2::vector(1024),a.id,c.id
 		LIMIT 100
-	`, p.OrganizationID, literal, models, filters.fieldsJSON(), filters.tagsJSON(), filters.QualityGTE, modelName, modelVersion, hybrid)
+	`, p.OrganizationID, literal, models, filters.fieldsJSON(), modelName, modelVersion, hybrid)
 	if e != nil {
 		return nil, fmt.Errorf("vector recall: %w", e)
 	}
@@ -365,7 +353,7 @@ func mergeCandidates(lexical, vector []candidate, mode string) []candidate {
 			c.Method = "vector"
 		} else {
 			c.FinalScore = c.LexicalScore
-			c.Method = "lexical"
+			c.Method = "fulltext"
 		}
 		out = append(out, c)
 	}
@@ -406,7 +394,33 @@ func (s Service) pageSession(ctx context.Context, p auth.Principal, req QueryReq
 		}
 	}
 	if req.Cursor != "" {
-		rows, e := s.Store.Pool.Query(ctx, `SELECT i.asset_id::text,i.asset_version_id::text,i.chunk_id::text,c.projection_run_id::text,i.final_score,i.ranking_method,LEFT(regexp_replace(c.content,E'\\s+',' ','g'),500),c.source_type,c.source_locator,c.char_start,c.char_end,c.source_checksum,c.chunk_checksum,c.canonicalizer_version FROM retrieval.search_session_items i JOIN retrieval.chunks c ON c.id=i.chunk_id JOIN retrieval.projection_runs pr ON pr.id=c.projection_run_id AND pr.status='ready' JOIN retrieval.projection_configs pc ON pc.id=pr.projection_config_id AND pc.status='active' AND pc.active_projection_generation=c.projection_generation AND pc.chunker_version=c.chunker_version JOIN asset.assets a ON a.id=i.asset_id AND a.current_published_version_id=i.asset_version_id JOIN asset.asset_versions v ON v.id=i.asset_version_id JOIN model.resource_model_versions mv ON mv.id=v.resource_model_version_id AND mv.status='published' WHERE i.session_id=$1::uuid AND i.ordinal >= $2 AND a.organization_id=$3::uuid AND a.resource_model_id=ANY($4::uuid[]) AND v.content_checksum=c.source_checksum AND retrieval.matches_field_filters(v.fields || jsonb_build_object('tags',v.tags),$5::jsonb) AND COALESCE(NULLIF(mv.policy #>> '{outlets,agent_tool,enabled}','')::boolean,false) AND CASE WHEN $6::text='structured' THEN retrieval.quality_rank(v.quality) >= GREATEST(retrieval.quality_rank(COALESCE(NULLIF(mv.policy #>> '{outlets,agent_tool,min_quality}',''),'raw')),retrieval.quality_rank($8)) WHEN $6::text='fulltext' OR ($6::text='hybrid' AND $7::boolean) THEN COALESCE(NULLIF(mv.policy #>> '{outlets,fulltext,enabled}','')::boolean,false) AND retrieval.quality_rank(v.quality) >= GREATEST(retrieval.quality_rank(COALESCE(NULLIF(mv.policy #>> '{outlets,agent_tool,min_quality}',''),'raw')),retrieval.quality_rank(COALESCE(NULLIF(mv.policy #>> '{outlets,fulltext,min_quality}',''),'raw')),retrieval.quality_rank($8)) WHEN $6::text='semantic' THEN COALESCE(NULLIF(mv.policy #>> '{outlets,semantic,enabled}','')::boolean,false) AND retrieval.quality_rank(v.quality) >= GREATEST(retrieval.quality_rank(COALESCE(NULLIF(mv.policy #>> '{outlets,agent_tool,min_quality}',''),'raw')),retrieval.quality_rank(COALESCE(NULLIF(mv.policy #>> '{outlets,semantic,min_quality}',''),'raw')),retrieval.quality_rank($8)) ELSE COALESCE(NULLIF(mv.policy #>> '{outlets,fulltext,enabled}','')::boolean,false) AND COALESCE(NULLIF(mv.policy #>> '{outlets,semantic,enabled}','')::boolean,false) AND retrieval.quality_rank(v.quality) >= GREATEST(retrieval.quality_rank(COALESCE(NULLIF(mv.policy #>> '{outlets,agent_tool,min_quality}',''),'raw')),retrieval.quality_rank(COALESCE(NULLIF(mv.policy #>> '{outlets,fulltext,min_quality}',''),'raw')),retrieval.quality_rank(COALESCE(NULLIF(mv.policy #>> '{outlets,semantic,min_quality}',''),'raw')),retrieval.quality_rank($8)) END ORDER BY i.ordinal LIMIT $9`, sessionID, offset, p.OrganizationID, allowedModels, filters.allJSON(), req.Mode, degraded, filters.QualityGTE, topK+1)
+		rows, e := s.Store.Pool.Query(ctx, `
+			SELECT i.asset_id::text,i.asset_version_id::text,i.chunk_id::text,c.projection_run_id::text,
+			       i.final_score,i.ranking_method,LEFT(regexp_replace(c.content,E'\\s+',' ','g'),500),
+			       c.source_type,c.source_locator,c.char_start,c.char_end,c.source_checksum,c.chunk_checksum,c.canonicalizer_version
+			FROM retrieval.search_session_items i
+			JOIN retrieval.chunks c ON c.id=i.chunk_id
+			JOIN retrieval.projection_runs pr ON pr.id=c.projection_run_id AND pr.status='ready'
+			JOIN retrieval.projection_configs pc ON pc.id=pr.projection_config_id AND pc.status='active'
+			 AND pc.active_projection_generation=c.projection_generation AND pc.chunker_version=c.chunker_version
+			JOIN asset.assets a ON a.id=i.asset_id AND a.current_published_version_id=i.asset_version_id
+			JOIN asset.asset_versions v ON v.organization_id=a.organization_id AND v.id=i.asset_version_id
+			JOIN model.resource_model_versions mv ON mv.organization_id=a.organization_id AND mv.id=v.resource_model_version_id AND mv.status='published'
+			WHERE i.session_id=$1::uuid AND i.ordinal >= $2
+			  AND a.organization_id=$3::uuid AND a.resource_model_id=ANY($4::uuid[])
+			  AND a.publication_status='published'
+			  AND v.content_checksum=c.source_checksum
+			  AND retrieval.matches_field_filters(v.fields,$5::jsonb)
+			  AND COALESCE(NULLIF(mv.policy #>> '{channels,agent,enabled}','')::boolean,false)
+			  AND CASE
+			        WHEN $6::text='structured' THEN true
+			        WHEN $6::text='fulltext' OR ($6::text='hybrid' AND $7::boolean) THEN COALESCE(NULLIF(mv.policy #>> '{retrieval,fulltext,enabled}','')::boolean,false)
+			        WHEN $6::text='semantic' THEN COALESCE(NULLIF(mv.policy #>> '{retrieval,semantic,enabled}','')::boolean,false)
+			        ELSE COALESCE(NULLIF(mv.policy #>> '{retrieval,fulltext,enabled}','')::boolean,false)
+			             AND COALESCE(NULLIF(mv.policy #>> '{retrieval,semantic,enabled}','')::boolean,false)
+			      END
+			ORDER BY i.ordinal LIMIT $8
+		`, sessionID, offset, p.OrganizationID, allowedModels, filters.fieldsJSON(), req.Mode, degraded, topK+1)
 		if e != nil {
 			return QueryResponse{}, e
 		}
@@ -449,7 +463,7 @@ func (s Service) pageSession(ctx context.Context, p auth.Principal, req QueryReq
 	}
 	items := make([]SearchItem, len(page))
 	for i, c := range page {
-		items[i] = SearchItem{AssetID: c.AssetID, AssetVersionID: c.AssetVersionID, ChunkID: c.ChunkID, ProjectionRunID: c.ProjectionRunID, Score: c.FinalScore, Snippet: c.Snippet, Source: c.Source, SourceType: c.SourceType, SourceLocator: c.Locator, CharStart: c.CharStart, CharEnd: c.CharEnd, SourceChecksum: c.SourceChecksum, ChunkChecksum: c.ChunkChecksum, CanonicalizerVersion: c.CanonicalizerVersion, RankingMethod: c.Method}
+		items[i] = SearchItem{AssetID: c.AssetID, AssetVersionID: c.AssetVersionID, ChunkID: c.ChunkID, ProjectionRunID: c.ProjectionRunID, Score: c.FinalScore, Snippet: c.Snippet, Source: c.Source, SourceType: c.SourceType, SourceLocator: c.Locator, CharStart: c.CharStart, CharEnd: c.CharEnd, SourceChecksum: c.SourceChecksum, ChunkChecksum: c.ChunkChecksum, CanonicalizerVersion: c.CanonicalizerVersion, RankingMethod: c.Method, Tags: []string{}, Fields: map[string]any{}, Highlights: map[string]any{}}
 	}
 	return QueryResponse{Mode: req.Mode, Degraded: degraded, Items: items, NextCursor: next, HasMore: hasMore, SessionID: sessionID, RankingMethod: method, PolicyRevision: policyRevision}, nil
 }

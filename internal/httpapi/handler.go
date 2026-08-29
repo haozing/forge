@@ -68,7 +68,7 @@ func NewHandler() http.Handler {
 }
 
 func NewHandlerWithDeps(deps Dependencies) http.Handler {
-	return withJSONDefaults(rateLimitMiddleware(frontendIdempotency(deps, newRouter(deps))))
+	return withJSONDefaults(withRequestID(rateLimitMiddleware(frontendIdempotency(deps, newRouter(deps)))))
 }
 
 type createAssetRequest struct {
@@ -2018,12 +2018,7 @@ func attachmentStatus(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusNotFound, "attachment_not_found")
 			return
 		}
-		allowedModels, err := deps.ScopeResolver.AllowedModelIDs(r.Context(), principal, "asset.write")
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "authorization_scope_failed")
-			return
-		}
-		result, err := deps.AttachmentService.Status(r.Context(), principal, attachmentID, allowedModels)
+		result, err := deps.AttachmentService.Status(r.Context(), principal, attachmentID)
 		if errors.Is(err, attachment.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "attachment_not_found")
 			return
@@ -2033,94 +2028,6 @@ func attachmentStatus(deps Dependencies) http.HandlerFunc {
 			return
 		}
 		writeJSON(w, http.StatusOK, result)
-	}
-}
-
-type uploadResponse struct {
-	attachment.UploadResult
-}
-
-func uploadAttachment(deps Dependencies) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
-			return
-		}
-		principal, err := deps.SessionService.Authenticate(r.Context(), r)
-		if err != nil {
-			writeError(w, http.StatusUnauthorized, "unauthorized")
-			return
-		}
-		versionID := r.PathValue("versionId")
-		if !agentquery.ValidUUID(versionID) {
-			writeError(w, http.StatusUnprocessableEntity, "invalid_asset_version_id")
-			return
-		}
-		allowedModels, err := deps.ScopeResolver.AllowedModelIDs(r.Context(), principal, "asset.write")
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "authorization_scope_failed")
-			return
-		}
-		maxBytes := deps.AttachmentService.MaxBytes
-		if maxBytes <= 0 {
-			maxBytes = 50 * 1024 * 1024
-		}
-		r.Body = http.MaxBytesReader(w, r.Body, maxBytes+(1<<20))
-		if err := r.ParseMultipartForm(8 << 20); err != nil {
-			if strings.Contains(err.Error(), "request body too large") {
-				writeError(w, http.StatusRequestEntityTooLarge, "attachment_too_large")
-				return
-			}
-			writeError(w, http.StatusUnprocessableEntity, "invalid_multipart_request")
-			return
-		}
-		if r.MultipartForm != nil {
-			defer r.MultipartForm.RemoveAll()
-		}
-		if r.MultipartForm == nil {
-			writeError(w, http.StatusUnprocessableEntity, "attachment_file_required")
-			return
-		}
-		files := r.MultipartForm.File["file"]
-		if len(files) != 1 {
-			writeError(w, http.StatusUnprocessableEntity, "attachment_file_required")
-			return
-		}
-		file, err := files[0].Open()
-		if err != nil {
-			writeError(w, http.StatusUnprocessableEntity, "attachment_file_unreadable")
-			return
-		}
-		defer file.Close()
-		body, ok := file.(io.ReadSeeker)
-		if !ok {
-			writeError(w, http.StatusUnprocessableEntity, "attachment_file_unseekable")
-			return
-		}
-		result, err := deps.AttachmentService.Upload(r.Context(), principal, allowedModels, attachment.UploadInput{
-			AssetVersionID: versionID,
-			Filename:       files[0].Filename,
-			MediaType:      files[0].Header.Get("Content-Type"),
-			Size:           files[0].Size,
-			Body:           body,
-		})
-		if errors.Is(err, attachment.ErrUploadTooLarge) {
-			writeError(w, http.StatusRequestEntityTooLarge, "attachment_too_large")
-			return
-		}
-		if errors.Is(err, attachment.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "asset_version_not_found")
-			return
-		}
-		if errors.Is(err, attachment.ErrInvalidUpload) {
-			writeError(w, http.StatusUnprocessableEntity, "invalid_attachment")
-			return
-		}
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "attachment_upload_failed")
-			return
-		}
-		writeJSON(w, http.StatusCreated, uploadResponse{UploadResult: result})
 	}
 }
 
@@ -2138,7 +2045,7 @@ func downloadAttachment(deps Dependencies) http.HandlerFunc {
 		if !requireAgentCapability(w, principal, "reference.read") {
 			return
 		}
-		serveAttachmentDownload(deps, "agent_tool")(w, r, principal)
+		serveAttachmentDownload(deps)(w, r, principal)
 	}
 }
 
@@ -2153,11 +2060,11 @@ func memberDownloadAttachment(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
-		serveAttachmentDownload(deps, "frontend")(w, r, principal)
+		serveAttachmentDownload(deps)(w, r, principal)
 	}
 }
 
-func serveAttachmentDownload(deps Dependencies, outlet string) func(http.ResponseWriter, *http.Request, auth.Principal) {
+func serveAttachmentDownload(deps Dependencies) func(http.ResponseWriter, *http.Request, auth.Principal) {
 	return func(w http.ResponseWriter, r *http.Request, principal auth.Principal) {
 		attachmentID := r.PathValue("attachmentId")
 		if !agentquery.ValidUUID(attachmentID) {
@@ -2172,12 +2079,7 @@ func serveAttachmentDownload(deps Dependencies, outlet string) func(http.Respons
 				_ = deps.Store.RecordAttachmentDownload(auditCtx, principal.OrganizationID, principal.UserID, attachmentID, outcome)
 			}
 		}()
-		allowedModels, err := deps.ScopeResolver.AllowedModelIDs(r.Context(), principal, "asset.read")
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "authorization_scope_failed")
-			return
-		}
-		download, err := deps.AttachmentService.OpenDownload(r.Context(), principal, attachmentID, allowedModels, outlet)
+		download, err := deps.AttachmentService.OpenDownload(r.Context(), principal, attachmentID)
 		if errors.Is(err, attachment.ErrNotFound) {
 			outcome = "denied"
 			writeError(w, http.StatusNotFound, "attachment_not_found")
@@ -2308,6 +2210,12 @@ func health(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// readyRoute adapts the readiness probe for the route registry so the router
+// itself never touches the raw store.
+func readyRoute(deps Dependencies) http.HandlerFunc {
+	return ready(deps.Store)
+}
+
 func ready(s *store.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -2373,15 +2281,5 @@ func withJSONDefaults(next http.Handler) http.Handler {
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(value)
-}
-
-func writeError(w http.ResponseWriter, status int, code string) {
-	requestID := time.Now().UTC().Format("20060102T150405.000000000Z07:00")
-	writeJSON(w, status, map[string]string{
-		"code":       code,
-		"message":    http.StatusText(status),
-		"request_id": requestID,
-	})
+	writeJSONValue(w, status, value)
 }

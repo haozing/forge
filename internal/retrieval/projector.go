@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"strings"
 
-	"agentchunzhi/internal/eventing"
 	"agentchunzhi/internal/store"
 	"agentchunzhi/internal/vectorvalue"
 
@@ -244,10 +243,4 @@ func splitCanonical(value string) []canonicalChunk {
 	return chunks
 }
 
-func EnqueueProjectionTx(ctx context.Context, tx pgx.Tx, events eventing.EventStore, organizationID, assetVersionID, operation string) error {
-	if operation != ProjectionRebuild && operation != ProjectionDelete {
-		return fmt.Errorf("unsupported retrieval projection operation %q", operation)
-	}
-	_, err := events.AppendTx(ctx, tx, eventing.Event{OrganizationID: organizationID, EventType: "asset.retrieval_projection_requested", AggregateType: "asset_version", AggregateID: assetVersionID, AggregateVersion: 1, PayloadVersion: 1, Payload: map[string]string{"asset_version_id": assetVersionID, "operation": operation}})
-	return err
-}
+
