@@ -20,7 +20,7 @@ func TestFrontendContractRoutesRequireSession(t *testing.T) {
 		{"model versions", http.MethodGet, "/api/frontend/resource-models/00000000-0000-4000-8000-000000000001/versions"},
 		{"model migration", http.MethodGet, "/api/frontend/resource-model-migrations/00000000-0000-4000-8000-000000000001"},
 		{"assets", http.MethodGet, "/api/frontend/workspaces/00000000-0000-4000-8000-000000000001/assets"},
-		{"member query", http.MethodPost, "/api/frontend/workspaces/00000000-0000-4000-8000-000000000001/query"},
+		{"member query", http.MethodPost, "/api/v2/workspaces/00000000-0000-4000-8000-000000000001/query"},
 		{"import job", http.MethodGet, "/api/frontend/import-jobs/00000000-0000-4000-8000-000000000001"},
 		{"export job", http.MethodGet, "/api/frontend/export-jobs/00000000-0000-4000-8000-000000000001"},
 		{"asset", http.MethodGet, "/api/frontend/assets/00000000-0000-4000-8000-000000000001"},

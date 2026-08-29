@@ -48,7 +48,7 @@ type Dependencies struct {
 	SessionService       auth.SessionService
 	ScopeResolver        authz.ScopeResolver
 	WorkspacePolicy      authz.WorkspacePolicy
-	QueryService         agentquery.Service
+	QueryService         QueryService
 	AttachmentService    attachment.Service
 	AssetService         assetservice.Service
 	AgentAppService      agentapp.Service
@@ -72,6 +72,9 @@ type Dependencies struct {
 	// Phase 2 tag domain services.
 	TagService   tag.Service
 	FacetService tag.FacetService
+	// Phase 3 retrieval operations services (projection profiles and rebuilds).
+	RetrievalProfiles RetrievalProfileService
+	RetrievalRebuilds RetrievalRebuildService
 	// TrustedProxyCIDRs vouches the proxies allowed to set X-Forwarded-For
 	// for rate-limit keys; AllowedOrigins drives the CSRF Origin policy.
 	TrustedProxyCIDRs []string
@@ -82,6 +85,10 @@ type Dependencies struct {
 	// fingerprint compared against worker heartbeats by /readyz.
 	SemanticAvailable   bool
 	ManifestFingerprint string
+	// Phase 3 readiness inputs: the two query secrets must be present and
+	// distinct for the API to serve queries.
+	SearchCursorSecret string
+	QueryHashSecret    string
 }
 
 func NewHandler() http.Handler {
@@ -212,17 +219,6 @@ type registerMediaRequest struct {
 	MediaKind    string `json:"media_kind"`
 	Language     string `json:"language"`
 	DurationMS   *int64 `json:"duration_ms"`
-}
-
-type unifiedQueryRequest struct {
-	Mode             string         `json:"mode"`
-	Query            string         `json:"query"`
-	ModelIDs         []string       `json:"model_ids"`
-	ResourceModelIDs []string       `json:"resource_model_ids"`
-	DataModels       []string       `json:"data_models"`
-	TopK             int            `json:"top_k"`
-	Cursor           string         `json:"cursor"`
-	Filters          map[string]any `json:"filters"`
 }
 
 func createConversation(deps Dependencies) http.HandlerFunc {
@@ -1201,18 +1197,10 @@ func validateAgentSessionReferences(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusInternalServerError, "agent_session_resolution_failed")
 			return
 		}
-		started := time.Now()
 		result, err := validateAgentReferences(r.Context(), deps, agentPrincipal, input.References)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "reference_validation_failed")
 			return
-		}
-		if deps.Store != nil {
-			outcome := "allowed"
-			if len(result.References) == 0 {
-				outcome = "denied"
-			}
-			_ = deps.Store.RecordQueryLog(r.Context(), agentPrincipal.OrganizationID, agentPrincipal.UserID, r.URL.Path, hashQuery(r.URL.RequestURI()), len(result.References), int(time.Since(started).Milliseconds()), outcome)
 		}
 		writeJSON(w, http.StatusOK, result)
 	}
@@ -1297,7 +1285,6 @@ func chatAgentSession(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusInternalServerError, "agent_session_resolution_failed")
 			return
 		}
-		started := time.Now()
 		chatOutcome := "error"
 		chatAuditMetadata := map[string]any{
 			"query_hash":      hashQuery(input.Query),
@@ -1344,13 +1331,6 @@ func chatAgentSession(deps Dependencies) http.HandlerFunc {
 		}
 		chatOutcome = "allowed"
 		addAgentRuntimeAuditMetadata(chatAuditMetadata, result)
-		if deps.Store != nil {
-			outcome := "allowed"
-			if len(result.References) == 0 && result.RejectedReferenceCount > 0 {
-				outcome = "denied"
-			}
-			_ = deps.Store.RecordQueryLog(r.Context(), binding.AgentPrincipal.OrganizationID, binding.AgentPrincipal.UserID, r.URL.Path, hashQuery(input.Query), len(result.References), int(time.Since(started).Milliseconds()), outcome)
-		}
 		writeJSON(w, http.StatusOK, agentChatResponse{
 			Answer: result.Answer, ConversationID: result.ConversationID, MessageID: result.MessageID,
 			References: result.References, RejectedReferenceCount: result.RejectedReferenceCount,
@@ -1506,7 +1486,6 @@ func streamAgentSession(deps Dependencies) http.HandlerFunc {
 			_ = writeSSE(w, flusher, "reset", map[string]string{"recovery": "/api/frontend/conversations/" + input.ConversationID + "/messages"})
 			return
 		}
-		started := time.Now()
 		chatOutcome := "error"
 		chatAuditMetadata := map[string]any{
 			"query_hash":      hashQuery(input.Query),
@@ -1597,13 +1576,6 @@ func streamAgentSession(deps Dependencies) http.HandlerFunc {
 		}
 		chatOutcome = "allowed"
 		addAgentRuntimeAuditMetadata(chatAuditMetadata, final)
-		if deps.Store != nil {
-			outcome := "allowed"
-			if len(final.References) == 0 && final.RejectedReferenceCount > 0 {
-				outcome = "denied"
-			}
-			_ = deps.Store.RecordQueryLog(r.Context(), binding.AgentPrincipal.OrganizationID, binding.AgentPrincipal.UserID, r.URL.Path, hashQuery(input.Query), len(final.References), int(time.Since(started).Milliseconds()), outcome)
-		}
 		for _, reference := range final.References {
 			eventID++
 			if err := writeSSEWithID(w, flusher, eventID, "reference", reference); err != nil {
@@ -1892,14 +1864,6 @@ func assetReferences(deps Dependencies) http.HandlerFunc {
 		if !requireAgentCapability(w, principal, "reference.read") {
 			return
 		}
-		started := time.Now()
-		outcome := "error"
-		resultCount := 0
-		defer func() {
-			if deps.Store != nil {
-				_ = deps.Store.RecordQueryLog(r.Context(), principal.OrganizationID, principal.UserID, r.URL.Path, hashQuery(r.URL.RequestURI()), resultCount, int(time.Since(started).Milliseconds()), outcome)
-			}
-		}()
 		assetID := r.PathValue("assetId")
 		if !agentquery.ValidUUID(assetID) {
 			writeError(w, http.StatusNotFound, "asset_reference_not_found")
@@ -1912,7 +1876,6 @@ func assetReferences(deps Dependencies) http.HandlerFunc {
 		}
 		result, err := deps.QueryService.Reference(r.Context(), principal, assetID, allowedModels)
 		if errors.Is(err, agentquery.ErrReferenceNotFound) {
-			outcome = "denied"
 			writeError(w, http.StatusNotFound, "asset_reference_not_found")
 			return
 		}
@@ -1920,8 +1883,6 @@ func assetReferences(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusInternalServerError, "asset_reference_failed")
 			return
 		}
-		outcome = "allowed"
-		resultCount = 1
 		writeJSON(w, http.StatusOK, result)
 	}
 }
@@ -2150,37 +2111,10 @@ func health(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// readyRoute adapts the readiness probe for the route registry so the router
-// itself never touches the raw store.
+// readyRoute adapts the readiness probe for the route registry; the full
+// phase 3 readiness checks live in v2_query.go.
 func readyRoute(deps Dependencies) http.HandlerFunc {
-	return ready(deps.Store)
-}
-
-func ready(s *store.Store) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
-			return
-		}
-		if s == nil || s.Pool == nil {
-			writeJSON(w, http.StatusServiceUnavailable, healthResponse{
-				Status: "database_unconfigured",
-				Time:   time.Now().UTC().Format(time.RFC3339),
-			})
-			return
-		}
-		if err := s.Pool.Ping(r.Context()); err != nil {
-			writeJSON(w, http.StatusServiceUnavailable, healthResponse{
-				Status: "database_unavailable",
-				Time:   time.Now().UTC().Format(time.RFC3339),
-			})
-			return
-		}
-		writeJSON(w, http.StatusOK, healthResponse{
-			Status: "ready",
-			Time:   time.Now().UTC().Format(time.RFC3339),
-		})
-	}
+	return ready(deps)
 }
 
 func hashQuery(value string) string {

@@ -62,8 +62,10 @@ func TestNormalizeMemberFiltersBuildsProjectionPredicates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(fields) != `[{"field":"shot_size","operator":"eq","value":"wide"}]` {
-		t.Fatalf("unexpected field predicates: %s", fields)
+	// Phase 3: predicates are typed values rendered into parameterized SQL by
+	// field_predicate.go, not a JSON blob for a stored procedure.
+	if len(fields) != 1 || fields[0].Field != "shot_size" || fields[0].Operator != "eq" || fields[0].Value != "wide" {
+		t.Fatalf("unexpected field predicates: %#v", fields)
 	}
 	if tags != nil {
 		t.Fatalf("tag jsonb predicates are retired; got %s", tags)

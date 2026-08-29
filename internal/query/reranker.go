@@ -10,6 +10,23 @@ import (
 	"time"
 )
 
+// RerankCandidate is one scope-filtered candidate sent to the reranker. Only
+// the query text and the chunk content leave the process — never identifiers
+// a provider could echo back into results.
+type RerankCandidate struct {
+	ID   string
+	Text string
+}
+
+// Reranker reorders the top fused candidates. Implementations must return one
+// score per candidate in candidate order or an error; the caller then keeps
+// the RRF order and marks the response degraded (doc §10.5).
+type Reranker interface {
+	Rerank(ctx context.Context, query string, candidates []RerankCandidate) ([]float64, error)
+}
+
+// HTTPReranker calls a deployment-side reranking endpoint. Protocol support:
+// aliyun ({"model","input"}) and the generic {"query","candidates"} shape.
 type HTTPReranker struct {
 	Endpoint     string
 	Token        string
@@ -82,6 +99,9 @@ func (r HTTPReranker) Rerank(ctx context.Context, query string, candidates []Rer
 		return nil, err
 	}
 	if len(raw.Scores) > 0 {
+		if len(raw.Scores) != len(candidates) {
+			return nil, fmt.Errorf("reranker returned %d scores for %d candidates", len(raw.Scores), len(candidates))
+		}
 		return raw.Scores, nil
 	}
 	results := raw.Results

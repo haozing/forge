@@ -40,6 +40,9 @@ import (
 	"agentchunzhi/internal/store"
 	"agentchunzhi/internal/tag"
 	"agentchunzhi/internal/workspace"
+
+	"github.com/riverqueue/river"
+	"github.com/riverqueue/river/riverdriver/riverpgxv5"
 )
 
 func main() {
@@ -130,12 +133,31 @@ func main() {
 	if semanticAvailable && embeddings != nil {
 		manifestFingerprint = retrieval.ManifestFingerprint(embeddings.Manifest())
 	}
+	registry := retrieval.RegistryFromConfig(cfg)
+	registeredManifests, err := registry.RegisteredManifests()
+	if err != nil {
+		log.Fatalf("retrieval manifest registry startup failed: %v", err)
+	}
+	// Insert-only River client: the API enqueues retrieval rebuild backfill
+	// jobs while the worker process runs the handlers.
+	rebuildQueue, err := river.NewClient(riverpgxv5.New(db.Pool), &river.Config{})
+	if err != nil {
+		log.Fatalf("retrieval rebuild queue startup failed: %v", err)
+	}
 	var reranker query.Reranker
 	if cfg.RerankerEndpoint != "" {
 		reranker = query.HTTPReranker{Endpoint: cfg.RerankerEndpoint, Token: cfg.RerankerToken, ModelVersion: cfg.RerankerModelVersion, Protocol: cfg.RerankerProtocol, Timeout: time.Second}
 	}
 	scopeResolver := authz.ScopeResolver{Store: db}
-	queryService := query.Service{Store: db, Embeddings: embeddings, Reranker: reranker, CursorSecret: cfg.SearchCursorSecret}
+	queryService := query.Service{
+		Store:           db,
+		Embeddings:      embeddings,
+		Reranker:        reranker,
+		CursorSecret:    cfg.SearchCursorSecret,
+		QueryHashSecret: cfg.QueryHashSecret,
+		SessionTTL:      cfg.RetrievalSessionTTL,
+		QueryTimeout:    cfg.RetrievalQueryTimeout,
+	}
 	ragRuntime := agentruntime.RAGRuntime{
 		Models: modelRegistry,
 		Retriever: agentruntime.QueryKnowledgeRetriever{
@@ -178,6 +200,17 @@ func main() {
 		OrganizationService:  organization.Service{Store: db, Events: &events},
 		TagService:           tag.Service{Store: db, Events: &events},
 		FacetService:         tag.FacetService{Store: db},
+		// Phase 3 retrieval operations: profiles (list via the repository,
+		// lifecycle via the service) and rebuild batches.
+		RetrievalProfiles: retrievalProfileAdapter{
+			service: retrieval.ProfileService{
+				Store:              db,
+				Manifests:          registeredManifests,
+				DefaultManifestKey: registry.ManifestKey,
+			},
+			repo: retrieval.ProfileRepository{Store: db},
+		},
+		RetrievalRebuilds: retrieval.RebuildService{Store: db, Queue: rebuildQueue},
 		InvitationService: &organization.InvitationService{
 			Store: db, Events: &events, Cipher: deliveryCipher,
 			KeyVersion: deliveryKeyVersion, BaseURL: cfg.PublicAppBaseURL,
@@ -194,6 +227,8 @@ func main() {
 		// the query/httpapi work package).
 		SemanticAvailable:   semanticAvailable,
 		ManifestFingerprint: manifestFingerprint,
+		SearchCursorSecret:  cfg.SearchCursorSecret,
+		QueryHashSecret:     cfg.QueryHashSecret,
 	}
 	server := &http.Server{
 		Addr:              cfg.HTTPAddr,
@@ -217,4 +252,23 @@ func main() {
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		log.Printf("api shutdown failed: %v", err)
 	}
+}
+
+// retrievalProfileAdapter joins the profile lifecycle service with the read
+// repository behind the single httpapi.RetrievalProfileService interface.
+type retrievalProfileAdapter struct {
+	service retrieval.ProfileService
+	repo    retrieval.ProfileRepository
+}
+
+func (a retrievalProfileAdapter) ListProfiles(ctx context.Context, organizationID string) ([]retrieval.Profile, error) {
+	return a.repo.ListProfiles(ctx, organizationID)
+}
+
+func (a retrievalProfileAdapter) Create(ctx context.Context, organizationID, manifestKey, createdBy string) (retrieval.Profile, error) {
+	return a.service.Create(ctx, organizationID, manifestKey, createdBy)
+}
+
+func (a retrievalProfileAdapter) Activate(ctx context.Context, organizationID, profileID, activatedBy string) (retrieval.Profile, error) {
+	return a.service.Activate(ctx, organizationID, profileID, activatedBy)
 }

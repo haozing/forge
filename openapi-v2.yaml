@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: AgentChunzhi v2 API
-  version: 2.0.0-phase2
+  version: 2.0.0-phase3
   description: |
     唯一 v2 契约。入口族：
     - /api/v2/... 成员会话和工作区管理 API
@@ -10,6 +10,10 @@ info:
     阶段 0 冻结全局组件与核心资源名；未实现的领域只冻结资源命名，不注册假 handler。
     阶段 1 增补 sessions、me、preferences、password-resets、organization 与 workspace 治理/成员/邀请路径。
     阶段 2 增补 tags、tag-facets 与 /api/open/v2/hooks/assets（tag_keys）；AssetDraft 支持 tag_ids。
+    阶段 3 增补统一查询（成员工作区/组织/OpenAPI query、citation validate）、投影运维
+    （profiles/activate、workspace/organization retrieval status 与 rebuilds）与查询执行审计
+    （query-executions）；退役 /api/frontend/.../query|index|query-audit|search/suggestions 与
+    /api/open/v1/query（见 docs/route-retirement-ledger.md）。
 servers:
   - url: /
 tags:
@@ -1556,6 +1560,373 @@ paths:
                       replayed: { type: boolean }
                   - $ref: '#/components/schemas/Envelope'
         '422': { $ref: '#/components/responses/Error' }
+  /api/v2/workspaces/{workspaceId}/query:
+    post:
+      tags: [query]
+      operationId: executeWorkspaceQuery
+      description: 工作区成员统一查询（ForWorkspaceMember）。mode 只接受 structured/fulltext/semantic/hybrid，无 lexical 别名
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/QueryRequest'
+      responses:
+        '200':
+          description: 查询结果（快照分页）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/QueryResponse'
+                  - $ref: '#/components/schemas/Envelope'
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '410': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+  /api/v2/organization/query:
+    post:
+      tags: [query]
+      operationId: executeOrganizationQuery
+      description: 组织级已发布内容查询（ForOrganizationMember；只允许 organization/public visibility）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/QueryRequest'
+      responses:
+        '200':
+          description: 查询结果
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/QueryResponse'
+                  - $ref: '#/components/schemas/Envelope'
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+  /api/open/v2/query:
+    post:
+      tags: [query]
+      operationId: executeOpenQuery
+      description: 技术身份 API Key 查询（ForOpenAPI；channels.open_api.enabled 且 key 携带 query.execute）
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/QueryRequest'
+      responses:
+        '200':
+          description: 查询结果
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/QueryResponse'
+                  - $ref: '#/components/schemas/Envelope'
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+  /api/open/v2/references/validate:
+    post:
+      tags: [query]
+      operationId: validateReferenceCitations
+      description: 校验 query 返回的 opaque citation_id；全部匹配返回 validated 列表，任一失败返回 404
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [citation_refs]
+              properties:
+                citation_refs:
+                  type: array
+                  maxItems: 50
+                  items: { type: string }
+      responses:
+        '200':
+          description: 全部引用有效
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    properties:
+                      validated:
+                        type: array
+                        items: { $ref: '#/components/schemas/ValidatedReference' }
+                      rejected_count: { type: integer }
+                  - $ref: '#/components/schemas/Envelope'
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+  /api/v2/organization/retrieval/profiles:
+    get:
+      tags: [query]
+      operationId: listRetrievalProfiles
+      description: 组织投影 profile 列表（organization.manage）
+      responses:
+        '200':
+          description: profile 列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/RetrievalProfile' }
+                  - $ref: '#/components/schemas/Envelope'
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+    post:
+      tags: [query]
+      operationId: createRetrievalProfile
+      description: 新建 warming profile；任何 ABI 改动创建新 profile，不存在 update（organization.manage + Idempotency-Key）
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [manifest_key]
+              properties:
+                manifest_key: { type: string }
+      responses:
+        '201':
+          description: 已创建（warming）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/RetrievalProfile'
+                  - $ref: '#/components/schemas/Envelope'
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+  /api/v2/organization/retrieval/profiles/{profileId}/activate:
+    post:
+      tags: [query]
+      operationId: activateRetrievalProfile
+      description: 激活 warming profile；覆盖未达标返回 409 profile_not_ready（organization.manage + Idempotency-Key）
+      parameters:
+        - name: profileId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: 激活后的 profile
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/RetrievalProfile'
+                  - $ref: '#/components/schemas/Envelope'
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/v2/workspaces/{workspaceId}/retrieval/status:
+    get:
+      tags: [query]
+      operationId: getWorkspaceRetrievalStatus
+      description: 工作区投影状态聚合计数（workspace admin；不返回内容）
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+      responses:
+        '200':
+          description: 聚合状态
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    properties:
+                      workspace_id: { type: string, format: uuid }
+                      run_counts:
+                        type: object
+                        additionalProperties: { type: integer }
+                      active_profile:
+                        $ref: '#/components/schemas/RetrievalProfile'
+                  - $ref: '#/components/schemas/Envelope'
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+  /api/v2/workspaces/{workspaceId}/retrieval/rebuilds:
+    post:
+      tags: [query]
+      operationId: createWorkspaceRetrievalRebuild
+      description: 触发工作区范围 rebuild（workspace admin + Idempotency-Key）
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '202':
+          description: 已排队的 rebuild 批次
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/RetrievalRebuild'
+                  - $ref: '#/components/schemas/Envelope'
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/v2/workspaces/{workspaceId}/retrieval/rebuilds/{rebuildId}:
+    get:
+      tags: [query]
+      operationId: getWorkspaceRetrievalRebuild
+      description: 工作区 rebuild 批次详情（workspace admin）
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - name: rebuildId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: rebuild 批次
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/RetrievalRebuild'
+                  - $ref: '#/components/schemas/Envelope'
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+  /api/v2/organization/retrieval/rebuilds:
+    post:
+      tags: [query]
+      operationId: createOrganizationRetrievalRebuild
+      description: 触发组织范围 rebuild（organization.manage + Idempotency-Key）
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '202':
+          description: 已排队的 rebuild 批次（仅聚合计数）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/RetrievalRebuild'
+                  - $ref: '#/components/schemas/Envelope'
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/v2/organization/retrieval/rebuilds/{rebuildId}:
+    get:
+      tags: [query]
+      operationId: getOrganizationRetrievalRebuild
+      description: 组织 rebuild 批次详情；无 membership 的 org admin 只见聚合计数
+      parameters:
+        - name: rebuildId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: rebuild 批次
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/RetrievalRebuild'
+                  - $ref: '#/components/schemas/Envelope'
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+  /api/v2/workspaces/{workspaceId}/query-executions:
+    get:
+      tags: [query]
+      operationId: listWorkspaceQueryExecutions
+      description: 工作区查询执行审计（audit.read，仅 execution_workspaces 命中的 workspace；不含查询/过滤明文）
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+      responses:
+        '200':
+          description: 执行列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/QueryExecution' }
+                  - $ref: '#/components/schemas/Envelope'
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+  /api/v2/organization/query-executions:
+    get:
+      tags: [query]
+      operationId: listOrganizationQueryExecutions
+      description: 组织查询执行审计（仅 organization admin；不展示查询/过滤明文）
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+      responses:
+        '200':
+          description: 执行列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/QueryExecution' }
+                  - $ref: '#/components/schemas/Envelope'
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+  /api/v2/query-executions/{executionId}:
+    get:
+      tags: [query]
+      operationId: getQueryExecution
+      description: 单条执行详情（固定阶段耗时、模型 identity、error code、request id）
+      parameters:
+        - name: executionId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: 执行详情
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/QueryExecution'
+                  - $ref: '#/components/schemas/Envelope'
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+
 components:
   responses:
     Error:
@@ -1613,6 +1984,190 @@ components:
       required: true
       schema: { type: string }
   schemas:
+    QueryRequest:
+      type: object
+      properties:
+        query:
+          type: string
+          description: 全文类 mode 必填，trim 后最多 1000 code point；structured 必须为空
+        mode:
+          type: string
+          enum: [structured, fulltext, semantic, hybrid]
+        resource_model_ids:
+          type: array
+          maxItems: 50
+          items: { type: string, format: uuid }
+        visibility:
+          type: array
+          items:
+            type: string
+            enum: [workspace, organization, public]
+          description: 只能缩小 scope，超出返回 422
+        tags_any:
+          type: array
+          maxItems: 50
+          items: { type: string }
+        tags_all:
+          type: array
+          maxItems: 50
+          items: { type: string }
+        tags_none:
+          type: array
+          maxItems: 50
+          items: { type: string }
+        field_filters:
+          type: array
+          maxItems: 40
+          items: { $ref: '#/components/schemas/FieldFilter' }
+        origins:
+          type: array
+          items:
+            type: string
+            enum: [human, imported, ai_generated, ai_assisted]
+        confirmation_statuses:
+          type: array
+          items:
+            type: string
+            enum: [unconfirmed, human_confirmed]
+        published_after: { type: string, format: date-time, nullable: true }
+        published_before: { type: string, format: date-time, nullable: true }
+        top_k: { type: integer, minimum: 1, maximum: 50, default: 20 }
+        cursor: { type: string, nullable: true }
+    FieldFilter:
+      type: object
+      required: [resource_model_id, field, operator]
+      properties:
+        resource_model_id: { type: string, format: uuid }
+        field: { type: string }
+        operator:
+          type: string
+          enum: [eq, neq, in, gt, gte, lt, lte, exists, contains, contains_any, contains_all]
+        value: {}
+    QueryResponse:
+      type: object
+      properties:
+        requested_mode: { type: string, enum: [structured, fulltext, semantic, hybrid] }
+        executed_mode: { type: string, enum: [structured, fulltext, semantic, hybrid] }
+        ranking_method: { type: string, enum: [structured, fulltext, semantic, rrf, rerank] }
+        degraded: { type: boolean }
+        degradation_reasons:
+          type: array
+          items:
+            type: string
+            enum: [semantic_provider_unavailable, semantic_projection_incomplete, fulltext_unavailable, reranker_unavailable]
+        session_id: { type: string, format: uuid }
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/QueryItem' }
+        page:
+          type: object
+          properties:
+            next_cursor: { type: string, nullable: true }
+            has_more: { type: boolean }
+        index:
+          type: object
+          nullable: true
+          description: 只对全文类 mode 返回
+          properties:
+            profile_generation: { type: integer }
+            indexed_through: { type: string, format: date-time, nullable: true }
+            lag_seconds: { type: number }
+    QueryItem:
+      type: object
+      properties:
+        asset_id: { type: string, format: uuid }
+        asset_version_id: { type: string, format: uuid }
+        workspace_id: { type: string, format: uuid }
+        resource_model_id: { type: string, format: uuid }
+        title: { type: string }
+        summary: { type: string }
+        visibility: { type: string, enum: [workspace, organization, public] }
+        origin: { type: string }
+        confirmation_status: { type: string }
+        published_at: { type: string, format: date-time, nullable: true }
+        tags:
+          type: array
+          items: { $ref: '#/components/schemas/TagSummary' }
+        score: { type: number, nullable: true }
+        citation: { $ref: '#/components/schemas/Citation' }
+    Citation:
+      type: object
+      properties:
+        citation_id:
+          type: string
+          description: 服务端 opaque CitationRef（HMAC），不是可拼接 UUID
+        source_type: { type: string }
+        source_locator: { type: object }
+        char_start: { type: integer }
+        char_end: { type: integer }
+        excerpt: { type: string }
+        source_checksum: { type: string }
+        chunk_checksum: { type: string }
+        canonicalizer_version: { type: string }
+    ValidatedReference:
+      type: object
+      properties:
+        citation_ref: { type: string }
+        asset_id: { type: string, format: uuid }
+        asset_version_id: { type: string, format: uuid }
+    RetrievalProfile:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        generation: { type: integer }
+        manifest_key: { type: string }
+        canonicalizer_version: { type: string }
+        chunker_version: { type: string }
+        tokenizer_version: { type: string }
+        semantic_enabled: { type: boolean }
+        embedding_model: { type: string }
+        embedding_model_version: { type: string }
+        embedding_dimensions: { type: integer }
+        status: { type: string, enum: [warming, active, retired, failed] }
+        revision: { type: integer }
+        created_at: { type: string, format: date-time }
+        activated_at: { type: string, format: date-time }
+    RetrievalRebuild:
+      type: object
+      description: 聚合计数，不含资产内容
+      properties:
+        id: { type: string, format: uuid }
+        scope_type: { type: string, enum: [organization, workspace, resource_model, asset] }
+        scope_id: { type: string }
+        workspace_id: { type: string, format: uuid }
+        reason: { type: string, enum: [profile_warming, manual, policy_changed, repair] }
+        status: { type: string, enum: [queued, running, succeeded, partially_failed, failed, cancelled] }
+        total_count: { type: integer }
+        queued_count: { type: integer }
+        ready_count: { type: integer }
+        degraded_count: { type: integer }
+        failed_count: { type: integer }
+        requested_at: { type: string, format: date-time }
+        completed_at: { type: string, format: date-time }
+    QueryExecution:
+      type: object
+      description: 查询执行审计；不包含查询/过滤明文
+      properties:
+        id: { type: string, format: uuid }
+        subject_kind: { type: string }
+        channel: { type: string, enum: [workspace, agent, open_api, public_site] }
+        requested_mode: { type: string }
+        executed_mode: { type: string }
+        ranking_method: { type: string }
+        status: { type: string, enum: [started, succeeded, failed, interrupted] }
+        degraded: { type: boolean }
+        degradation_reasons:
+          type: array
+          items: { type: string }
+        resource_model_count: { type: integer }
+        result_count: { type: integer }
+        stage_latency_ms: { type: object, additionalProperties: { type: number } }
+        error_code: { type: string }
+        embedding_model_identity: { type: string }
+        reranker_model_identity: { type: string }
+        started_at: { type: string, format: date-time }
+        completed_at: { type: string, format: date-time }
+
     Envelope:
       type: object
       properties:

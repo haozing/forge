@@ -102,13 +102,16 @@ func processAssetDeletion(ctx context.Context, tx pgx.Tx, organizationID, worksp
 	`, organizationID, assetID); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, `UPDATE retrieval.chunk_embeddings SET status = 'deleted', updated_at = now() WHERE chunk_id IN (SELECT id FROM retrieval.chunks WHERE organization_id = $1::uuid AND asset_id = $2::uuid)`, organizationID, assetID); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(ctx, `UPDATE retrieval.chunks SET status = 'deleted', search_text = '', content = '', updated_at = now() WHERE organization_id = $1::uuid AND asset_id = $2::uuid`, organizationID, assetID); err != nil {
-		return err
-	}
 	if _, err := tx.Exec(ctx, `UPDATE retrieval.projection_runs SET status = 'stale', updated_at = now() WHERE organization_id = $1::uuid AND asset_version_id IN (SELECT id FROM asset.asset_versions WHERE asset_id = $2::uuid) AND status <> 'stale'`, organizationID, assetID); err != nil {
+		return err
+	}
+	// Phase 3 retrieval baseline: chunk/embedding rows have no status column
+	// any more. Marking the runs stale first lifts the serving immutability
+	// trigger, then the rows are physically reclaimed (embeddings cascade).
+	if _, err := tx.Exec(ctx, `DELETE FROM retrieval.chunk_embeddings WHERE organization_id = $1::uuid AND chunk_id IN (SELECT id FROM retrieval.chunks WHERE organization_id = $1::uuid AND asset_id = $2::uuid)`, organizationID, assetID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM retrieval.chunks WHERE organization_id = $1::uuid AND asset_id = $2::uuid`, organizationID, assetID); err != nil {
 		return err
 	}
 	return nil

@@ -279,16 +279,18 @@ func (s MemberService) ListPage(ctx context.Context, principal auth.Principal, w
 		where = append(where, "(lower(v.title) LIKE "+arg(pattern)+" OR lower(v.markdown) LIKE "+arg(pattern)+")")
 	}
 	if len(input.Filters) > 0 {
-		predicatesRaw, _, err := normalizeMemberFilters(input.Filters, nil)
+		predicates, _, err := normalizeMemberFilters(input.Filters, nil)
 		if err != nil {
 			return MemberAssetPage{}, err
 		}
-		predicates := predicatesRaw
+		params := &predicateParams{args: args}
+		fragment, err := compileFieldPredicatesSQL(params, predicates, "v.fields")
 		if err != nil {
 			return MemberAssetPage{}, err
 		}
-		if len(predicates) > 0 {
-			where = append(where, "retrieval.matches_field_filters(v.fields, "+arg(string(predicates))+")")
+		args = params.args
+		if fragment != "" {
+			where = append(where, fragment)
 		}
 	}
 	if input.ContainerID != "" {
@@ -1047,10 +1049,11 @@ func memberScopeVisibility(scope authz.Scope) string {
 	return access.VisibilityWorkspace
 }
 
-// normalizeMemberFilters converts the dynamic field-filter input into the
-// predicate array consumed by the fixed SQL function. Tags are no longer a
-// JSON field: relational tag filters arrive with the tag domain.
-func normalizeMemberFilters(filters map[string]any, directTags []string) ([]byte, []byte, error) {
+// normalizeMemberFilters converts the dynamic field-filter input into typed
+// predicates; internal/asset/field_predicate.go renders them as parameterized
+// SQL. Tags are no longer a JSON field: relational tag filters arrive with the
+// tag domain.
+func normalizeMemberFilters(filters map[string]any, directTags []string) ([]fieldPredicate, []byte, error) {
 	_ = directTags
 	if len(filters) == 0 {
 		return nil, nil, nil
@@ -1059,7 +1062,7 @@ func normalizeMemberFilters(filters map[string]any, directTags []string) ([]byte
 	if len(fields) == 0 {
 		return nil, nil, nil
 	}
-	predicates := make([]map[string]any, 0)
+	predicates := make([]fieldPredicate, 0)
 	for field, rawOperations := range fields {
 		operations, err := normalizeAssetPredicate(field, rawOperations)
 		if err != nil {
@@ -1070,16 +1073,15 @@ func normalizeMemberFilters(filters map[string]any, directTags []string) ([]byte
 	if len(predicates) == 0 {
 		return nil, nil, nil
 	}
-	raw, err := json.Marshal(predicates)
-	return raw, nil, err
+	return predicates, nil, nil
 }
 
-func normalizeAssetPredicate(field string, rawOperations any) ([]map[string]any, error) {
+func normalizeAssetPredicate(field string, rawOperations any) ([]fieldPredicate, error) {
 	operations, ok := rawOperations.(map[string]any)
 	if !ok {
 		return nil, ErrInvalidInput
 	}
-	predicates := make([]map[string]any, 0, len(operations))
+	predicates := make([]fieldPredicate, 0, len(operations))
 	for operator, rawValue := range operations {
 		switch operator {
 		case "eq", "neq", "in", "contains", "contains_any", "gte", "lte", "exists":
@@ -1091,7 +1093,7 @@ func normalizeAssetPredicate(field string, rawOperations any) ([]map[string]any,
 				return nil, ErrInvalidInput
 			}
 		}
-		predicates = append(predicates, map[string]any{"field": field, "operator": operator, "value": rawValue})
+		predicates = append(predicates, fieldPredicate{Field: field, Operator: operator, Value: rawValue})
 	}
 	if len(predicates) == 0 || len(predicates) > 8 {
 		return nil, ErrInvalidInput

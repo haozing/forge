@@ -119,7 +119,7 @@ CREATE TABLE integration.agent_sessions (
 CREATE INDEX agent_sessions_initiator_time_idx
     ON integration.agent_sessions (organization_id, initiator_user_id, created_at DESC);
 
-CREATE TABLE integration.agent_tool_invocations (
+CREATE TABLE integration.agent_run_tools (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     organization_id uuid NOT NULL REFERENCES organization.organizations(id),
     run_id uuid NOT NULL,
@@ -135,8 +135,8 @@ CREATE TABLE integration.agent_tool_invocations (
     UNIQUE (run_id, tool_call_id)
 );
 
-CREATE INDEX agent_tool_invocations_run_idx
-    ON integration.agent_tool_invocations (organization_id, run_id, created_at);
+CREATE INDEX agent_run_tools_run_idx
+    ON integration.agent_run_tools (organization_id, run_id, created_at);
 
 CREATE TABLE automation.jobs (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),

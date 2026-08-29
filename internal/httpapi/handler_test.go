@@ -52,8 +52,10 @@ func TestLegacyFulltextQueryRouteIsRemoved(t *testing.T) {
 	}
 }
 
+// Phase 3 retired /api/open/v1/query (see docs/route-retirement-ledger.md);
+// the unified surface lives at /api/open/v2/query.
 func TestUnifiedQueryRequiresAPIKey(t *testing.T) {
-	req := httptest.NewRequest(http.MethodPost, "/api/open/v1/query", strings.NewReader(`{"mode":"lexical","query":"hello"}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/open/v2/query", strings.NewReader(`{"mode":"hybrid","query":"hello"}`))
 	rec := httptest.NewRecorder()
 
 	NewHandler().ServeHTTP(rec, req)
@@ -63,14 +65,36 @@ func TestUnifiedQueryRequiresAPIKey(t *testing.T) {
 	}
 }
 
+func TestLegacyOpenQueryRouteIsRetired(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/api/open/v1/query", strings.NewReader(`{"mode":"lexical","query":"hello"}`))
+	rec := httptest.NewRecorder()
+
+	NewHandler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected status %d, got %d", http.StatusNotFound, rec.Code)
+	}
+}
+
 func TestUnifiedQueryRejectsUnavailableMode(t *testing.T) {
-	req := httptest.NewRequest(http.MethodPost, "/api/open/v1/query", strings.NewReader(`{"mode":"semantic","query":"hello"}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/open/v2/query", strings.NewReader(`{"mode":"semantic","query":"hello"}`))
 	rec := httptest.NewRecorder()
 
 	NewHandler().ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("authentication must run before mode validation, got %d", rec.Code)
+	}
+}
+
+func TestMemberQueryRouteRejectsUnknownFields(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/api/v2/workspaces/00000000-0000-4000-8000-000000000001/query", strings.NewReader(`{"mode":"hybrid","query":"hello","filters":{}}`))
+	rec := httptest.NewRecorder()
+
+	NewHandler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("authentication must run before body validation, got %d", rec.Code)
 	}
 }
 

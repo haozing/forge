@@ -15,12 +15,13 @@ func newRouter(deps Dependencies) *http.ServeMux {
 	registerV2AssetRoutes(deps, mux)
 	registerV2TagRoutes(deps, mux)
 	registerV2ReviewRoutes(deps, mux)
+	registerV2QueryRoutes(deps, mux)
 	registerOpenV2Routes(deps, mux)
 	registerPublicV2Routes(deps, mux)
 	registerLegacyModelRoutes(deps, mux)        // ledger: retire in phase 4-6
-	registerLegacyAssetRoutes(deps, mux)        // ledger: retire in phase 2
-	registerLegacyRetrievalRoutes(deps, mux)    // ledger: retire in phase 3
-	registerLegacyTransferRoutes(deps, mux)     // ledger: retire in phase 2
+	registerLegacyAssetRoutes(deps, mux)       // ledger: retire in phase 2
+	registerLegacyRetrievalRoutes(deps, mux)   // empty: retired in phase 3
+	registerLegacyTransferRoutes(deps, mux)    // ledger: retire in phase 2
 	registerLegacyReviewRoutes(deps, mux)       // empty: retired in phase 0
 	registerLegacyContainerRoutes(deps, mux)    // ledger: retire in phase 4-6
 	registerLegacyAutomationRoutes(deps, mux)   // ledger: retire in phase 4-6
@@ -243,14 +244,41 @@ func registerLegacyAssetRoutes(deps Dependencies, mux *http.ServeMux) {
 	mux.HandleFunc("/api/attachments/{attachmentId}/download", memberDownloadAttachment(deps))
 }
 
+// registerLegacyRetrievalRoutes is empty: the phase 3 retrieval surface
+// (/api/frontend/.../query|index|query-audit|search/suggestions and
+// /api/open/v1/query) retired once the unified v2 query routes passed their
+// contract; see docs/route-retirement-ledger.md.
 func registerLegacyRetrievalRoutes(deps Dependencies, mux *http.ServeMux) {
-	mux.HandleFunc("/api/frontend/workspaces/{workspaceId}/query", memberQuery(deps))
-	mux.HandleFunc("/api/frontend/workspaces/{workspaceId}/index/status", retrievalIndexStatus(deps))
-	mux.HandleFunc("/api/frontend/workspaces/{workspaceId}/index/rebuild", rebuildRetrievalIndex(deps))
-	mux.HandleFunc("/api/frontend/workspaces/{workspaceId}/query-audit", queryAuditLogs(deps))
-	mux.HandleFunc("/api/frontend/workspaces/{workspaceId}/search/suggestions", searchSuggestions(deps))
-	mux.HandleFunc("/api/frontend/assets/{assetId}/index/retry", retryAssetIndex(deps))
-	mux.HandleFunc("/api/open/v1/query", unifiedQueryR3(deps))
+	_ = deps
+	_ = mux
+}
+
+// registerV2QueryRoutes holds the phase 3 unified query surface: member and
+// OpenAPI query, projection profile/rebuild operations and the query
+// execution audit (doc §11).
+func registerV2QueryRoutes(deps Dependencies, mux *http.ServeMux) {
+	mux.HandleFunc("/api/v2/workspaces/{workspaceId}/query", v2WorkspaceQuery(deps))
+	mux.HandleFunc("/api/v2/organization/query", v2OrganizationQuery(deps))
+	mux.HandleFunc("/api/open/v2/query", v2OpenQuery(deps))
+	mux.HandleFunc("/api/open/v2/references/validate", v2OpenReferenceValidate(deps))
+
+	mux.HandleFunc("/api/v2/organization/retrieval/profiles", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			v2ListRetrievalProfiles(deps)(w, r)
+			return
+		}
+		v2CreateRetrievalProfile(deps)(w, r)
+	})
+	mux.HandleFunc("/api/v2/organization/retrieval/profiles/{profileId}/activate", v2ActivateRetrievalProfile(deps))
+	mux.HandleFunc("/api/v2/workspaces/{workspaceId}/retrieval/status", v2WorkspaceRetrievalStatus(deps))
+	mux.HandleFunc("/api/v2/workspaces/{workspaceId}/retrieval/rebuilds", v2WorkspaceRetrievalRebuild(deps))
+	mux.HandleFunc("/api/v2/workspaces/{workspaceId}/retrieval/rebuilds/{rebuildId}", v2WorkspaceRebuildGet(deps))
+	mux.HandleFunc("/api/v2/organization/retrieval/rebuilds", v2OrganizationRetrievalRebuilds(deps))
+	mux.HandleFunc("/api/v2/organization/retrieval/rebuilds/{rebuildId}", v2OrganizationRebuildGet(deps))
+
+	mux.HandleFunc("/api/v2/workspaces/{workspaceId}/query-executions", v2WorkspaceQueryExecutions(deps))
+	mux.HandleFunc("/api/v2/organization/query-executions", v2OrganizationQueryExecutions(deps))
+	mux.HandleFunc("/api/v2/query-executions/{executionId}", v2QueryExecution(deps))
 }
 
 func registerLegacyTransferRoutes(deps Dependencies, mux *http.ServeMux) {

@@ -2,7 +2,7 @@
 -- Retrieval v2 baseline (phase 3): projection profiles, projection runs and
 -- heads, immutable chunks and embeddings, rebuild batches, search sessions and
 -- query executions. Empty-database baseline: the R3 patch chain
--- (quality_rank / matches_field_filters / projection_configs / query_logs)
+-- (supersedes the legacy R3 helper objects, which are not part of this baseline)
 -- is intentionally gone; this script only CREATEs the final model.
 --
 -- Composite foreign keys follow the phase 0 convention: every child table
