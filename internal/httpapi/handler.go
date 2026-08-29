@@ -26,8 +26,10 @@ import (
 	"agentchunzhi/internal/container"
 	contentservice "agentchunzhi/internal/content"
 	"agentchunzhi/internal/conversation"
+	"agentchunzhi/internal/identity"
 	"agentchunzhi/internal/modelendpoint"
 	agentquery "agentchunzhi/internal/query"
+	"agentchunzhi/internal/organization"
 	"agentchunzhi/internal/resourcemodel"
 	"agentchunzhi/internal/review"
 	"agentchunzhi/internal/store"
@@ -61,6 +63,16 @@ type Dependencies struct {
 	ContainerService     container.Service
 	ConversationService  conversation.Service
 	AutomationService    automation.Service
+	// Phase 1 member identity and organization governance services.
+	OrganizationService organization.Service
+	InvitationService   *organization.InvitationService
+	IdentityService     *identity.Service
+	LoginThrottle       *auth.LoginThrottle
+	// TrustedProxyCIDRs vouches the proxies allowed to set X-Forwarded-For
+	// for rate-limit keys; AllowedOrigins drives the CSRF Origin policy.
+	TrustedProxyCIDRs []string
+	AllowedOrigins    []string
+	AppEnv            string
 }
 
 func NewHandler() http.Handler {
@@ -68,7 +80,12 @@ func NewHandler() http.Handler {
 }
 
 func NewHandlerWithDeps(deps Dependencies) http.Handler {
-	return withJSONDefaults(withRequestID(rateLimitMiddleware(frontendIdempotency(deps, newRouter(deps)))))
+	var handler http.Handler = frontendIdempotency(deps, newRouter(deps))
+	handler = rateLimitMiddleware(handler)
+	if len(deps.AllowedOrigins) > 0 {
+		handler = withOriginPolicy(deps.AllowedOrigins, handler)
+	}
+	return withJSONDefaults(withRequestID(handler))
 }
 
 type createAssetRequest struct {
@@ -2110,92 +2127,6 @@ func serveAttachmentDownload(deps Dependencies) func(http.ResponseWriter, *http.
 			return
 		}
 		outcome = "allowed"
-	}
-}
-
-func currentUser(service auth.SessionService) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
-			return
-		}
-		principal, err := service.Authenticate(r.Context(), r)
-		if err != nil {
-			writeError(w, http.StatusUnauthorized, "unauthorized")
-			return
-		}
-		writeJSON(w, http.StatusOK, loginResponse{
-			UserID:         principal.UserID,
-			OrganizationID: principal.OrganizationID,
-			UserType:       principal.UserType,
-		})
-	}
-}
-
-type loginRequest struct {
-	LoginName string `json:"login_name"`
-	Password  string `json:"password"`
-}
-
-type loginResponse struct {
-	UserID         string    `json:"user_id"`
-	OrganizationID string    `json:"organization_id"`
-	UserType       string    `json:"user_type"`
-	ExpiresAt      time.Time `json:"expires_at"`
-}
-
-func createSession(service auth.SessionService) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
-			return
-		}
-		var input loginRequest
-		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16*1024))
-		decoder.DisallowUnknownFields()
-		if err := decoder.Decode(&input); err != nil || input.LoginName == "" || input.Password == "" {
-			writeError(w, http.StatusUnprocessableEntity, "invalid_login_request")
-			return
-		}
-		session, err := service.Login(r.Context(), input.LoginName, input.Password)
-		if err != nil {
-			writeError(w, http.StatusUnauthorized, "invalid_credentials")
-			return
-		}
-		auth.SetSessionCookie(w, r, session)
-		writeJSON(w, http.StatusCreated, loginResponse{
-			UserID:         session.UserID,
-			OrganizationID: session.OrganizationID,
-			UserType:       session.UserType,
-			ExpiresAt:      session.ExpiresAt,
-		})
-	}
-}
-
-func deleteSession(service auth.SessionService) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodDelete {
-			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
-			return
-		}
-		if err := service.Logout(r.Context(), r); err != nil {
-			writeError(w, http.StatusInternalServerError, "logout_failed")
-			return
-		}
-		auth.ClearSessionCookie(w, r)
-		w.WriteHeader(http.StatusNoContent)
-	}
-}
-
-func sessionResource(service auth.SessionService) http.HandlerFunc {
-	create := createSession(service)
-	remove := deleteSession(service)
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost {
-			create(w, r)
-			return
-		}
-		remove(w, r)
 	}
 }
 

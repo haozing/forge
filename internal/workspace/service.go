@@ -71,6 +71,7 @@ type ActivityPage struct {
 
 type Summary struct {
 	ID                   string    `json:"id"`
+	Slug                 string    `json:"slug"`
 	Name                 string    `json:"name"`
 	Description          string    `json:"description"`
 	Role                 string    `json:"role"`
@@ -167,7 +168,7 @@ func (s Service) List(ctx context.Context, principal auth.Principal) ([]Summary,
 		return nil, err
 	}
 	rows, err := s.Store.Pool.Query(ctx, `
-		SELECT w.id::text, w.name, w.description, wm.role,
+		SELECT w.id::text, w.slug, w.name, w.description, wm.role,
 		       COALESCE(w.default_resource_model_id::text, ''),
 		       w.updated_at,
 		       (SELECT count(*) FROM content.conversations c
@@ -191,7 +192,7 @@ func (s Service) List(ctx context.Context, principal auth.Principal) ([]Summary,
 	items := make([]Summary, 0)
 	for rows.Next() {
 		var item Summary
-		if err := rows.Scan(&item.ID, &item.Name, &item.Description, &item.Role,
+		if err := rows.Scan(&item.ID, &item.Slug, &item.Name, &item.Description, &item.Role,
 			&item.DefaultResourceModel, &item.UpdatedAt,
 			&item.Counts.PendingConversations, &item.Counts.Documents,
 			&item.Counts.PendingReviews, &item.Counts.RunningTaskRuns); err != nil {
@@ -211,7 +212,7 @@ func (s Service) Get(ctx context.Context, principal auth.Principal, workspaceID 
 	}
 	var item Summary
 	err := s.Store.Pool.QueryRow(ctx, `
-		SELECT w.id::text, w.name, w.description, wm.role,
+		SELECT w.id::text, w.slug, w.name, w.description, wm.role,
 		       COALESCE(w.default_resource_model_id::text, ''),
 		       w.updated_at,
 		       (SELECT count(*) FROM content.conversations c WHERE c.organization_id = w.organization_id AND c.workspace_id = w.id AND c.status = 'active'),
@@ -221,7 +222,7 @@ func (s Service) Get(ctx context.Context, principal auth.Principal, workspaceID 
 		FROM content.workspaces w
 		JOIN content.workspace_members wm ON wm.organization_id = w.organization_id AND wm.workspace_id = w.id AND wm.user_id = $3::uuid
 		WHERE w.organization_id = $1::uuid AND w.id = $2::uuid AND w.status = 'active'
-	`, principal.OrganizationID, workspaceID, principal.UserID).Scan(&item.ID, &item.Name, &item.Description, &item.Role,
+	`, principal.OrganizationID, workspaceID, principal.UserID).Scan(&item.ID, &item.Slug, &item.Name, &item.Description, &item.Role,
 		&item.DefaultResourceModel, &item.UpdatedAt,
 		&item.Counts.PendingConversations, &item.Counts.Documents, &item.Counts.PendingReviews, &item.Counts.RunningTaskRuns)
 	if errors.Is(err, pgx.ErrNoRows) {

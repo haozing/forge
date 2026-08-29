@@ -1,11 +1,9 @@
 package httpapi
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -14,8 +12,6 @@ import (
 	agentquery "agentchunzhi/internal/query"
 	"github.com/jackc/pgx/v5"
 )
-
-
 
 func searchSuggestions(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -365,150 +361,5 @@ func deleteAutomationJobFinal(deps Dependencies) http.HandlerFunc {
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
-	}
-}
-
-type auditCursor struct {
-	CreatedAt string `json:"created_at"`
-	ID        string `json:"id"`
-}
-
-func auditLogsFinal(deps Dependencies) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
-			return
-		}
-		principal, ok := requireMemberSession(w, r, deps)
-		if !ok {
-			return
-		}
-		if deps.Store == nil || deps.Store.Pool == nil || deps.WorkspacePolicy == nil {
-			writeError(w, http.StatusInternalServerError, "authorization_unconfigured")
-			return
-		}
-		scope, err := deps.WorkspacePolicy.Require(r.Context(), principal, r.PathValue("workspaceId"), "", "audit.read")
-		if err != nil {
-			writeError(w, http.StatusForbidden, "audit_access_denied")
-			return
-		}
-		if scope.Role != "owner" && scope.Role != "admin" {
-			writeError(w, http.StatusForbidden, "audit_access_denied")
-			return
-		}
-		limit := 50
-		if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
-			parsed, parseErr := strconv.Atoi(raw)
-			if parseErr != nil || parsed < 1 || parsed > 100 {
-				writeError(w, http.StatusUnprocessableEntity, "invalid_limit")
-				return
-			}
-			limit = parsed
-		}
-		from, to := strings.TrimSpace(r.URL.Query().Get("from")), strings.TrimSpace(r.URL.Query().Get("to"))
-		if from != "" {
-			if _, err := time.Parse(time.RFC3339, from); err != nil {
-				writeError(w, http.StatusUnprocessableEntity, "invalid_from")
-				return
-			}
-		}
-		if to != "" {
-			if _, err := time.Parse(time.RFC3339, to); err != nil {
-				writeError(w, http.StatusUnprocessableEntity, "invalid_to")
-				return
-			}
-		}
-		object := strings.TrimSpace(r.URL.Query().Get("object"))
-		objectType, objectID := strings.TrimSpace(r.URL.Query().Get("object_type")), strings.TrimSpace(r.URL.Query().Get("object_id"))
-		if object != "" {
-			if agentquery.ValidUUID(object) {
-				objectID = object
-			} else {
-				objectType = object
-			}
-		}
-		if actor := strings.TrimSpace(r.URL.Query().Get("actor")); actor != "" && !agentquery.ValidUUID(actor) {
-			writeError(w, http.StatusUnprocessableEntity, "invalid_actor")
-			return
-		}
-		if objectID != "" && !agentquery.ValidUUID(objectID) {
-			writeError(w, http.StatusUnprocessableEntity, "invalid_object_id")
-			return
-		}
-		cursorTime, cursorID := "", ""
-		if raw := strings.TrimSpace(r.URL.Query().Get("cursor")); raw != "" {
-			decoded, decodeErr := base64.RawURLEncoding.DecodeString(raw)
-			var cursor auditCursor
-			if decodeErr != nil || json.Unmarshal(decoded, &cursor) != nil || !agentquery.ValidUUID(cursor.ID) {
-				writeError(w, http.StatusUnprocessableEntity, "invalid_cursor")
-				return
-			}
-			cursorTime, cursorID = cursor.CreatedAt, cursor.ID
-		}
-		rows, err := deps.Store.Pool.Query(r.Context(), `
-			SELECT al.id::text, COALESCE(au.id::text, ''), COALESCE(au.display_name, ''),
-			       COALESCE(iu.id::text, ''), COALESCE(iu.display_name, ''), al.action,
-			       COALESCE(al.resource_type, ''), COALESCE(al.resource_id::text, ''), al.result,
-			       al.metadata, al.created_at
-			FROM audit.audit_log al
-			LEFT JOIN identity.users au ON au.id = al.actor_user_id
-			LEFT JOIN identity.users iu ON iu.id = al.initiator_user_id
-			WHERE al.organization_id = $1::uuid
-			  AND (al.metadata->>'workspace_id' = $2::text OR (al.resource_type = 'asset' AND EXISTS (SELECT 1 FROM asset.assets a WHERE a.organization_id = al.organization_id AND a.id = al.resource_id AND a.workspace_id = $2::uuid)))
-			  AND ($3 = '' OR al.action = $3)
-			  AND ($4 = '' OR al.actor_user_id = NULLIF($4, '')::uuid)
-			  AND ($5 = '' OR al.resource_type = $5)
-			  AND ($6 = '' OR al.resource_id = NULLIF($6, '')::uuid)
-			  AND ($7 = '' OR al.created_at >= NULLIF($7, '')::timestamptz)
-			  AND ($8 = '' OR al.created_at <= NULLIF($8, '')::timestamptz)
-			  AND ($9 = '' OR (al.created_at, al.id) < (NULLIF($9, '')::timestamptz, NULLIF($10, '')::uuid))
-			ORDER BY al.created_at DESC, al.id DESC LIMIT $11`,
-			principal.OrganizationID, r.PathValue("workspaceId"), r.URL.Query().Get("action"), r.URL.Query().Get("actor"), objectType, objectID, from, to, cursorTime, cursorID, limit+1)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "audit_log_list_failed")
-			return
-		}
-		defer rows.Close()
-		type auditItem struct {
-			ID           string            `json:"id"`
-			Actor        map[string]string `json:"actor"`
-			Initiator    map[string]string `json:"initiator"`
-			Action       string            `json:"action"`
-			ResourceType string            `json:"resource_type"`
-			ResourceID   string            `json:"resource_id,omitempty"`
-			Result       string            `json:"result"`
-			Metadata     map[string]any    `json:"metadata"`
-			CreatedAt    time.Time         `json:"created_at"`
-		}
-		items := make([]auditItem, 0, limit+1)
-		for rows.Next() {
-			var item auditItem
-			var actorID, actorName, initiatorID, initiatorName string
-			var metadata []byte
-			if err := rows.Scan(&item.ID, &actorID, &actorName, &initiatorID, &initiatorName, &item.Action, &item.ResourceType, &item.ResourceID, &item.Result, &metadata, &item.CreatedAt); err != nil {
-				writeError(w, http.StatusInternalServerError, "audit_log_list_failed")
-				return
-			}
-			item.Actor = map[string]string{"id": actorID, "display_name": actorName}
-			item.Initiator = map[string]string{"id": initiatorID, "display_name": initiatorName}
-			item.Metadata = map[string]any{}
-			_ = json.Unmarshal(metadata, &item.Metadata)
-			items = append(items, item)
-		}
-		if err := rows.Err(); err != nil {
-			writeError(w, http.StatusInternalServerError, "audit_log_list_failed")
-			return
-		}
-		hasMore := len(items) > limit
-		if hasMore {
-			items = items[:limit]
-		}
-		response := map[string]any{"items": items, "has_more": hasMore}
-		if hasMore {
-			last := items[len(items)-1]
-			raw, _ := json.Marshal(auditCursor{CreatedAt: last.CreatedAt.UTC().Format(time.RFC3339Nano), ID: last.ID})
-			response["next_cursor"] = base64.RawURLEncoding.EncodeToString(raw)
-		}
-		writeJSON(w, http.StatusOK, response)
 	}
 }

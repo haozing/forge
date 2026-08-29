@@ -12,8 +12,9 @@ func TestFrontendContractRoutesRequireSession(t *testing.T) {
 		method string
 		path   string
 	}{
-		{"workspaces", http.MethodGet, "/api/frontend/workspaces"},
-		{"workspace", http.MethodGet, "/api/frontend/workspaces/00000000-0000-4000-8000-000000000001"},
+		// "workspaces" and "workspace" collection/resource routes retired in
+		// phase 1 (route ledger): they must now answer 404 and are covered by
+		// TestPhase1LegacyRoutesAreRetired.
 		{"models", http.MethodGet, "/api/frontend/workspaces/00000000-0000-4000-8000-000000000001/resource-models"},
 		{"model", http.MethodGet, "/api/frontend/resource-models/00000000-0000-4000-8000-000000000001"},
 		{"model versions", http.MethodGet, "/api/frontend/resource-models/00000000-0000-4000-8000-000000000001/versions"},

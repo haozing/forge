@@ -10,9 +10,9 @@
 | `/api/frontend/reviews/{reviewId}/approve`、`/reject` | 阶段 0 | `/api/v2/workspaces/{workspaceId}/publication-requests/{requestId}/approve`、`/reject` | openapi-v2.yaml approve/rejectPublicationRequest | retired | 同上 |
 | `/api/frontend/reviews/batch` | 阶段 0 | `/api/v2/workspaces/{workspaceId}/publication-requests/batch` | openapi-v2.yaml batchPublicationRequests | retired | 同上 |
 | `/api/frontend/assets/{assetId}/submit-review` | 阶段 0 | `/api/v2/workspaces/{workspaceId}/publication-requests` | openapi-v2.yaml submitPublicationRequest | retired | submit 语义并入 PublicationRequest 提交（携带 draft_revision） |
-| `/api/me` | 阶段 1 | `/api/v2/me` | Identity contract test | planned | 待 S1-6/S1-7 |
-| `/api/sessions` | 阶段 1 | `/api/v2/sessions...` | Session/revocation contract test | planned | 待 S1-1/S1-7 |
-| `/api/frontend/.../workspaces`（成员、邀请、设置、偏好） | 阶段 1 | `/api/v2/workspaces...`、`/api/v2/organization...` | Workspace/organization OpenAPI contract test | planned | 待 S1-3/S1-7 |
+| `/api/me` | 阶段 1 | `/api/v2/me` | Identity contract test | retired | S1-7: /api/v2/me（GET/PATCH，If-Match revision）+ /api/v2/sessions + OpenAPI；旧路由 404（TestPhase1LegacyRoutesAreRetired） |
+| `/api/sessions` | 阶段 1 | `/api/v2/sessions...` | Session/revocation contract test | retired | S1-7: /api/public/v2/sessions（登录）+ /api/v2/sessions、/api/v2/sessions/current、/api/v2/sessions/{sessionId} + OpenAPI；旧路由 404 |
+| `/api/frontend/.../workspaces`（成员、邀请、设置、偏好） | 阶段 1 | `/api/v2/workspaces...`、`/api/v2/organization...` | Workspace/organization OpenAPI contract test | retired | S1-7: /api/v2/organization（profile/members/invitations/workspaces）、/api/v2/workspaces（collection/resource/members/leave/eligible-members/invitations/summary）+ /api/frontend/me/preferences → /api/v2/me/preferences + OpenAPI；旧路由 404 |
 | `/api/frontend/...` 标签参数和标签接口 | 阶段 2 | `/api/v2/workspaces/{workspaceId}/tags...` | Tag/filter contract test | planned | 待 S2-9 |
 | `/api/open/v1` Webhook 标签字段 | 阶段 2 | `/api/open/v2` Webhook `tag_keys` | Webhook request contract test | planned | 待 S2-7/S2-9 |
 | `/api/frontend/workspaces/{workspaceId}/query` | 阶段 3 | `/api/v2/workspaces/{workspaceId}/query` | Unified query contract test | planned | 待 S3-11 |

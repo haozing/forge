@@ -19,6 +19,7 @@ import (
 	"agentchunzhi/internal/deletion"
 	"agentchunzhi/internal/eventing"
 	"agentchunzhi/internal/modelendpoint"
+	"agentchunzhi/internal/notification"
 	"agentchunzhi/internal/objectstore"
 	"agentchunzhi/internal/query"
 	"agentchunzhi/internal/resourcemodel"
@@ -34,6 +35,9 @@ import (
 
 func main() {
 	cfg := config.Load()
+	if err := cfg.Validate(); err != nil {
+		log.Fatalf("worker configuration invalid: %v", err)
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -72,6 +76,51 @@ func main() {
 	if err != nil {
 		log.Fatalf("worker event store startup failed: %v", err)
 	}
+	// Phase 1 email delivery worker: claim, decrypt, render and send. Payload
+	// encryption uses the same key ring as the API.
+	deliveryKeys, currentKeyVersion, err := cfg.EmailKeyRing()
+	if err != nil {
+		log.Fatalf("worker email delivery key ring startup failed: %v", err)
+	}
+	deliveryCipher, err := notification.NewCipher(notification.KeyRing{Keys: deliveryKeys, Current: currentKeyVersion})
+	if err != nil {
+		log.Fatalf("worker email delivery cipher startup failed: %v", err)
+	}
+	var mailer notification.Mailer
+	switch cfg.MailerProvider {
+	case config.MailerProviderSMTP:
+		mailer = notification.SMTPMailer{
+			Host: cfg.SMTPHost, Port: cfg.SMTPPort, Username: cfg.SMTPUsername,
+			Password: cfg.SMTPPassword, From: cfg.MailFrom, Timeout: 15 * time.Second,
+		}
+	default:
+		log.Printf("MAILER_PROVIDER=%s: worker captures emails in memory, never delivers", cfg.MailerProvider)
+		mailer = &notification.CaptureMailer{}
+	}
+	mailWorker := notification.Worker{
+		Store:    db,
+		Cipher:   deliveryCipher,
+		Mailer:   mailer,
+		Renderer: notification.NewTextTemplateRenderer(),
+		WorkerID: "mailer",
+	}
+	go mailWorker.Run(ctx, 5*time.Second)
+	go func() {
+		ticker := time.NewTicker(60 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if reclaimed, err := notification.ReclaimExpired(ctx, db, 20); err != nil {
+					log.Printf("email delivery reclaim failed: %v", err)
+				} else if reclaimed > 0 {
+					log.Printf("email delivery reclaimed %d expired leases", reclaimed)
+				}
+			}
+		}
+	}()
 	var objects objectstore.ObjectStore
 	var asrProvider transcription.Provider
 	if strings.TrimSpace(cfg.OSSRegion) != "" && strings.TrimSpace(cfg.OSSBucket) != "" {
@@ -134,13 +183,14 @@ func main() {
 	river.AddWorker(workers, &worker.RecoverPendingDeliveriesWorker{Store: db, Limit: 100})
 	river.AddWorker(workers, &worker.RecoverAutomationAttemptsWorker{Service: automation.Service{Store: db}, Limit: 100})
 	river.AddWorker(workers, &worker.BackgroundJobsWorker{
-		Migrations: resourcemodel.MigrationProcessor{Store: db, Events: events},
-		Transfers:  asset.TransferProcessor{Store: db, Events: events, Objects: objects, ObjectPrefix: cfg.OSSPrefix},
-		Deletions:  deletion.Processor{Store: db},
-		Automation: automation.Service{Store: db},
-		Operations: automation.OperationProcessor{Store: db, Events: events, Transfers: &asset.TransferProcessor{Store: db, Events: events, Objects: objects, ObjectPrefix: cfg.OSSPrefix}, Workflows: workflows.Executor{Registry: workflowRegistry}, Preparation: preparation, ReAct: reactProcessor},
-		WorkerID:   fmt.Sprintf("background-%d", os.Getpid()),
-		Limit:      20,
+		Migrations:  resourcemodel.MigrationProcessor{Store: db, Events: events},
+		Transfers:   asset.TransferProcessor{Store: db, Events: events, Objects: objects, ObjectPrefix: cfg.OSSPrefix},
+		Deletions:   deletion.Processor{Store: db},
+		Automation:  automation.Service{Store: db},
+		Operations:  automation.OperationProcessor{Store: db, Events: events, Transfers: &asset.TransferProcessor{Store: db, Events: events, Objects: objects, ObjectPrefix: cfg.OSSPrefix}, Workflows: workflows.Executor{Registry: workflowRegistry}, Preparation: preparation, ReAct: reactProcessor},
+		Attachments: attachment.ScanProcessor{Store: db, Objects: objects},
+		WorkerID:    fmt.Sprintf("background-%d", os.Getpid()),
+		Limit:       20,
 	})
 	riverClient, err := river.NewClient(riverpgxv5.New(db.Pool), &river.Config{
 		Queues: map[string]river.QueueConfig{

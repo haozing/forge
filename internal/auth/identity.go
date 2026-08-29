@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/http"
 	"time"
 	"unicode/utf8"
 
@@ -206,4 +207,27 @@ func (s SessionService) TouchSession(ctx context.Context, sessionID string) {
 		UPDATE identity.sessions SET last_seen_at = now()
 		WHERE id = $1::uuid AND last_seen_at < now() - make_interval(secs => $2)
 	`, sessionID, LastSeenThrottle.Seconds())
+}
+
+// CurrentSessionID resolves the session id behind the request cookie without
+// loading the principal again. Expired or revoked sessions answer
+// ErrUnauthenticated.
+func (s SessionService) CurrentSessionID(ctx context.Context, r *http.Request) (string, error) {
+	if s.Store == nil || s.Store.Pool == nil {
+		return "", ErrUnauthenticated
+	}
+	cookie, err := r.Cookie(sessionCookieName)
+	if err != nil || cookie.Value == "" {
+		return "", ErrUnauthenticated
+	}
+	var id string
+	err = s.Store.Pool.QueryRow(ctx, `
+		SELECT id::text FROM identity.sessions
+		WHERE token_hash = $1 AND revoked_at IS NULL
+		  AND idle_expires_at > now() AND absolute_expires_at > now()
+	`, hashSessionToken(cookie.Value)).Scan(&id)
+	if err != nil {
+		return "", ErrUnauthenticated
+	}
+	return id, nil
 }

@@ -19,8 +19,9 @@ func TestRequiresHTTPIdempotency(t *testing.T) {
 		{http.MethodPost, "/api/frontend/workspaces/00000000-0000-4000-8000-000000000001/query", false},
 		{http.MethodPost, "/api/frontend/agent-sessions/00000000-0000-4000-8000-000000000001/references/validate", false},
 		{http.MethodPost, "/api/frontend/conversations/00000000-0000-4000-8000-000000000001/chat/stream", false},
-		{http.MethodPatch, "/api/me/profile", true},
+		{http.MethodPatch, "/api/frontend/assets/00000000-0000-4000-8000-000000000002", true},
 		{http.MethodPost, "/api/sessions", false},
+		{http.MethodPost, "/api/public/v2/sessions", false},
 	}
 	for _, test := range cases {
 		request := httptest.NewRequest(test.method, test.path, nil)

@@ -19,19 +19,19 @@ import (
 
 // Bucket types fixed by the phase 1 contract.
 const (
-	BucketLoginEmail        = "login_email"
-	BucketLoginIP           = "login_ip"
-	BucketResetEmail        = "password_reset_email"
-	BucketResetIP           = "password_reset_ip"
-	BucketInvitationIP      = "invitation_ip"
+	BucketLoginEmail   = "login_email"
+	BucketLoginIP      = "login_ip"
+	BucketResetEmail   = "password_reset_email"
+	BucketResetIP      = "password_reset_ip"
+	BucketInvitationIP = "invitation_ip"
 )
 
 // Default windows from the contract.
 var (
-	LoginEmailLimit  = RatePolicy{Window: 15 * time.Minute, Max: 5, Block: 15 * time.Minute}
-	LoginIPLimit     = RatePolicy{Window: 15 * time.Minute, Max: 30, Block: 15 * time.Minute}
-	ResetEmailLimit  = RatePolicy{Window: time.Hour, Max: 3, Block: time.Hour}
-	ResetIPLimit     = RatePolicy{Window: 15 * time.Minute, Max: 20, Block: 15 * time.Minute}
+	LoginEmailLimit   = RatePolicy{Window: 15 * time.Minute, Max: 5, Block: 15 * time.Minute}
+	LoginIPLimit      = RatePolicy{Window: 15 * time.Minute, Max: 30, Block: 15 * time.Minute}
+	ResetEmailLimit   = RatePolicy{Window: time.Hour, Max: 3, Block: time.Hour}
+	ResetIPLimit      = RatePolicy{Window: 15 * time.Minute, Max: 20, Block: 15 * time.Minute}
 	InvitationIPLimit = RatePolicy{Window: 15 * time.Minute, Max: 20, Block: 15 * time.Minute}
 )
 
@@ -42,9 +42,9 @@ type RatePolicy struct {
 }
 
 type LoginThrottle struct {
-	Store    *store.Store
-	HMACKey  []byte
-	Now      func() time.Time
+	Store   *store.Store
+	HMACKey []byte
+	Now     func() time.Time
 }
 
 func NewLoginThrottle(store *store.Store, hmacKey []byte) *LoginThrottle {

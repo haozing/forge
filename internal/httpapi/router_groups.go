@@ -10,13 +10,12 @@ func newRouter(deps Dependencies) *http.ServeMux {
 	mux := http.NewServeMux()
 	registerSystemRoutes(deps, mux)
 	registerSessionRoutes(deps, mux)
-	registerV2WorkspaceRoutes(deps, mux)
+	registerV2IdentityRoutes(deps, mux)
+	registerV2OrganizationRoutes(deps, mux)
 	registerV2AssetRoutes(deps, mux)
 	registerV2ReviewRoutes(deps, mux)
 	registerOpenV2Routes(deps, mux)
 	registerPublicV2Routes(deps, mux)
-	registerLegacyIdentityRoutes(deps, mux)     // ledger: retire in phase 1
-	registerLegacyWorkspaceRoutes(deps, mux)    // ledger: retire in phase 1
 	registerLegacyModelRoutes(deps, mux)        // ledger: retire in phase 4-6
 	registerLegacyAssetRoutes(deps, mux)        // ledger: retire in phase 2
 	registerLegacyRetrievalRoutes(deps, mux)    // ledger: retire in phase 3
@@ -35,14 +34,120 @@ func registerSystemRoutes(deps Dependencies, mux *http.ServeMux) {
 	mux.HandleFunc("/readyz", readyRoute(deps))
 }
 
+// registerSessionRoutes keeps only the v2 anonymous login; the legacy
+// /api/sessions route retired with phase 1 (see the route ledger).
 func registerSessionRoutes(deps Dependencies, mux *http.ServeMux) {
-	mux.HandleFunc("/api/sessions", sessionResource(deps.SessionService)) // ledger: replaced by /api/public/v2/sessions in phase 1
+	mux.HandleFunc("/api/public/v2/sessions", v2CreateSession(deps))
 }
 
-// registerV2WorkspaceRoutes holds /api/v2 workspace governance endpoints;
-// they arrive with phase 1 and are intentionally absent in phase 0.
-func registerV2WorkspaceRoutes(deps Dependencies, mux *http.ServeMux) {
-	_ = deps
+// registerV2IdentityRoutes holds the member identity surface: profile,
+// preferences, session management and the anonymous password reset and
+// invitation resolve/accept endpoints.
+func registerV2IdentityRoutes(deps Dependencies, mux *http.ServeMux) {
+	mux.HandleFunc("/api/v2/sessions/current", v2DeleteCurrentSession(deps))
+	mux.HandleFunc("/api/v2/sessions", v2ListSessions(deps))
+	mux.HandleFunc("/api/v2/sessions/{sessionId}", v2DeleteSession(deps))
+	mux.HandleFunc("/api/v2/me", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			v2GetMe(deps)(w, r)
+			return
+		}
+		v2PatchMe(deps)(w, r)
+	})
+	mux.HandleFunc("/api/v2/me/password", v2ChangePassword(deps))
+	mux.HandleFunc("/api/v2/me/preferences", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			v2GetPreferences(deps)(w, r)
+			return
+		}
+		v2PatchPreferences(deps)(w, r)
+	})
+	mux.HandleFunc("/api/public/v2/password-resets", v2RequestPasswordReset(deps))
+	mux.HandleFunc("/api/public/v2/password-resets/resolve", v2ResolvePasswordReset(deps))
+	mux.HandleFunc("/api/public/v2/password-resets/complete", v2CompletePasswordReset(deps))
+	mux.HandleFunc("/api/public/v2/organization-invitations/resolve", v2ResolveInvitation(deps))
+	mux.HandleFunc("/api/public/v2/organization-invitations/accept", v2AcceptInvitation(deps))
+}
+
+// registerV2OrganizationRoutes holds the phase 1 organization governance and
+// workspace membership surfaces.
+func registerV2OrganizationRoutes(deps Dependencies, mux *http.ServeMux) {
+	mux.HandleFunc("/api/v2/organization", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			v2GetOrganization(deps)(w, r)
+			return
+		}
+		v2PatchOrganization(deps)(w, r)
+	})
+	mux.HandleFunc("/api/v2/organization/members", v2ListOrganizationMembers(deps))
+	mux.HandleFunc("/api/v2/organization/members/{userId}", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			v2GetOrganizationMember(deps)(w, r)
+			return
+		}
+		v2PatchOrganizationMember(deps)(w, r)
+	})
+	mux.HandleFunc("/api/v2/organization/invitations", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			v2ListOrganizationInvitations(deps)(w, r)
+			return
+		}
+		v2CreateOrganizationInvitation(deps)(w, r)
+	})
+	mux.HandleFunc("/api/v2/organization/invitations/{invitationId}/resend", v2ResendOrganizationInvitation(deps))
+	mux.HandleFunc("/api/v2/organization/invitations/{invitationId}/revoke", v2RevokeOrganizationInvitation(deps))
+	mux.HandleFunc("/api/v2/organization/workspaces", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			v2ListOrganizationWorkspaces(deps)(w, r)
+			return
+		}
+		v2CreateOrganizationWorkspace(deps)(w, r)
+	})
+	mux.HandleFunc("/api/v2/organization/workspaces/{workspaceId}", v2GetOrganizationWorkspace(deps))
+	mux.HandleFunc("/api/v2/organization/workspaces/{workspaceId}/archive", v2ArchiveOrganizationWorkspace(deps))
+	mux.HandleFunc("/api/v2/organization/workspaces/{workspaceId}/restore", v2RestoreOrganizationWorkspace(deps))
+	mux.HandleFunc("/api/v2/organization/workspaces/{workspaceId}/members", v2GrantOrganizationWorkspaceMember(deps))
+	mux.HandleFunc("/api/v2/organization/workspaces/{workspaceId}/members/{membershipId}", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPatch {
+			v2PatchOrganizationWorkspaceMember(deps)(w, r)
+			return
+		}
+		v2RevokeOrganizationWorkspaceMember(deps)(w, r)
+	})
+	mux.HandleFunc("/api/v2/workspaces", v2ListMyWorkspaces(deps))
+	mux.HandleFunc("/api/v2/workspaces/{workspaceId}", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			v2GetWorkspace(deps)(w, r)
+			return
+		}
+		v2PatchWorkspace(deps)(w, r)
+	})
+	mux.HandleFunc("/api/v2/workspaces/{workspaceId}/summary", v2GetWorkspaceSummary(deps))
+	mux.HandleFunc("/api/v2/workspaces/{workspaceId}/members", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			v2ListWorkspaceMembers(deps)(w, r)
+			return
+		}
+		v2AddWorkspaceMember(deps)(w, r)
+	})
+	mux.HandleFunc("/api/v2/workspaces/{workspaceId}/members/{membershipId}", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPatch {
+			v2PatchWorkspaceMember(deps)(w, r)
+			return
+		}
+		v2RemoveWorkspaceMember(deps)(w, r)
+	})
+	mux.HandleFunc("/api/v2/workspaces/{workspaceId}/members/me/leave", v2LeaveWorkspace(deps))
+	mux.HandleFunc("/api/v2/workspaces/{workspaceId}/eligible-members", v2ListEligibleWorkspaceMembers(deps))
+	mux.HandleFunc("/api/v2/workspaces/{workspaceId}/invitations", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			v2ListWorkspaceInvitations(deps)(w, r)
+			return
+		}
+		v2CreateWorkspaceInvitation(deps)(w, r)
+	})
+	mux.HandleFunc("/api/v2/workspaces/{workspaceId}/invitations/{invitationId}/resend", v2ResendWorkspaceInvitation(deps))
+	mux.HandleFunc("/api/v2/workspaces/{workspaceId}/invitations/{invitationId}/revoke", v2RevokeWorkspaceInvitation(deps))
 }
 
 func registerV2AssetRoutes(deps Dependencies, mux *http.ServeMux) {
@@ -75,27 +180,10 @@ func registerPublicV2Routes(deps Dependencies, mux *http.ServeMux) {
 	// /api/public/v2/sites/... arrives with phase 5.
 }
 
-func registerLegacyIdentityRoutes(deps Dependencies, mux *http.ServeMux) {
-	mux.HandleFunc("/api/me", currentUserFinal(deps))
-	mux.HandleFunc("/api/me/profile", currentUserProfileFinal(deps))
-	mux.HandleFunc("/api/frontend/me/preferences", memberPreferences(deps))
-}
-
-func registerLegacyWorkspaceRoutes(deps Dependencies, mux *http.ServeMux) {
-	mux.HandleFunc("/api/frontend/workspaces", workspaceCollectionFinal(deps))
-	mux.HandleFunc("/api/frontend/workspaces/{workspaceId}", workspaceResourceFinal(deps))
-	mux.HandleFunc("/api/frontend/workspaces/{workspaceId}/members/me", getWorkspaceMember(deps))
-	mux.HandleFunc("/api/frontend/workspaces/{workspaceId}/members", listWorkspaceMembersFinal(deps))
-	mux.HandleFunc("/api/frontend/workspaces/{workspaceId}/member-invitations", workspaceInvitationsFinal(deps))
-	mux.HandleFunc("/api/frontend/member-invitations/{invitationId}/accept", acceptWorkspaceInvitationFinal(deps))
-	mux.HandleFunc("/api/frontend/member-invitations/{invitationId}/revoke", revokeWorkspaceInvitationFinal(deps))
-	mux.HandleFunc("/api/frontend/workspace-members/{memberId}", workspaceMemberResourceFinal(deps))
-	mux.HandleFunc("/api/frontend/workspaces/{workspaceId}/counts", getWorkspaceCounts(deps))
-	mux.HandleFunc("/api/frontend/workspaces/{workspaceId}/stats", workspaceStats(deps))
-	mux.HandleFunc("/api/frontend/workspaces/{workspaceId}/activity", workspaceActivity(deps))
-	mux.HandleFunc("/api/frontend/workspaces/{workspaceId}/audit-logs", auditLogsFinal(deps))
-	mux.HandleFunc("/api/frontend/workspaces/{workspaceId}/settings", workspaceSettings(deps))
-}
+// The phase 1 legacy identity/workspace registrations (current-user profile,
+// legacy login, member preferences and the frontend workspace governance
+// family) are removed; see docs/route-retirement-ledger.md. Retired paths now
+// answer 404 from the default mux without compatibility redirects.
 
 func registerLegacyModelRoutes(deps Dependencies, mux *http.ServeMux) {
 	mux.HandleFunc("/api/frontend/workspaces/{workspaceId}/resource-models", resourceModelsCollection(deps))

@@ -258,8 +258,17 @@ type BackgroundJobsWorker struct {
 	Deletions  deletion.Processor
 	Automation automation.Service
 	Operations automation.OperationProcessor
-	WorkerID   string
-	Limit      int
+	// Attachments, when set, expires unreferenced attachments from the
+	// background loop (see attachment.ScanProcessor.CleanupExpired).
+	Attachments AttachmentCleanupProcessor
+	WorkerID    string
+	Limit       int
+}
+
+// AttachmentCleanupProcessor is the narrow surface of the attachment scanner
+// the background loop needs.
+type AttachmentCleanupProcessor interface {
+	CleanupExpired(ctx context.Context) (int, error)
 }
 
 func (w *BackgroundJobsWorker) Work(ctx context.Context, _ *river.Job[eventing.ProcessBackgroundJobsArgs]) error {
@@ -277,6 +286,13 @@ func (w *BackgroundJobsWorker) Work(ctx context.Context, _ *river.Job[eventing.P
 			processed = true
 		} else if !errors.Is(err, resourcemodel.ErrNoPendingMigration) {
 			return err
+		}
+		if w.Attachments != nil {
+			if expired, err := w.Attachments.CleanupExpired(ctx); err != nil {
+				return err
+			} else if expired > 0 {
+				processed = true
+			}
 		}
 		if err := w.Transfers.ProcessNextImport(ctx); err == nil {
 			processed = true

@@ -131,7 +131,7 @@ func frontendIdempotency(deps Dependencies, next http.Handler) http.Handler {
 }
 
 func requiresHTTPIdempotency(r *http.Request) bool {
-	if !strings.HasPrefix(r.URL.Path, "/api/frontend/") && r.URL.Path != "/api/me/profile" {
+	if !strings.HasPrefix(r.URL.Path, "/api/frontend/") {
 		return false
 	}
 	if r.Method != http.MethodPost && r.Method != http.MethodPatch && r.Method != http.MethodPut && r.Method != http.MethodDelete {

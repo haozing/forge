@@ -96,6 +96,21 @@ func hashToken(raw string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// orgName resolves the organization display name at send time so invitation
+// mail never carries a stale composition-root copy. The OrganizationName
+// field stays as a fallback for stores that cannot answer (unit tests).
+func (s InvitationService) orgName(ctx context.Context, organizationID string) string {
+	if s.Store != nil && s.Store.Pool != nil {
+		var name string
+		err := s.Store.Pool.QueryRow(ctx,
+			`SELECT name FROM organization.organizations WHERE id = $1::uuid`, organizationID).Scan(&name)
+		if err == nil && strings.TrimSpace(name) != "" {
+			return name
+		}
+	}
+	return s.OrganizationName
+}
+
 // Create issues a new invitation plus workspace grants in one transaction.
 func (s InvitationService) Create(ctx context.Context, principal auth.Principal, input CreateInput) (Invitation, string, error) {
 	svc := Service{Store: s.Store}
@@ -203,7 +218,7 @@ func (s InvitationService) Create(ctx context.Context, principal auth.Principal,
 		return Invitation{}, "", err
 	}
 	payload, err := json.Marshal(map[string]any{
-		"token": rawToken, "link": link, "organization_name": s.OrganizationName,
+		"token": rawToken, "link": link, "organization_name": s.orgName(ctx, principal.OrganizationID),
 		"email": email, "display_name": strings.TrimSpace(input.DisplayName),
 	})
 	if err != nil {
@@ -255,7 +270,7 @@ func newInvitationToken() string {
 }
 
 // Resend invalidates the old token, issues a new one and cancels the pending
-// delivery in favor of a fresh one.
+// delivery in favor of a fresh one. Organization admins only.
 func (s InvitationService) Resend(ctx context.Context, principal auth.Principal, invitationID string) (Invitation, error) {
 	svc := Service{Store: s.Store}
 	if err := svc.RequireOrganizationAction(ctx, principal, authz.ActionOrganizationInvitationMng); err != nil {
@@ -264,17 +279,24 @@ func (s InvitationService) Resend(ctx context.Context, principal auth.Principal,
 	if !svc.validID(invitationID) {
 		return Invitation{}, ErrInvalidInput
 	}
+	return s.resendInvitation(ctx, principal, invitationID)
+}
+
+// resendInvitation is the shared token-rotation body for the organization and
+// workspace authority paths. The caller owns the authorization gate.
+func (s InvitationService) resendInvitation(ctx context.Context, principal auth.Principal, invitationID string) (Invitation, error) {
 	tx, err := s.Store.Pool.Begin(ctx)
 	if err != nil {
 		return Invitation{}, err
 	}
 	defer tx.Rollback(ctx)
-	var email, status string
+	var email, status, authorityScope string
+	var scopeWorkspace *string
 	var revision int64
 	err = tx.QueryRow(ctx, `
-		SELECT email, status, revision FROM organization.member_invitations
+		SELECT email, status, authority_scope, scope_workspace_id, revision FROM organization.member_invitations
 		WHERE organization_id = $1::uuid AND id = $2::uuid FOR UPDATE
-	`, principal.OrganizationID, invitationID).Scan(&email, &status, &revision)
+	`, principal.OrganizationID, invitationID).Scan(&email, &status, &authorityScope, &scopeWorkspace, &revision)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Invitation{}, ErrNotFound
 	}
@@ -300,7 +322,8 @@ func (s InvitationService) Resend(ctx context.Context, principal auth.Principal,
 		return Invitation{}, err
 	}
 	payload, _ := json.Marshal(map[string]any{
-		"token": rawToken, "link": link, "organization_name": s.OrganizationName, "email": email,
+		"token": rawToken, "link": link, "organization_name": s.orgName(ctx, principal.OrganizationID),
+		"email": email, "workspace_name": s.workspaceNameTx(ctx, tx, principal.OrganizationID, scopeWorkspace),
 	})
 	_, ciphertext, err := s.Cipher.Encrypt(invitationID, notification.TemplateOrganizationInvitation, payload)
 	if err != nil {
@@ -317,6 +340,20 @@ func (s InvitationService) Resend(ctx context.Context, principal auth.Principal,
 		return Invitation{}, err
 	}
 	return s.getInvitation(ctx, principal.OrganizationID, invitationID)
+}
+
+func (s InvitationService) workspaceNameTx(ctx context.Context, tx pgx.Tx, organizationID string, scopeWorkspace *string) string {
+	if scopeWorkspace == nil {
+		return ""
+	}
+	var name string
+	if err := tx.QueryRow(ctx, `
+		SELECT name FROM content.workspaces
+		WHERE organization_id = $1::uuid AND id = $2::uuid
+	`, organizationID, *scopeWorkspace).Scan(&name); err != nil {
+		return ""
+	}
+	return name
 }
 
 func (s InvitationService) getInvitation(ctx context.Context, organizationID, invitationID string) (Invitation, error) {
@@ -372,7 +409,8 @@ func (s InvitationService) loadGrants(ctx context.Context, invitationID string) 
 	return grants, rows.Err()
 }
 
-// Revoke cancels a pending invitation and its unsent delivery.
+// Revoke cancels a pending invitation and its unsent delivery. Organization
+// admins only; workspace admins use RevokeWorkspaceScoped.
 func (s InvitationService) Revoke(ctx context.Context, principal auth.Principal, invitationID string) error {
 	svc := Service{Store: s.Store}
 	if err := svc.RequireOrganizationAction(ctx, principal, authz.ActionOrganizationInvitationMng); err != nil {
@@ -381,6 +419,12 @@ func (s InvitationService) Revoke(ctx context.Context, principal auth.Principal,
 	if !svc.validID(invitationID) {
 		return ErrInvalidInput
 	}
+	return s.revokeInvitation(ctx, principal, invitationID)
+}
+
+// revokeInvitation is the shared cancellation body. The caller owns the
+// authorization gate.
+func (s InvitationService) revokeInvitation(ctx context.Context, principal auth.Principal, invitationID string) error {
 	tx, err := s.Store.Pool.Begin(ctx)
 	if err != nil {
 		return err

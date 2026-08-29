@@ -2,11 +2,9 @@ package auth
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
-	"fmt"
 	"net/http"
 	"time"
 
@@ -36,71 +34,45 @@ type Session struct {
 	AbsoluteExpires time.Time
 }
 
-func (s SessionService) Login(ctx context.Context, loginName, password string) (Session, error) {
-	if s.Store == nil || s.Store.Pool == nil {
-		return Session{}, errors.New("database store is not initialized")
-	}
-	var principal Principal
-	var passwordHash string
-	err := s.Store.Pool.QueryRow(ctx, `
-		SELECT u.id, u.organization_id, u.user_type, u.password_hash
-		FROM identity.users u
-		WHERE u.login_name = $1
-		  AND u.user_type = 'member'
-		  AND u.status = 'active'
-	`, loginName).Scan(&principal.UserID, &principal.OrganizationID, &principal.UserType, &passwordHash)
-	switch {
-	case errors.Is(err, pgx.ErrNoRows):
-		// Unknown login name: no user details are available for the record.
-		s.reportSessionEvent(SessionAuditEvent{Action: SessionLogin, Result: "denied", LoginName: loginName, Reason: ReasonUnknownLoginName})
-		return Session{}, errors.New("invalid credentials")
-	case err != nil:
-		return Session{}, errors.New("invalid credentials")
-	}
-	if !VerifyPassword(password, passwordHash) {
-		s.reportSessionEvent(SessionAuditEvent{Action: SessionLogin, Result: "denied", OrganizationID: principal.OrganizationID, UserID: principal.UserID, LoginName: loginName, Reason: ReasonInvalidCredentials})
-		return Session{}, errors.New("invalid credentials")
-	}
-	tokenBytes := make([]byte, 32)
-	if _, err := rand.Read(tokenBytes); err != nil {
-		return Session{}, fmt.Errorf("generate session token: %w", err)
-	}
-	token := hex.EncodeToString(tokenBytes)
-	expiresAt := time.Now().UTC().Add(24 * time.Hour)
-	_, err = s.Store.Pool.Exec(ctx, `
-		INSERT INTO identity.sessions (user_id, session_hash, expires_at)
-		VALUES ($1::uuid, $2, $3)
-	`, principal.UserID, hashSessionToken(token), expiresAt)
-	if err != nil {
-		s.reportSessionEvent(SessionAuditEvent{Action: SessionLogin, Result: "error", OrganizationID: principal.OrganizationID, UserID: principal.UserID, LoginName: loginName, Reason: ReasonSessionCreateFailed})
-		return Session{}, fmt.Errorf("create session: %w", err)
-	}
-	s.reportSessionEvent(SessionAuditEvent{Action: SessionLogin, Result: "allowed", OrganizationID: principal.OrganizationID, UserID: principal.UserID, LoginName: loginName})
-	return Session{Principal: principal, Token: token, ExpiresAt: expiresAt}, nil
+// Authenticate resolves the member session cookie. Phase 1 contract: the
+// session is only valid while its idle and absolute lifetimes hold, the user
+// stays active and the owning organization stays active — so disabling a
+// member or suspending an organization revokes access immediately.
+func (s SessionService) Authenticate(ctx context.Context, r *http.Request) (Principal, error) {
+	principal, _, err := s.authenticateSession(ctx, r)
+	return principal, err
 }
 
-func (s SessionService) Authenticate(ctx context.Context, r *http.Request) (Principal, error) {
+// authenticateSession resolves the principal plus the session id behind the
+// cookie and refreshes last_seen_at (throttled). v2 handlers use the session
+// id for revocation commands and self-identification in session listings.
+func (s SessionService) authenticateSession(ctx context.Context, r *http.Request) (Principal, string, error) {
 	if s.Store == nil || s.Store.Pool == nil {
-		return Principal{}, ErrUnauthenticated
+		return Principal{}, "", ErrUnauthenticated
 	}
 	cookie, err := r.Cookie(sessionCookieName)
 	if err != nil || cookie.Value == "" {
-		return Principal{}, ErrUnauthenticated
+		return Principal{}, "", ErrUnauthenticated
 	}
 	var principal Principal
+	var sessionID string
 	err = s.Store.Pool.QueryRow(ctx, `
-		SELECT u.id, u.organization_id, u.user_type
+		SELECT u.id, u.organization_id, u.user_type, s.id::text
 		FROM identity.sessions s
 		JOIN identity.users u ON u.id = s.user_id
-		WHERE s.session_hash = $1
+		JOIN organization.organizations o ON o.id = u.organization_id
+		WHERE s.token_hash = $1
 		  AND s.revoked_at IS NULL
-		  AND s.expires_at > now()
+		  AND s.idle_expires_at > now()
+		  AND s.absolute_expires_at > now()
 		  AND u.status = 'active'
-	`, hashSessionToken(cookie.Value)).Scan(&principal.UserID, &principal.OrganizationID, &principal.UserType)
+		  AND o.status = 'active'
+	`, hashSessionToken(cookie.Value)).Scan(&principal.UserID, &principal.OrganizationID, &principal.UserType, &sessionID)
 	if err != nil {
-		return Principal{}, ErrUnauthenticated
+		return Principal{}, "", ErrUnauthenticated
 	}
-	return principal, nil
+	s.TouchSession(ctx, sessionID)
+	return principal, sessionID, nil
 }
 
 // Logout revokes the current browser session. It is intentionally idempotent:
@@ -118,7 +90,7 @@ func (s SessionService) Logout(ctx context.Context, r *http.Request) error {
 		UPDATE identity.sessions s
 		SET revoked_at = COALESCE(s.revoked_at, now())
 		FROM identity.users u
-		WHERE u.id = s.user_id AND s.session_hash = $1
+		WHERE u.id = s.user_id AND s.token_hash = $1
 		RETURNING u.id::text, u.organization_id::text
 	`, hashSessionToken(cookie.Value)).Scan(&userID, &organizationID)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -144,12 +116,17 @@ func ClearSessionCookie(w http.ResponseWriter, r *http.Request) {
 }
 
 func SetSessionCookie(w http.ResponseWriter, r *http.Request, session Session) {
+	// Legacy sessions carry ExpiresAt; phase 1 sessions carry AbsoluteExpires.
+	expires := session.ExpiresAt
+	if expires.IsZero() {
+		expires = session.AbsoluteExpires
+	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookieName,
 		Value:    session.Token,
 		Path:     "/",
-		Expires:  session.ExpiresAt,
-		MaxAge:   int(time.Until(session.ExpiresAt).Seconds()),
+		Expires:  expires,
+		MaxAge:   int(time.Until(expires).Seconds()),
 		HttpOnly: true,
 		Secure:   r.TLS != nil,
 		SameSite: http.SameSiteLaxMode,

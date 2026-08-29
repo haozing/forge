@@ -1,11 +1,14 @@
 package httpapi
 
+// frontend_workspace.go — shared member-session and workspace error mapping
+// helpers still used by the legacy routes scheduled for retirement in phases
+// 2-4. The phase 1 identity/workspace handlers they served are retired; see
+// docs/route-retirement-ledger.md.
+
 import (
-	"encoding/json"
 	"errors"
 	"log"
 	"net/http"
-	"strings"
 
 	"agentchunzhi/internal/auth"
 	"agentchunzhi/internal/workspace"
@@ -44,67 +47,6 @@ func writeWorkspaceError(w http.ResponseWriter, err error, fallback string) {
 	}
 }
 
-func listWorkspaces(deps Dependencies) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
-			return
-		}
-		principal, ok := requireMemberSession(w, r, deps)
-		if !ok {
-			return
-		}
-		items, err := deps.WorkspaceService.List(r.Context(), principal)
-		if err != nil {
-			writeWorkspaceError(w, err, "workspace_list_failed")
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"items": items, "has_more": false})
-	}
-}
-
-func getWorkspace(deps Dependencies) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
-			return
-		}
-		principal, ok := requireMemberSession(w, r, deps)
-		if !ok {
-			return
-		}
-		item, err := deps.WorkspaceService.Get(r.Context(), principal, r.PathValue("workspaceId"))
-		if err != nil {
-			writeWorkspaceError(w, err, "workspace_load_failed")
-			return
-		}
-		writeETag(w, representationETag(item.ID, item.UpdatedAt.String()))
-		writeJSON(w, http.StatusOK, item)
-	}
-}
-
-func getWorkspaceMember(deps Dependencies) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
-			return
-		}
-		principal, ok := requireMemberSession(w, r, deps)
-		if !ok {
-			return
-		}
-		if !requirePathUUID(w, r.PathValue("workspaceId")) || !rejectUnknownWorkspace(w, r, deps, principal) {
-			return
-		}
-		item, err := deps.WorkspaceService.Member(r.Context(), principal, r.PathValue("workspaceId"))
-		if err != nil {
-			writeWorkspaceError(w, err, "workspace_member_load_failed")
-			return
-		}
-		writeJSON(w, http.StatusOK, item)
-	}
-}
-
 func listWorkspaceAgentApplications(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -124,178 +66,5 @@ func listWorkspaceAgentApplications(deps Dependencies) http.HandlerFunc {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"items": items, "has_more": false})
-	}
-}
-
-func getWorkspaceCounts(deps Dependencies) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
-			return
-		}
-		principal, ok := requireMemberSession(w, r, deps)
-		if !ok {
-			return
-		}
-		if !requirePathUUID(w, r.PathValue("workspaceId")) || !rejectUnknownWorkspace(w, r, deps, principal) {
-			return
-		}
-		counts, err := deps.WorkspaceService.Counts(r.Context(), principal, r.PathValue("workspaceId"))
-		if err != nil {
-			writeWorkspaceError(w, err, "workspace_counts_failed")
-			return
-		}
-		writeJSON(w, http.StatusOK, counts)
-	}
-}
-
-type workspaceSettingsPatch struct {
-	Name                   *string `json:"name"`
-	Description            *string `json:"description"`
-	DefaultResourceModelID *string `json:"default_resource_model_id"`
-}
-
-func getWorkspaceSettings(deps Dependencies) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
-			return
-		}
-		principal, ok := requireMemberSession(w, r, deps)
-		if !ok {
-			return
-		}
-		if !requirePathUUID(w, r.PathValue("workspaceId")) || !rejectUnknownWorkspace(w, r, deps, principal) {
-			return
-		}
-		settings, err := deps.WorkspaceService.Settings(r.Context(), principal, r.PathValue("workspaceId"))
-		if err != nil {
-			writeWorkspaceError(w, err, "workspace_settings_load_failed")
-			return
-		}
-		writeETag(w, representationETag(settings.Name, settings.Description, settings.DefaultResourceModelID))
-		writeJSON(w, http.StatusOK, settings)
-	}
-}
-
-func updateWorkspaceSettings(deps Dependencies) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPatch {
-			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
-			return
-		}
-		principal, ok := requireMemberSession(w, r, deps)
-		if !ok {
-			return
-		}
-		if _, ok := requestIdempotencyKey(w, r); !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
-			return
-		}
-		var patch workspaceSettingsPatch
-		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 32*1024))
-		decoder.DisallowUnknownFields()
-		if err := decoder.Decode(&patch); err != nil {
-			writeError(w, http.StatusUnprocessableEntity, "validation_failed")
-			return
-		}
-		current, err := deps.WorkspaceService.Settings(r.Context(), principal, r.PathValue("workspaceId"))
-		if err != nil {
-			writeWorkspaceError(w, err, "workspace_settings_load_failed")
-			return
-		}
-		currentETag := representationETag(current.Name, current.Description, current.DefaultResourceModelID)
-		if r.Header.Get("If-Match") != "" && !ifMatchMatches(r, currentETag) {
-			writeError(w, http.StatusConflict, "version_conflict")
-			return
-		}
-		if patch.Name != nil {
-			current.Name = strings.TrimSpace(*patch.Name)
-		}
-		if patch.Description != nil {
-			current.Description = *patch.Description
-		}
-		if patch.DefaultResourceModelID != nil {
-			current.DefaultResourceModelID = strings.TrimSpace(*patch.DefaultResourceModelID)
-		}
-		result, err := deps.WorkspaceService.UpdateSettings(r.Context(), principal, r.PathValue("workspaceId"), current)
-		if err != nil {
-			writeWorkspaceError(w, err, "workspace_settings_update_failed")
-			return
-		}
-		writeETag(w, representationETag(result.Name, result.Description, result.DefaultResourceModelID))
-		writeJSON(w, http.StatusOK, result)
-	}
-}
-
-func getMemberPreferences(deps Dependencies) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
-			return
-		}
-		principal, ok := requireMemberSession(w, r, deps)
-		if !ok {
-			return
-		}
-		result, err := deps.WorkspaceService.Preferences(r.Context(), principal)
-		if err != nil {
-			writeWorkspaceError(w, err, "member_preferences_load_failed")
-			return
-		}
-		writeJSON(w, http.StatusOK, result)
-	}
-}
-
-func updateMemberPreferences(deps Dependencies) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPatch {
-			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
-			return
-		}
-		principal, ok := requireMemberSession(w, r, deps)
-		if !ok {
-			return
-		}
-		if _, ok := requestIdempotencyKey(w, r); !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
-			return
-		}
-		var input map[string]any
-		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 32*1024))
-		if err := decoder.Decode(&input); err != nil {
-			writeError(w, http.StatusUnprocessableEntity, "validation_failed")
-			return
-		}
-		result, err := deps.WorkspaceService.UpdatePreferences(r.Context(), principal, input)
-		if err != nil {
-			writeWorkspaceError(w, err, "member_preferences_update_failed")
-			return
-		}
-		writeJSON(w, http.StatusOK, result)
-	}
-}
-
-func workspaceSettings(deps Dependencies) http.HandlerFunc {
-	get := getWorkspaceSettings(deps)
-	update := updateWorkspaceSettings(deps)
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet {
-			get(w, r)
-			return
-		}
-		update(w, r)
-	}
-}
-
-func memberPreferences(deps Dependencies) http.HandlerFunc {
-	get := getMemberPreferences(deps)
-	update := updateMemberPreferences(deps)
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet {
-			get(w, r)
-			return
-		}
-		update(w, r)
 	}
 }

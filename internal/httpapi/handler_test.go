@@ -309,7 +309,7 @@ func TestReadyRequiresDatabase(t *testing.T) {
 }
 
 func TestSessionRejectsMalformedRequest(t *testing.T) {
-	req := httptest.NewRequest(http.MethodPost, "/api/sessions", nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/public/v2/sessions", nil)
 	rec := httptest.NewRecorder()
 
 	NewHandler().ServeHTTP(rec, req)
@@ -320,13 +320,125 @@ func TestSessionRejectsMalformedRequest(t *testing.T) {
 }
 
 func TestCurrentUserRequiresSession(t *testing.T) {
-	req := httptest.NewRequest(http.MethodGet, "/api/me", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v2/me", nil)
 	rec := httptest.NewRecorder()
 
 	NewHandler().ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("expected status %d, got %d", http.StatusUnauthorized, rec.Code)
+	}
+}
+
+// TestPhase1LegacyRoutesAreRetired pins the phase 1 route retirement ledger:
+// the legacy identity/workspace paths answer 404 without compatibility
+// redirects once the v2 replacements are registered.
+func TestPhase1LegacyRoutesAreRetired(t *testing.T) {
+	paths := []string{
+		"/api/me",
+		"/api/me/profile",
+		"/api/sessions",
+		"/api/frontend/me/preferences",
+		"/api/frontend/workspaces",
+		"/api/frontend/workspaces/00000000-0000-4000-8000-000000000001",
+		"/api/frontend/workspaces/00000000-0000-4000-8000-000000000001/members",
+		"/api/frontend/workspaces/00000000-0000-4000-8000-000000000001/member-invitations",
+		"/api/frontend/workspaces/00000000-0000-4000-8000-000000000001/settings",
+		"/api/frontend/workspaces/00000000-0000-4000-8000-000000000001/counts",
+		"/api/frontend/workspaces/00000000-0000-4000-8000-000000000001/stats",
+		"/api/frontend/workspaces/00000000-0000-4000-8000-000000000001/activity",
+		"/api/frontend/workspaces/00000000-0000-4000-8000-000000000001/audit-logs",
+		"/api/frontend/workspace-members/00000000-0000-4000-8000-000000000001",
+	}
+	handler := NewHandler()
+	for _, path := range paths {
+		t.Run(path, func(t *testing.T) {
+			for _, method := range []string{http.MethodGet, http.MethodPost, http.MethodDelete} {
+				req := httptest.NewRequest(method, path, nil)
+				rec := httptest.NewRecorder()
+				handler.ServeHTTP(rec, req)
+				if rec.Code != http.StatusNotFound {
+					t.Fatalf("%s %s: retired route answered %d, want 404", method, path, rec.Code)
+				}
+			}
+		})
+	}
+}
+
+// TestV2IdentityRoutesRequireSession covers the member identity surface: all
+// of them answer 401 without a session cookie.
+func TestV2IdentityRoutesRequireSession(t *testing.T) {
+	cases := []struct {
+		method string
+		path   string
+	}{
+		{http.MethodGet, "/api/v2/me"},
+		{http.MethodPatch, "/api/v2/me"},
+		{http.MethodGet, "/api/v2/me/preferences"},
+		{http.MethodPut, "/api/v2/me/password"},
+		{http.MethodGet, "/api/v2/sessions"},
+		{http.MethodDelete, "/api/v2/sessions/current"},
+		{http.MethodDelete, "/api/v2/sessions/00000000-0000-4000-8000-000000000001"},
+		{http.MethodGet, "/api/v2/organization"},
+		{http.MethodGet, "/api/v2/organization/members"},
+		{http.MethodGet, "/api/v2/organization/invitations"},
+		{http.MethodGet, "/api/v2/workspaces"},
+		{http.MethodGet, "/api/v2/workspaces/00000000-0000-4000-8000-000000000001/members"},
+	}
+	handler := NewHandler()
+	for _, tc := range cases {
+		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, tc.path, nil)
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			if rec.Code != http.StatusUnauthorized {
+				t.Fatalf("expected status %d, got %d", http.StatusUnauthorized, rec.Code)
+			}
+		})
+	}
+}
+
+// TestOriginPolicyRejectsForeignOrigins covers the CSRF Origin allowlist for
+// unsafe v2 requests.
+func TestOriginPolicyRejectsForeignOrigins(t *testing.T) {
+	deps := Dependencies{AllowedOrigins: []string{"https://app.example.com"}}
+	handler := NewHandlerWithDeps(deps)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/public/v2/sessions", strings.NewReader(`{"email":"a@b.co","password":"x"}`))
+	req.Header.Set("Origin", "https://evil.example")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("foreign origin answered %d, want 403", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "origin_not_allowed") {
+		t.Fatalf("body = %s", rec.Body.String())
+	}
+
+	// Allowed origin passes through to the handler (which then fails on the
+	// unconfigured database with a validation error, not 403).
+	req = httptest.NewRequest(http.MethodPost, "/api/public/v2/sessions", strings.NewReader(`{}`))
+	req.Header.Set("Origin", "https://app.example.com")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code == http.StatusForbidden {
+		t.Fatal("allowed origin must not be rejected by the origin policy")
+	}
+
+	// GET requests are exempt from the policy.
+	req = httptest.NewRequest(http.MethodGet, "/api/v2/me", nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code == http.StatusForbidden {
+		t.Fatal("GET must be exempt from the origin policy")
+	}
+
+	// Without configuration the policy is a no-op.
+	req = httptest.NewRequest(http.MethodPost, "/api/public/v2/sessions", strings.NewReader(`{}`))
+	rec = httptest.NewRecorder()
+	NewHandler().ServeHTTP(rec, req)
+	if rec.Code == http.StatusForbidden {
+		t.Fatal("no AllowedOrigins configured: policy must be disabled")
 	}
 }
 

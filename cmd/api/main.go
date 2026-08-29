@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"log"
 	"net/http"
@@ -26,8 +28,11 @@ import (
 	"agentchunzhi/internal/conversation"
 	"agentchunzhi/internal/eventing"
 	"agentchunzhi/internal/httpapi"
+	"agentchunzhi/internal/identity"
 	"agentchunzhi/internal/modelendpoint"
+	"agentchunzhi/internal/notification"
 	"agentchunzhi/internal/objectstore"
+	"agentchunzhi/internal/organization"
 	"agentchunzhi/internal/query"
 	"agentchunzhi/internal/resourcemodel"
 	"agentchunzhi/internal/retrieval"
@@ -38,6 +43,9 @@ import (
 
 func main() {
 	cfg := config.Load()
+	if err := cfg.Validate(); err != nil {
+		log.Fatalf("configuration invalid: %v", err)
+	}
 	startupCtx, startupCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	db, err := store.Open(startupCtx, cfg.DatabaseURL)
 	if err != nil {
@@ -68,6 +76,29 @@ func main() {
 	events, err := eventing.NewEventStore(db.Pool)
 	if err != nil {
 		log.Fatalf("event store startup failed: %v", err)
+	}
+	// Phase 1 email delivery: the API encrypts payloads with the AES-256-GCM
+	// key ring; the worker owns the mailer transport.
+	deliveryKeys, currentKeyVersion, err := cfg.EmailKeyRing()
+	if err != nil {
+		log.Fatalf("email delivery key ring startup failed: %v", err)
+	}
+	deliveryCipher, err := notification.NewCipher(notification.KeyRing{Keys: deliveryKeys, Current: currentKeyVersion})
+	if err != nil {
+		log.Fatalf("email delivery cipher startup failed: %v", err)
+	}
+	deliveryKeyVersion, err := notification.KeyVersionNumber(currentKeyVersion)
+	if err != nil {
+		log.Fatalf("email delivery key version startup failed: %v", err)
+	}
+	rateLimitHMACKey := []byte(cfg.RateLimitHMACKey)
+	if len(rateLimitHMACKey) == 0 {
+		raw := make([]byte, 32)
+		if _, err := rand.Read(raw); err != nil {
+			log.Fatalf("rate limit hmac key generation failed: %v", err)
+		}
+		rateLimitHMACKey = []byte(hex.EncodeToString(raw))
+		log.Printf("WARNING: RATE_LIMIT_HMAC_KEY is not set; using an ephemeral key - login throttling resets on restart")
 	}
 	var objects objectstore.ObjectStore
 	ossRegion, ossBucket := strings.TrimSpace(cfg.OSSRegion), strings.TrimSpace(cfg.OSSBucket)
@@ -137,6 +168,19 @@ func main() {
 		ContainerService:     container.Service{Store: db, Policy: authz.WorkspacePolicyService{Store: db}},
 		ConversationService:  conversation.Service{Store: db, Policy: authz.WorkspacePolicyService{Store: db}, Content: contentservice.Service{Store: db, Events: events}},
 		AutomationService:    automation.Service{Store: db, Policy: authz.WorkspacePolicyService{Store: db}},
+		OrganizationService:  organization.Service{Store: db, Events: &events},
+		InvitationService: &organization.InvitationService{
+			Store: db, Events: &events, Cipher: deliveryCipher,
+			KeyVersion: deliveryKeyVersion, BaseURL: cfg.PublicAppBaseURL,
+		},
+		IdentityService: &identity.Service{
+			Store: db, Events: &events, Cipher: deliveryCipher,
+			KeyVersion: deliveryKeyVersion, BaseURL: cfg.PublicAppBaseURL,
+		},
+		LoginThrottle:     auth.NewLoginThrottle(db, rateLimitHMACKey),
+		TrustedProxyCIDRs: cfg.TrustedProxyCIDRs,
+		AllowedOrigins:    cfg.MemberAllowedOrigins,
+		AppEnv:            cfg.Environment,
 	}
 	server := &http.Server{
 		Addr:              cfg.HTTPAddr,

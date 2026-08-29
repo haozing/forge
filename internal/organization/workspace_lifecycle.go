@@ -377,3 +377,69 @@ func (s Service) RevokeWorkspaceMembership(ctx context.Context, principal auth.P
 	}
 	return tx.Commit(ctx)
 }
+
+// PatchWorkspaceMembership changes one membership's role from the governance
+// surface. Organization admins may act without holding a membership; the
+// last active admin of an active workspace is protected.
+func (s Service) PatchWorkspaceMembership(ctx context.Context, principal auth.Principal, workspaceID, membershipID, role string) (Workspace, string, error) {
+	if err := s.RequireOrganizationAction(ctx, principal, authz.ActionOrganizationMemberManage); err != nil {
+		return Workspace{}, "", err
+	}
+	if !s.validID(workspaceID) || !s.validID(membershipID) || !authz.ValidWorkspaceRole(role) {
+		return Workspace{}, "", ErrInvalidInput
+	}
+	tx, err := s.Store.Pool.Begin(ctx)
+	if err != nil {
+		return Workspace{}, "", err
+	}
+	defer tx.Rollback(ctx)
+	if err := lockOrganizationTx(ctx, tx, principal.OrganizationID); err != nil {
+		return Workspace{}, "", err
+	}
+	var oldRole, userID, workspaceStatus string
+	err = tx.QueryRow(ctx, `
+		SELECT wm.role, wm.user_id::text, w.status
+		FROM content.workspace_members wm
+		JOIN content.workspaces w ON w.organization_id = wm.organization_id AND w.id = wm.workspace_id
+		WHERE wm.organization_id = $1::uuid AND wm.id = $2::uuid AND wm.workspace_id = $3::uuid
+		FOR UPDATE OF wm
+	`, principal.OrganizationID, membershipID, workspaceID).Scan(&oldRole, &userID, &workspaceStatus)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Workspace{}, "", ErrNotFound
+	}
+	if err != nil {
+		return Workspace{}, "", err
+	}
+	if oldRole == authz.WorkspaceRoleAdmin && role != authz.WorkspaceRoleAdmin && workspaceStatus == "active" {
+		admins, err := countActiveWorkspaceAdminsExcludingTx(ctx, tx, workspaceID, userID)
+		if err != nil {
+			return Workspace{}, "", err
+		}
+		if admins == 0 {
+			return Workspace{}, "", ErrLastWorkspaceAdmin
+		}
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE content.workspace_members
+		SET role = $3, revision = revision + 1, updated_at = now()
+		WHERE organization_id = $1::uuid AND id = $2::uuid
+	`, principal.OrganizationID, membershipID, role); err != nil {
+		return Workspace{}, "", err
+	}
+	store.AppendAuditTx(ctx, tx, store.NewAuditEntry("workspace.member.role_changed", principal.OrganizationID, principal.UserID, "membership", membershipID, map[string]any{
+		"workspace_id": workspaceID, "user_id": userID, "old_role": oldRole, "new_role": role,
+	}), workspaceID)
+	if err := appendOrgEvent(ctx, tx, s.Events, principal, workspaceID, eventing.EventWorkspaceMembershipChanged, workspaceID, 1, map[string]any{
+		"workspace_id": workspaceID, "user_id": userID, "operation": "role_changed", "old_role": oldRole, "new_role": role,
+	}); err != nil {
+		return Workspace{}, "", err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Workspace{}, "", err
+	}
+	workspace, err := s.GetWorkspace(ctx, principal, workspaceID)
+	if err != nil {
+		return Workspace{}, "", err
+	}
+	return workspace, userID, nil
+}

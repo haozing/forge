@@ -138,6 +138,27 @@ func expectRevision(ctx context.Context, tx pgx.Tx, userID, expected string) err
 	return nil
 }
 
+// expectPreferencesRevision is the If-Match gate for preferences: it compares
+// against identity.user_preferences.revision, which is the same revision the
+// preferences GET returns. A missing row behaves like revision 1 so the first
+// patch matches the synthesized default representation.
+func expectPreferencesRevision(ctx context.Context, tx pgx.Tx, userID, expected string) error {
+	if expected == "" {
+		return ErrInvalidInput
+	}
+	var revision int64
+	err := tx.QueryRow(ctx, `SELECT revision FROM identity.user_preferences WHERE user_id = $1::uuid`, userID).Scan(&revision)
+	if errors.Is(err, pgx.ErrNoRows) {
+		revision = 1
+	} else if err != nil {
+		return err
+	}
+	if fmt.Sprint(revision) != strings.Trim(expected, "\"") {
+		return ErrPreferencesRev
+	}
+	return nil
+}
+
 // ---------- preferences ----------
 
 type Preferences struct {
@@ -191,7 +212,7 @@ func (s Service) PatchPreferences(ctx context.Context, userID, expectedRevision 
 		return Preferences{}, err
 	}
 	defer tx.Rollback(ctx)
-	if err := expectRevision(ctx, tx, userID, expectedRevision); err != nil {
+	if err := expectPreferencesRevision(ctx, tx, userID, expectedRevision); err != nil {
 		return Preferences{}, err
 	}
 	if _, err := tx.Exec(ctx, `

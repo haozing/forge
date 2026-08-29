@@ -1,13 +1,14 @@
 openapi: 3.0.3
 info:
   title: AgentChunzhi v2 API
-  version: 2.0.0-phase0
+  version: 2.0.0-phase1
   description: |
     唯一 v2 契约。入口族：
     - /api/v2/... 成员会话和工作区管理 API
     - /api/open/v2/... Agent 和外部系统 API Key API
     - /api/public/v2/... 匿名或站点访问 API
     阶段 0 冻结全局组件与核心资源名；未实现的领域只冻结资源命名，不注册假 handler。
+    阶段 1 增补 sessions、me、preferences、password-resets、organization 与 workspace 治理/成员/邀请路径。
 servers:
   - url: /
 tags:
@@ -362,7 +363,932 @@ paths:
                 allOf:
                   - $ref: '#/components/schemas/AssetVersion'
                   - $ref: '#/components/schemas/Envelope'
+  /api/public/v2/sessions:
+    post:
+      tags: [identity]
+      operationId: createSession
+      description: 匿名邮箱登录。每次尝试消耗 login_email 与 login_ip 限流桶；失败统一 401
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string }
+      responses:
+        '200':
+          description: 登录成功，返回成员摘要并下发会话 cookie
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Me'
+                  - $ref: '#/components/schemas/Envelope'
+        '401': { $ref: '#/components/responses/Error' }
+        '429':
+          description: 限流拒绝，携带 Retry-After
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /api/v2/sessions:
+    get:
+      tags: [identity]
+      operationId: listSessions
+      responses:
+        '200':
+          description: 当前活跃会话列表（is_current 标记当前会话）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/SessionInfo' }
+                      page: { $ref: '#/components/schemas/CursorPage' }
+                  - $ref: '#/components/schemas/Envelope'
+  /api/v2/sessions/current:
+    delete:
+      tags: [identity]
+      operationId: logout
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '204': { description: 已登出并清除 cookie }
+        '401': { $ref: '#/components/responses/Error' }
+  /api/v2/sessions/{sessionId}:
+    delete:
+      tags: [identity]
+      operationId: revokeSession
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '204': { description: 已撤销 }
+        '404': { $ref: '#/components/responses/Error' }
+  /api/v2/me:
+    get:
+      tags: [identity]
+      operationId: getMe
+      responses:
+        '200':
+          description: 成员资料 + 组织 + allowed_actions
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Me'
+                  - $ref: '#/components/schemas/Envelope'
+    patch:
+      tags: [identity]
+      operationId: patchMe
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [display_name]
+              properties:
+                display_name: { type: string, maxLength: 80 }
+      responses:
+        '200':
+          description: 已更新
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Profile'
+                  - $ref: '#/components/schemas/Envelope'
+        '412': { $ref: '#/components/responses/Error' }
+        '428': { $ref: '#/components/responses/Error' }
+  /api/v2/me/password:
+    put:
+      tags: [identity]
+      operationId: changePassword
+      description: 修改密码并撤销除当前会话外的所有会话
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [current_password, new_password]
+              properties:
+                current_password: { type: string }
+                new_password: { type: string, minLength: 12, maxLength: 128 }
+      responses:
+        '200':
+          description: 已修改
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    properties:
+                      revoked_sessions: { type: integer }
+                  - $ref: '#/components/schemas/Envelope'
+  /api/v2/me/preferences:
+    get:
+      tags: [identity]
+      operationId: getPreferences
+      responses:
+        '200':
+          description: 偏好（ETag = revision）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Preferences'
+                  - $ref: '#/components/schemas/Envelope'
+    patch:
+      tags: [identity]
+      operationId: patchPreferences
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PreferencesPatch' }
+      responses:
+        '200':
+          description: 已更新
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Preferences'
+                  - $ref: '#/components/schemas/Envelope'
+        '412': { $ref: '#/components/responses/Error' }
+        '428': { $ref: '#/components/responses/Error' }
+  /api/public/v2/password-resets:
+    post:
+      tags: [identity]
+      operationId: requestPasswordReset
+      description: 恒定 202，不泄露邮箱是否存在
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string, format: email }
+      responses:
+        '202':
+          description: 已受理
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    properties:
+                      status: { type: string }
+                  - $ref: '#/components/schemas/Envelope'
+        '429': { $ref: '#/components/responses/Error' }
+  /api/public/v2/password-resets/resolve:
+    post:
+      tags: [identity]
+      operationId: resolvePasswordReset
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token: { type: string }
+      responses:
+        '200':
+          description: 返回脱敏邮箱
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    properties:
+                      email: { type: string }
+                  - $ref: '#/components/schemas/Envelope'
+        '422': { $ref: '#/components/responses/Error' }
+  /api/public/v2/password-resets/complete:
+    post:
+      tags: [identity]
+      operationId: completePasswordReset
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token, new_password]
+              properties:
+                token: { type: string }
+                new_password: { type: string, minLength: 12, maxLength: 128 }
+      responses:
+        '200':
+          description: 密码已重置并撤销全部会话
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    properties:
+                      status: { type: string }
+                  - $ref: '#/components/schemas/Envelope'
+        '422': { $ref: '#/components/responses/Error' }
+  /api/public/v2/organization-invitations/resolve:
+    post:
+      tags: [identity]
+      operationId: resolveOrganizationInvitation
+      description: 匿名解析邀请；只返回展示信息，不泄露内部 ID
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token: { type: string }
+      responses:
+        '200':
+          description: 邀请展示信息
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ResolvedInvitation'
+                  - $ref: '#/components/schemas/Envelope'
+        '422': { $ref: '#/components/responses/Error' }
+  /api/public/v2/organization-invitations/accept:
+    post:
+      tags: [identity]
+      operationId: acceptOrganizationInvitation
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token, display_name, password]
+              properties:
+                token: { type: string }
+                display_name: { type: string, maxLength: 80 }
+                password: { type: string, minLength: 12, maxLength: 128 }
+      responses:
+        '200':
+          description: 激活成功并下发会话
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/AcceptResult'
+                  - $ref: '#/components/schemas/Envelope'
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+  /api/v2/organization:
+    get:
+      tags: [identity]
+      operationId: getOrganization
+      responses:
+        '200':
+          description: 组织资料
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Organization'
+                  - $ref: '#/components/schemas/Envelope'
+    patch:
+      tags: [identity]
+      operationId: patchOrganization
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, maxLength: 100 }
+      responses:
+        '200':
+          description: 已更新（组织 admin）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Organization'
+                  - $ref: '#/components/schemas/Envelope'
+        '412': { $ref: '#/components/responses/Error' }
+        '428': { $ref: '#/components/responses/Error' }
+  /api/v2/organization/members:
+    get:
+      tags: [identity]
+      operationId: listOrganizationMembers
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: 成员目录（组织 admin）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/OrganizationMember' }
+                      page: { $ref: '#/components/schemas/CursorPage' }
+                  - $ref: '#/components/schemas/Envelope'
+  /api/v2/organization/members/{userId}:
+    get:
+      tags: [identity]
+      operationId: getOrganizationMember
+      parameters:
+        - $ref: '#/components/parameters/UserId'
+      responses:
+        '200':
+          description: 成员详情
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/OrganizationMember'
+                  - $ref: '#/components/schemas/Envelope'
+    patch:
+      tags: [identity]
+      operationId: patchOrganizationMember
+      description: 单命令补丁：organization_role 或 status
+      parameters:
+        - $ref: '#/components/parameters/UserId'
+        - $ref: '#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - type: object
+                  required: [organization_role]
+                  properties:
+                    organization_role: { type: string, enum: [admin, member] }
+                - type: object
+                  required: [status]
+                  properties:
+                    status: { type: string, enum: [active, disabled] }
+      responses:
+        '200':
+          description: 已更新
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/OrganizationMember'
+                  - $ref: '#/components/schemas/Envelope'
+        '409': { $ref: '#/components/responses/Error' }
+        '412': { $ref: '#/components/responses/Error' }
+        '428': { $ref: '#/components/responses/Error' }
+  /api/v2/organization/invitations:
+    get:
+      tags: [identity]
+      operationId: listOrganizationInvitations
+      parameters:
+        - name: status
+          in: query
+          schema: { type: string, enum: [pending, accepted, revoked, expired] }
+      responses:
+        '200':
+          description: 邀请记录（不含 token）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/Invitation' }
+                      page: { $ref: '#/components/schemas/CursorPage' }
+                  - $ref: '#/components/schemas/Envelope'
+    post:
+      tags: [identity]
+      operationId: createOrganizationInvitation
+      description: invitation_token 仅在创建响应与邮件中出现一次
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string, format: email }
+                display_name: { type: string }
+                organization_role: { type: string, enum: [admin, member] }
+                grants:
+                  type: array
+                  maxItems: 50
+                  items:
+                    type: object
+                    properties:
+                      workspace_id: { type: string, format: uuid }
+                      role: { type: string }
+                expires_in_hours: { type: integer }
+      responses:
+        '201':
+          description: 已创建
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/InvitationWithToken'
+                  - $ref: '#/components/schemas/Envelope'
+        '409': { $ref: '#/components/responses/Error' }
+  /api/v2/organization/invitations/{invitationId}/resend:
+    post:
+      tags: [identity]
+      operationId: resendOrganizationInvitation
+      parameters:
+        - $ref: '#/components/parameters/InvitationId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: 已换发新 token
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Invitation'
+                  - $ref: '#/components/schemas/Envelope'
+  /api/v2/organization/invitations/{invitationId}/revoke:
+    post:
+      tags: [identity]
+      operationId: revokeOrganizationInvitation
+      parameters:
+        - $ref: '#/components/parameters/InvitationId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '204': { description: 已撤销 }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/v2/organization/workspaces:
+    get:
+      tags: [workspaces]
+      operationId: listOrganizationWorkspaces
+      responses:
+        '200':
+          description: 治理视图（全部工作区，含 archived）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/GovernanceWorkspace' }
+                      page: { $ref: '#/components/schemas/CursorPage' }
+                  - $ref: '#/components/schemas/Envelope'
+    post:
+      tags: [workspaces]
+      operationId: createOrganizationWorkspace
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, maxLength: 100 }
+                description: { type: string }
+                default_resource_model_id: { type: string, format: uuid }
+      responses:
+        '201':
+          description: 创建者获得 workspace admin membership
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/GovernanceWorkspace'
+                  - $ref: '#/components/schemas/Envelope'
+  /api/v2/organization/workspaces/{workspaceId}:
+    get:
+      tags: [workspaces]
+      operationId: getOrganizationWorkspace
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+      responses:
+        '200':
+          description: 治理元数据
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/GovernanceWorkspace'
+                  - $ref: '#/components/schemas/Envelope'
+  /api/v2/organization/workspaces/{workspaceId}/archive:
+    post:
+      tags: [workspaces]
+      operationId: archiveOrganizationWorkspace
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: 已归档
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/GovernanceWorkspace'
+                  - $ref: '#/components/schemas/Envelope'
+        '409': { $ref: '#/components/responses/Error' }
+  /api/v2/organization/workspaces/{workspaceId}/restore:
+    post:
+      tags: [workspaces]
+      operationId: restoreOrganizationWorkspace
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: 已恢复（需要至少一名 active admin）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/GovernanceWorkspace'
+                  - $ref: '#/components/schemas/Envelope'
+        '409': { $ref: '#/components/responses/Error' }
+  /api/v2/organization/workspaces/{workspaceId}/members:
+    post:
+      tags: [workspaces]
+      operationId: grantOrganizationWorkspaceMembership
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [user_id, role]
+              properties:
+                user_id: { type: string, format: uuid }
+                role: { type: string, enum: [admin, editor, reviewer, viewer] }
+      responses:
+        '201':
+          description: 已授予
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                  - $ref: '#/components/schemas/Envelope'
+        '409': { $ref: '#/components/responses/Error' }
+  /api/v2/organization/workspaces/{workspaceId}/members/{membershipId}:
+    patch:
+      tags: [workspaces]
+      operationId: patchOrganizationWorkspaceMembership
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/MembershipId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [role]
+              properties:
+                role: { type: string, enum: [admin, editor, reviewer, viewer] }
+      responses:
+        '200':
+          description: 已变更（保护最后一名 active admin）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/GovernanceWorkspace'
+                  - $ref: '#/components/schemas/Envelope'
+        '409': { $ref: '#/components/responses/Error' }
+    delete:
+      tags: [workspaces]
+      operationId: revokeOrganizationWorkspaceMembership
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/MembershipId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '204': { description: 已撤销 }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/v2/workspaces:
+    get:
+      tags: [workspaces]
+      operationId: listMyWorkspaces
+      responses:
+        '200':
+          description: 调用者持有的 workspace memberships
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/WorkspaceSummary' }
+                      page: { $ref: '#/components/schemas/CursorPage' }
+                  - $ref: '#/components/schemas/Envelope'
+  /api/v2/workspaces/{workspaceId}:
+    get:
+      tags: [workspaces]
+      operationId: getWorkspace
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+      responses:
+        '200':
+          description: 工作区摘要
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/WorkspaceSummary'
+                  - $ref: '#/components/schemas/Envelope'
+    patch:
+      tags: [workspaces]
+      operationId: patchWorkspace
+      description: 更新工作区元数据（workspace admin）
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string, maxLength: 100 }
+                description: { type: string }
+                default_resource_model_id: { type: string, format: uuid }
+      responses:
+        '200':
+          description: 已更新
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/WorkspaceSettings'
+                  - $ref: '#/components/schemas/Envelope'
+  /api/v2/workspaces/{workspaceId}/summary:
+    get:
+      tags: [workspaces]
+      operationId: getWorkspaceSummary
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+      responses:
+        '200':
+          description: stats + counts 汇总
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    properties:
+                      stats: { $ref: '#/components/schemas/WorkspaceStats' }
+                      counts: { $ref: '#/components/schemas/WorkspaceCounts' }
+                  - $ref: '#/components/schemas/Envelope'
+  /api/v2/workspaces/{workspaceId}/members:
+    get:
+      tags: [workspaces]
+      operationId: listWorkspaceMembers
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+      responses:
+        '200':
+          description: 成员列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/WorkspaceMemberDetail' }
+                      page: { $ref: '#/components/schemas/CursorPage' }
+                  - $ref: '#/components/schemas/Envelope'
+    post:
+      tags: [workspaces]
+      operationId: addWorkspaceMember
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [user_id, role]
+              properties:
+                user_id: { type: string, format: uuid }
+                role: { type: string, enum: [admin, editor, reviewer, viewer] }
+      responses:
+        '201':
+          description: 已添加
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/WorkspaceMemberDetail'
+                  - $ref: '#/components/schemas/Envelope'
+        '409': { $ref: '#/components/responses/Error' }
+  /api/v2/workspaces/{workspaceId}/members/me/leave:
+    post:
+      tags: [workspaces]
+      operationId: leaveWorkspace
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '204': { description: 已退出（最后一名 active admin 不能退出） }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/v2/workspaces/{workspaceId}/eligible-members:
+    get:
+      tags: [workspaces]
+      operationId: listEligibleWorkspaceMembers
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - name: q
+          in: query
+          schema: { type: string }
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: 同组织 active 且未加入当前工作区的成员（脱敏邮箱）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/EligibleMember' }
+                      page: { $ref: '#/components/schemas/CursorPage' }
+                  - $ref: '#/components/schemas/Envelope'
+  /api/v2/workspaces/{workspaceId}/members/{membershipId}:
+    patch:
+      tags: [workspaces]
+      operationId: patchWorkspaceMember
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/MembershipId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [role]
+              properties:
+                role: { type: string, enum: [admin, editor, reviewer, viewer] }
+      responses:
+        '200':
+          description: 已变更
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/WorkspaceMemberDetail'
+                  - $ref: '#/components/schemas/Envelope'
+        '409': { $ref: '#/components/responses/Error' }
+    delete:
+      tags: [workspaces]
+      operationId: removeWorkspaceMember
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/MembershipId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '204': { description: 已移除 }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/v2/workspaces/{workspaceId}/invitations:
+    get:
+      tags: [workspaces]
+      operationId: listWorkspaceInvitations
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+      responses:
+        '200':
+          description: 当前工作区的 workspace-scope 邀请
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/Invitation' }
+                      page: { $ref: '#/components/schemas/CursorPage' }
+                  - $ref: '#/components/schemas/Envelope'
+    post:
+      tags: [workspaces]
+      operationId: createWorkspaceInvitation
+      description: workspace admin 创建 authority_scope=workspace 邀请
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string, format: email }
+                display_name: { type: string }
+                role: { type: string, enum: [admin, editor, reviewer, viewer] }
+                expires_in_hours: { type: integer }
+      responses:
+        '201':
+          description: 已创建，token 仅此一次返回
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/InvitationWithToken'
+                  - $ref: '#/components/schemas/Envelope'
+        '409': { $ref: '#/components/responses/Error' }
+  /api/v2/workspaces/{workspaceId}/invitations/{invitationId}/resend:
+    post:
+      tags: [workspaces]
+      operationId: resendWorkspaceInvitation
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/InvitationId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: 已换发
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Invitation'
+                  - $ref: '#/components/schemas/Envelope'
+  /api/v2/workspaces/{workspaceId}/invitations/{invitationId}/revoke:
+    post:
+      tags: [workspaces]
+      operationId: revokeWorkspaceInvitation
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/InvitationId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '204': { description: 已撤销 }
+        '409': { $ref: '#/components/responses/Error' }
 components:
+  responses:
+    Error:
+      description: v2 错误信封
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
   parameters:
     WorkspaceId:
       name: workspaceId
@@ -371,6 +1297,21 @@ components:
       schema: { type: string, format: uuid }
     AssetId:
       name: assetId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    UserId:
+      name: userId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    InvitationId:
+      name: invitationId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    MembershipId:
+      name: membershipId
       in: path
       required: true
       schema: { type: string, format: uuid }
@@ -522,3 +1463,193 @@ components:
         parent_version_id: { type: string, format: uuid, nullable: true }
         content_checksum: { type: string }
         created_at: { type: string, format: date-time }
+    SessionInfo:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        created_at: { type: string, format: date-time }
+        last_seen_at: { type: string, format: date-time }
+        absolute_expires_at: { type: string, format: date-time }
+        ip_prefix: { type: string }
+        user_agent: { type: string }
+        is_current: { type: boolean }
+    Profile:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string }
+        display_name: { type: string }
+        organization_role: { type: string }
+        status: { type: string }
+        last_login_at: { type: string, format: date-time, nullable: true }
+        revision: { type: integer }
+        etag: { type: string }
+    OrganizationRef:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        slug: { type: string }
+        name: { type: string }
+    Me:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string }
+        display_name: { type: string }
+        organization_role: { type: string }
+        status: { type: string }
+        last_login_at: { type: string, format: date-time, nullable: true }
+        revision: { type: integer }
+        organization: { $ref: '#/components/schemas/OrganizationRef' }
+        allowed_actions:
+          type: array
+          items: { type: string }
+    Preferences:
+      type: object
+      properties:
+        default_workspace_id: { type: string, format: uuid, nullable: true }
+        timezone: { type: string }
+        email_notifications_enabled: { type: boolean }
+        revision: { type: integer }
+        updated_at: { type: string, format: date-time }
+    PreferencesPatch:
+      type: object
+      properties:
+        default_workspace_id: { type: string, format: uuid, nullable: true }
+        timezone: { type: string }
+        email_notifications_enabled: { type: boolean }
+    ResolvedInvitation:
+      type: object
+      properties:
+        organization_name: { type: string }
+        email: { type: string, description: 脱敏邮箱 }
+        inviter_display_name: { type: string }
+        workspaces:
+          type: array
+          items: { type: string }
+        expires_at: { type: string, format: date-time }
+    AcceptResult:
+      type: object
+      properties:
+        user_id: { type: string, format: uuid }
+        email: { type: string }
+        organization_id: { type: string, format: uuid }
+        workspace_ids:
+          type: array
+          items: { type: string, format: uuid }
+    Organization:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        slug: { type: string }
+        name: { type: string }
+        status: { type: string }
+        revision: { type: integer }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        etag: { type: string }
+    OrganizationMember:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string }
+        display_name: { type: string }
+        status: { type: string, enum: [active, disabled, deleted] }
+        organization_role: { type: string }
+        last_login_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }
+        revision: { type: integer }
+        etag: { type: string }
+    Invitation:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string }
+        display_name: { type: string }
+        organization_role: { type: string }
+        authority_scope: { type: string, enum: [organization, workspace] }
+        scope_workspace_id: { type: string, format: uuid, nullable: true }
+        status: { type: string, enum: [pending, accepted, revoked, expired] }
+        invited_by: { type: string, format: uuid }
+        expires_at: { type: string, format: date-time }
+        grants:
+          type: array
+          items:
+            type: object
+            properties:
+              workspace_id: { type: string, format: uuid }
+              role: { type: string }
+        created_at: { type: string, format: date-time }
+        accepted_at: { type: string, format: date-time, nullable: true }
+        revision: { type: integer }
+        etag: { type: string }
+    InvitationWithToken:
+      type: object
+      properties:
+        invitation: { $ref: '#/components/schemas/Invitation' }
+        invitation_token:
+          type: string
+          description: 仅创建响应和邮件中出现一次
+    GovernanceWorkspace:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        slug: { type: string }
+        name: { type: string }
+        description: { type: string }
+        status: { type: string, enum: [active, archived] }
+        revision: { type: integer }
+        created_by: { type: string, format: uuid }
+        etag: { type: string }
+    WorkspaceSummary:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        slug: { type: string }
+        name: { type: string }
+        description: { type: string }
+        role: { type: string }
+        default_resource_model_id: { type: string, format: uuid, nullable: true }
+        counts: { $ref: '#/components/schemas/WorkspaceCounts' }
+        updated_at: { type: string, format: date-time }
+    WorkspaceSettings:
+      type: object
+      properties:
+        name: { type: string }
+        default_resource_model_id: { type: string, format: uuid, nullable: true }
+        description: { type: string }
+    WorkspaceCounts:
+      type: object
+      properties:
+        pending_conversations: { type: integer }
+        documents: { type: integer }
+        pending_reviews: { type: integer }
+        running_task_runs: { type: integer }
+    WorkspaceStats:
+      type: object
+      properties:
+        assets_total: { type: integer }
+        assets_published: { type: integer }
+        assets_pending_review: { type: integer }
+        assets_created_this_month: { type: integer }
+        documents_total: { type: integer }
+        task_run_success_rate: { type: number }
+        generated_at: { type: string, format: date-time }
+    WorkspaceMemberDetail:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        display_name: { type: string }
+        login_name: { type: string }
+        role: { type: string }
+        status: { type: string }
+        joined_at: { type: string, format: date-time }
+        last_seen_at: { type: string, format: date-time, nullable: true }
+    EligibleMember:
+      type: object
+      properties:
+        user_id: { type: string, format: uuid }
+        display_name: { type: string }
+        email:
+          type: string
+          description: 脱敏邮箱（首字符 + *** + @domain）

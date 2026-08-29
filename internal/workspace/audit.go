@@ -15,8 +15,10 @@ const (
 	AuditInvitationCreate = "workspace.invitation.create"
 	AuditInvitationAccept = "workspace.invitation.accept"
 	AuditInvitationRevoke = "workspace.invitation.revoke"
+	AuditMemberAdd        = "workspace.member.add"
 	AuditMemberRoleChange = "workspace.member.role_change"
 	AuditMemberRemove     = "workspace.member.remove"
+	AuditMemberLeft       = "workspace.member.left"
 	AuditSettingsUpdate   = "workspace.settings.update"
 )
 

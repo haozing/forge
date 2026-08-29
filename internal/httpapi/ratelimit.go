@@ -128,17 +128,17 @@ func rateLimitMiddleware(next http.Handler) http.Handler {
 	trustXFF := trustForwardedFor()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/api/sessions":
+		case r.Method == http.MethodPost && (r.URL.Path == "/api/public/v2/sessions" || r.URL.Path == "/api/sessions"):
 			addr := socketAddr(r, trustXFF)
 			// Coarse per-address backstop caps total credential traffic; the
-			// fine per-(address, login_name) bucket stops single-account brute
-			// force without penalizing legitimate multi-user clients.
+			// fine per-(address, login identifier) bucket stops single-account
+			// brute force without penalizing legitimate multi-user clients.
 			if !sharedRateLimiter.allow("login-ip:"+addr, loginBackstopLimit) {
 				w.Header().Set("Retry-After", "30")
 				writeError(w, http.StatusTooManyRequests, "rate_limited")
 				return
 			}
-			loginName := peekLoginName(r)
+			loginName := peekLoginIdentifier(r)
 			if !sharedRateLimiter.allow(stableClientKey("login:"+addr+":"+loginName), loginLimit) {
 				w.Header().Set("Retry-After", "30")
 				writeError(w, http.StatusTooManyRequests, "rate_limited")
@@ -192,10 +192,11 @@ func bearerToken(r *http.Request) string {
 	return ""
 }
 
-// peekLoginName extracts login_name from a small JSON login body for bucket
-// keying. The body is read bounded and restored so handlers see it unchanged;
-// malformed bodies simply yield an empty name.
-func peekLoginName(r *http.Request) string {
+// peekLoginIdentifier extracts the login identifier (v2 email or legacy
+// login_name) from a small JSON login body for bucket keying. The body is
+// read bounded and restored so handlers see it unchanged; malformed bodies
+// simply yield an empty name.
+func peekLoginIdentifier(r *http.Request) string {
 	if r.Body == nil || r.Body == http.NoBody {
 		return ""
 	}
@@ -208,10 +209,15 @@ func peekLoginName(r *http.Request) string {
 	r.Body.Close()
 	r.Body = io.NopCloser(bytes.NewReader(data))
 	var payload struct {
+		Email     string `json:"email"`
 		LoginName string `json:"login_name"`
 	}
 	if err := json.Unmarshal(data, &payload); err != nil {
 		return ""
 	}
-	return strings.ToLower(strings.TrimSpace(payload.LoginName))
+	identifier := payload.Email
+	if identifier == "" {
+		identifier = payload.LoginName
+	}
+	return strings.ToLower(strings.TrimSpace(identifier))
 }
