@@ -96,6 +96,7 @@ CREATE TABLE asset.asset_versions (
     created_by uuid NOT NULL REFERENCES identity.users(id),
     created_at timestamptz NOT NULL DEFAULT now(),
     UNIQUE (organization_id, id),
+    UNIQUE (organization_id, asset_id, id),
     UNIQUE (asset_id, version_no),
     CHECK ((confirmation_status = 'human_confirmed')
         = (confirmed_by IS NOT NULL AND confirmed_at IS NOT NULL))

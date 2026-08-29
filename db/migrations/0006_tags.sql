@@ -74,9 +74,6 @@ CREATE TABLE asset.asset_version_tags (
         REFERENCES asset.tags (organization_id, id)
 );
 
-ALTER TABLE asset.asset_version_tags
-    ADD CONSTRAINT asset_version_tags_version_uq UNIQUE (organization_id, asset_version_id, id);
-
 CREATE INDEX asset_version_tags_tag_idx
     ON asset.asset_version_tags (tag_id, asset_version_id);
 
