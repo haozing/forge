@@ -185,6 +185,13 @@ func (s Service) Submit(ctx context.Context, principal auth.Principal, workspace
 	if assetVisibility == access.VisibilityPublic && !access.Valid(assetVisibility) {
 		return Request{}, ErrInvalidInput
 	}
+	// The immutable publishing policy bound to the materialized version gates
+	// submission: human confirmation and clean attachments are re-checked in
+	// this transaction because the working version may have moved since the
+	// draft commit.
+	if _, err := enforcePublishPolicyTx(ctx, tx, principal.OrganizationID, assetID, versionID); err != nil {
+		return Request{}, err
+	}
 	var request Request
 	var decisionComment, cancelReason *string
 	err = tx.QueryRow(ctx, `
@@ -234,6 +241,21 @@ func mapCommitError(err error) error {
 	default:
 		return err
 	}
+}
+
+// enforcePublishPolicyTx re-reads the immutable publishing policy bound to the
+// asset's current working version and enforces the human-confirmation and
+// clean-attachment gates against the request's sealed version. The asset
+// sentinels pass through unwrapped so every surface maps them alike.
+func enforcePublishPolicyTx(ctx context.Context, tx pgx.Tx, organizationID, assetID, versionID string) (asset.PublishingPolicy, error) {
+	policy, err := asset.PublishPolicyForAssetTx(ctx, tx, organizationID, assetID)
+	if err != nil {
+		return asset.PublishingPolicy{}, err
+	}
+	if err := asset.EnsurePublishableVersionTx(ctx, tx, organizationID, versionID, policy); err != nil {
+		return asset.PublishingPolicy{}, err
+	}
+	return policy, nil
 }
 
 func publicationEventFor(status, _ string) string {
@@ -533,6 +555,17 @@ func (s Service) decide(ctx context.Context, principal auth.Principal, workspace
 	request.DecidedAt = &now
 	request.ETag = request.ID
 	if decision == "approve" {
+		// Approval re-reads the policy inside the decision transaction: the
+		// asset may have switched to a direct policy (the request must go
+		// through direct publish instead) and the version's confirmation or
+		// attachment facts may have moved since submission.
+		policy, err := enforcePublishPolicyTx(ctx, tx, principal.OrganizationID, assetID, versionID)
+		if err != nil {
+			return Request{}, err
+		}
+		if policy.Mode != asset.PublishingModeApproval {
+			return Request{}, ErrConflict
+		}
 		// Approval switches the published pointer inside the same transaction.
 		row, err := asset.LoadLifecycleTx(ctx, tx, principal.OrganizationID, assetID)
 		if err != nil {
@@ -675,26 +708,41 @@ func (s Service) Batch(ctx context.Context, principal auth.Principal, workspaceI
 			request, err = s.Reject(ctx, principal, workspaceID, item.RequestID, item.Comment)
 		}
 		entry := BatchItemResult{RequestID: item.RequestID}
-		switch {
-		case err == nil:
+		if code := batchErrorCode(err); code != "" {
+			entry.ErrorCode = code
+		} else {
 			entry.OK = true
 			entry.Request = &request
-		case errors.Is(err, ErrNotFound):
-			entry.ErrorCode = "publication_request_not_found"
-		case errors.Is(err, ErrConflict):
-			entry.ErrorCode = "publication_request_not_pending"
-		case errors.Is(err, ErrSelfApproval):
-			entry.ErrorCode = "self_approval_not_allowed"
-		case errors.Is(err, ErrVersionSuperseded):
-			entry.ErrorCode = "request_version_superseded"
-		case errors.Is(err, ErrForbidden):
-			entry.ErrorCode = "forbidden"
-		default:
-			entry.ErrorCode = "publication_request_error"
 		}
 		result.Items = append(result.Items, entry)
 	}
 	return result, nil
+}
+
+// batchErrorCode maps a decision failure onto the per-item error-code
+// contract. The publishing-policy gates surface the shared asset sentinels so
+// batch and HTTP responses agree on one vocabulary.
+func batchErrorCode(err error) string {
+	switch {
+	case err == nil:
+		return ""
+	case errors.Is(err, ErrNotFound):
+		return "publication_request_not_found"
+	case errors.Is(err, ErrConflict):
+		return "publication_request_not_pending"
+	case errors.Is(err, asset.ErrConfirmationRequired):
+		return "human_confirmation_required"
+	case errors.Is(err, asset.ErrAttachmentNotClean):
+		return "attachments_not_clean"
+	case errors.Is(err, ErrSelfApproval):
+		return "self_approval_not_allowed"
+	case errors.Is(err, ErrVersionSuperseded):
+		return "request_version_superseded"
+	case errors.Is(err, ErrForbidden):
+		return "forbidden"
+	default:
+		return "publication_request_error"
+	}
 }
 
 // AddComment appends a discussion entry; the thread stays readable and open

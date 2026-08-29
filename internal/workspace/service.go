@@ -11,6 +11,7 @@ import (
 
 	"agentchunzhi/internal/auth"
 	"agentchunzhi/internal/authz"
+	"agentchunzhi/internal/eventing"
 	"agentchunzhi/internal/store"
 
 	"github.com/jackc/pgx/v5"
@@ -33,6 +34,10 @@ var (
 
 type Service struct {
 	Store *store.Store
+	// Events, when set, receives workspace.membership_changed facts in the
+	// same transaction as the membership change; nil is a wiring error for
+	// the membership commands.
+	Events *eventing.EventStore
 }
 
 type Counts struct {

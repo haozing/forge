@@ -201,14 +201,29 @@ func (s Service) ListMembers(ctx context.Context, principal auth.Principal, limi
 	if limit <= 0 || limit > 100 {
 		limit = 20
 	}
+	// Keyset cursor "<RFC3339Nano created_at>|<user_id>"; the whole tuple is
+	// ordered so equal created_at cannot loop a page.
+	cursorCreated := ""
+	cursorID := ""
+	if cursor != "" {
+		parts := strings.SplitN(cursor, "|", 2)
+		if len(parts) != 2 || !s.validID(parts[1]) {
+			return nil, "", ErrInvalidInput
+		}
+		if _, err := time.Parse(time.RFC3339Nano, parts[0]); err != nil {
+			return nil, "", ErrInvalidInput
+		}
+		cursorCreated, cursorID = parts[0], parts[1]
+	}
 	rows, err := s.Store.Pool.Query(ctx, `
 		SELECT id::text, COALESCE(email, ''), display_name, status, COALESCE(organization_role, ''),
 		       last_login_at, created_at, revision
 		FROM identity.users
 		WHERE organization_id = $1::uuid AND user_type = 'member' AND status <> 'deleted'
+		  AND ($3 = '' OR (created_at, id) > (NULLIF($4, '')::timestamptz, $3::uuid))
 		ORDER BY created_at, id
 		LIMIT $2
-	`, principal.OrganizationID, limit+1)
+	`, principal.OrganizationID, limit+1, cursorID, cursorCreated)
 	if err != nil {
 		return nil, "", fmt.Errorf("list organization members: %w", err)
 	}
@@ -225,8 +240,9 @@ func (s Service) ListMembers(ctx context.Context, principal auth.Principal, limi
 	}
 	next := ""
 	if len(items) > limit {
-		next = items[limit-1].UserID
 		items = items[:limit]
+		last := items[len(items)-1]
+		next = last.CreatedAt.UTC().Format(time.RFC3339Nano) + "|" + last.UserID
 	}
 	return items, next, rows.Err()
 }

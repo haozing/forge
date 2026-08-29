@@ -204,9 +204,10 @@ func (s SessionService) TouchSession(ctx context.Context, sessionID string) {
 		return
 	}
 	_, _ = s.Store.Pool.Exec(ctx, `
-		UPDATE identity.sessions SET last_seen_at = now()
+		UPDATE identity.sessions
+		SET last_seen_at = now(), idle_expires_at = now() + make_interval(secs => $3)
 		WHERE id = $1::uuid AND last_seen_at < now() - make_interval(secs => $2)
-	`, sessionID, LastSeenThrottle.Seconds())
+	`, sessionID, LastSeenThrottle.Seconds(), SessionIdleTTL.Seconds())
 }
 
 // CurrentSessionID resolves the session id behind the request cookie without
@@ -216,7 +217,7 @@ func (s SessionService) CurrentSessionID(ctx context.Context, r *http.Request) (
 	if s.Store == nil || s.Store.Pool == nil {
 		return "", ErrUnauthenticated
 	}
-	cookie, err := r.Cookie(sessionCookieName)
+	cookie, err := r.Cookie(SessionCookieConfig.Name)
 	if err != nil || cookie.Value == "" {
 		return "", ErrUnauthenticated
 	}

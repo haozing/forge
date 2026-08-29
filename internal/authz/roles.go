@@ -89,6 +89,10 @@ var memberRoleActions = map[string]map[string]bool{
 		ActionAssetRead:           true,
 		ActionAssetWrite:          true,
 		ActionAssetConfirm:        true,
+		ActionAssetArchive:        true,
+		// Publish is "allowed by policy": the matrix grants the action and the
+		// publish command enforces publishing.mode = direct.
+		ActionAssetPublish:        true,
 		ActionProcessingRun:       true,
 		ActionQueryExecute:        true,
 		ActionPublicationSubmit:   true,

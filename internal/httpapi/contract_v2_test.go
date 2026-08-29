@@ -101,3 +101,61 @@ func TestIdempotencyKeyRequiredForV2Writes(t *testing.T) {
 		t.Fatalf("body = %s", recorder.Body.String())
 	}
 }
+
+// TestIdempotencyCoverageMatrix locks the v2 replay-coverage surface: member
+// v2 and open v2 writes are covered, public v2 and safe methods are not.
+func TestIdempotencyCoverageMatrix(t *testing.T) {
+	cases := []struct {
+		method, path string
+		want         bool
+	}{
+		{http.MethodPost, "/api/v2/workspaces/w/publication-requests", true},
+		{http.MethodPatch, "/api/v2/assets/a/draft", true},
+		{http.MethodPost, "/api/v2/assets/a/publish", true},
+		{http.MethodPost, "/api/open/v2/hooks/assets", true},
+		{http.MethodPost, "/api/open/v2/query", false},
+		{http.MethodGet, "/api/v2/assets/a/draft", false},
+		{http.MethodPost, "/api/public/v2/password-resets/complete", false},
+		{http.MethodPost, "/api/public/v2/organization-invitations/accept", false},
+		{http.MethodPost, "/api/frontend/workspaces", true},
+		{http.MethodPost, "/api/v2/workspaces/w/query", false},
+	}
+	for _, tc := range cases {
+		request := httptest.NewRequest(tc.method, tc.path, nil)
+		if got := requiresHTTPIdempotency(request); got != tc.want {
+			t.Fatalf("requiresHTTPIdempotency(%s %s) = %v, want %v", tc.method, tc.path, got, tc.want)
+		}
+	}
+}
+
+// TestIdempotencyOperationNamespaces locks the per-surface operation keys so
+// replay storage cannot collide across API families.
+func TestIdempotencyOperationNamespaces(t *testing.T) {
+	cases := []struct{ path, prefix string }{
+		{"/api/v2/assets/a/publish", "v2.http:"},
+		{"/api/open/v2/hooks/assets", "open.http:"},
+		{"/api/frontend/workspaces", "frontend.http:"},
+	}
+	for _, tc := range cases {
+		request := httptest.NewRequest(http.MethodPost, tc.path, nil)
+		if got := idempotencyOperation(request); !strings.HasPrefix(got, tc.prefix) {
+			t.Fatalf("idempotencyOperation(%s) = %q, want prefix %q", tc.path, got, tc.prefix)
+		}
+	}
+}
+
+// TestDraftPatchRequiresIfMatch: the v2 draft autosave refuses a missing
+// If-Match precondition with 428.
+func TestDraftPatchRequiresIfMatch(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPatch, "/api/v2/assets/x/draft", nil)
+	if _, ok := requireIfMatchV2(recorder, request); ok {
+		t.Fatal("missing If-Match must be refused")
+	}
+	if recorder.Code != http.StatusPreconditionRequired {
+		t.Fatalf("status = %d, want 428", recorder.Code)
+	}
+	if !strings.Contains(recorder.Body.String(), "precondition_required") {
+		t.Fatalf("body = %s", recorder.Body.String())
+	}
+}

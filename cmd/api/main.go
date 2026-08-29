@@ -166,6 +166,13 @@ func main() {
 		},
 	}
 	memberAssetService := assetservice.MemberService{Store: db, Events: &events, Policy: authz.WorkspacePolicyService{Store: db}}
+	// Cookie identity is fixed from configuration, never from the request:
+	// production uses the __Host- prefix which forces Secure, Path=/ and no
+	// Domain.
+	if cfg.Environment == "production" {
+		auth.SessionCookieConfig.Name = "__Host-agent_session"
+		auth.SessionCookieConfig.Secure = true
+	}
 	deps := httpapi.Dependencies{
 		Store:           db,
 		Authenticator:   auth.APIKeyAuthenticator{Store: db},
@@ -189,7 +196,7 @@ func main() {
 			DefaultTimeout: cfg.AgentModelDefaultTimeout, Health: modelRegistry,
 		},
 		AdminService:         adminservice.Service{Store: db},
-		WorkspaceService:     workspace.Service{Store: db},
+		WorkspaceService:     workspace.Service{Store: db, Events: &events},
 		ResourceModelService: resourcemodel.Service{Store: db, Policy: authz.WorkspacePolicyService{Store: db}},
 		MemberAssetService:   memberAssetService,
 		TransferService:      assetservice.TransferService{Store: db, Policy: authz.WorkspacePolicyService{Store: db}},

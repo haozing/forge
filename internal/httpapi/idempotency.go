@@ -66,7 +66,16 @@ func frontendIdempotency(deps Dependencies, next http.Handler) http.Handler {
 			return
 		}
 		principal, err := deps.SessionService.Authenticate(r.Context(), r)
+		if err != nil && strings.HasPrefix(r.URL.Path, "/api/open/") {
+			// Open v2 routes authenticate technical identities with API keys;
+			// they take part in the same replay contract under the key subject.
+			principal, err = deps.Authenticator.Authenticate(r.Context(), r)
+		}
 		if err != nil {
+			// Anonymous surfaces (public v2) and unauthenticated requests are
+			// not covered by the shared idempotency table: the anonymous
+			// flows' replay boundary is the one-time token consumption, and
+			// authentication failures belong to the handlers.
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -93,7 +102,7 @@ func frontendIdempotency(deps Dependencies, next http.Handler) http.Handler {
 			return
 		}
 		defer cleanup()
-		operation := "frontend.http:" + r.Method + ":" + r.URL.Path
+		operation := idempotencyOperation(r)
 		replay, reserved, err := reserveHTTPIdempotency(r.Context(), deps.Store, principal, operation, key, requestHash)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "idempotency_check_failed")
@@ -131,22 +140,42 @@ func frontendIdempotency(deps Dependencies, next http.Handler) http.Handler {
 }
 
 func requiresHTTPIdempotency(r *http.Request) bool {
-	if !strings.HasPrefix(r.URL.Path, "/api/frontend/") {
+	path := r.URL.Path
+	// Member frontend (legacy), v2 member routes and the open v2 technical
+	// surface share the replay contract. Public v2 stays excluded: anonymous
+	// flows have no subject row, and their one-time tokens are the idempotency
+	// boundary.
+	covered := strings.HasPrefix(path, "/api/frontend/") ||
+		strings.HasPrefix(path, "/api/v2/") ||
+		strings.HasPrefix(path, "/api/open/v2/")
+	if !covered {
 		return false
 	}
 	if r.Method != http.MethodPost && r.Method != http.MethodPatch && r.Method != http.MethodPut && r.Method != http.MethodDelete {
 		return false
 	}
-	if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/query") {
+	if r.Method == http.MethodPost && strings.HasSuffix(path, "/query") {
 		return false
 	}
-	if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/references/validate") {
+	if r.Method == http.MethodPost && strings.HasSuffix(path, "/references/validate") {
 		return false
 	}
-	if strings.HasSuffix(r.URL.Path, "/stream") {
+	if strings.HasSuffix(path, "/stream") {
 		return false
 	}
 	return true
+}
+
+// idempotencyOperation namespaces the stored key per surface and request.
+func idempotencyOperation(r *http.Request) string {
+	switch {
+	case strings.HasPrefix(r.URL.Path, "/api/v2/"):
+		return "v2.http:" + r.Method + ":" + r.URL.Path
+	case strings.HasPrefix(r.URL.Path, "/api/open/"):
+		return "open.http:" + r.Method + ":" + r.URL.Path
+	default:
+		return "frontend.http:" + r.Method + ":" + r.URL.Path
+	}
 }
 
 var errIdempotentRequestTooLarge = errors.New("idempotent request is too large")

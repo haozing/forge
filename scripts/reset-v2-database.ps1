@@ -41,9 +41,14 @@ $env:DATABASE_MIGRATION_URL = if ($env:DATABASE_MIGRATION_URL) { $env:DATABASE_M
 docker compose run --rm migrate
 if ($LASTEXITCODE -ne 0) { throw "migrate failed" }
 
-# Schema contract verification: the runtime role must see every baseline file applied.
-$env:DATABASE_URL = if ($env:DATABASE_URL) { $env:DATABASE_URL } else { "postgresql://$user@$container:5432/$Database?sslmode=disable" }
-go run ./cmd/migrate -verify 2>$null
-if ($LASTEXITCODE -ne 0) { Write-Host "note: optional verify hook not present; run scripts/verify-v2-schema.sql manually" }
+# Schema contract verification: run the contract spot checks and require the
+# all-clear marker; any "fail:" row means the baseline drifted.
+$verifySqlPath = Join-Path $PSScriptRoot "verify-v2-schema.sql"
+$verifySql = Get-Content $verifySqlPath -Raw
+$verifyOutput = docker exec $container psql -v ON_ERROR_STOP=1 -U $user -d $Database -c $verifySql
+$verifyOutput | Write-Host
+if (-not ($verifyOutput -match "schema_contract_ok")) {
+    throw "schema contract verification failed: see fail rows above"
+}
 
 Write-Host "Rebuilding '$Database' complete. Run 'docker compose up api worker' to start from the empty baseline."

@@ -115,9 +115,12 @@ func (s FacetService) Counts(ctx context.Context, principal auth.Principal, work
 		where = append(where, fmt.Sprintf(
 			"EXISTS (SELECT 1 FROM asset.asset_version_tags fx WHERE fx.asset_version_id = %s AND fx.tag_id = ANY(%s::uuid[]))", pointer, arg(anyIDs)))
 	}
-	for _, id := range allIDs {
+	for index, id := range allIDs {
+		// UUIDs contain '-', which is illegal in an unquoted identifier: use
+		// indexed fixed aliases.
+		alias := fmt.Sprintf("fa%d", index)
 		where = append(where, fmt.Sprintf(
-			"EXISTS (SELECT 1 FROM asset.asset_version_tags fa%s WHERE fa%s.asset_version_id = %s AND fa%s.tag_id = ANY(%s::uuid[]))", id, id, pointer, id, arg([]string{id})))
+			"EXISTS (SELECT 1 FROM asset.asset_version_tags %s WHERE %s.asset_version_id = %s AND %s.tag_id = ANY(%s::uuid[]))", alias, alias, pointer, alias, arg([]string{id})))
 	}
 	if len(noneIDs) > 0 {
 		where = append(where, fmt.Sprintf(

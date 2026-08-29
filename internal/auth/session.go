@@ -13,7 +13,13 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-const sessionCookieName = "agent_session"
+// SessionCookieConfig is fixed once at process startup from configuration and
+// must never be derived from the request. Production uses the __Host- prefix
+// (Secure, Path=/, no Domain); development keeps the plain name.
+var SessionCookieConfig = struct {
+	Name   string
+	Secure bool
+}{Name: "agent_session", Secure: false}
 
 type SessionService struct {
 	Store *store.Store
@@ -50,7 +56,7 @@ func (s SessionService) authenticateSession(ctx context.Context, r *http.Request
 	if s.Store == nil || s.Store.Pool == nil {
 		return Principal{}, "", ErrUnauthenticated
 	}
-	cookie, err := r.Cookie(sessionCookieName)
+	cookie, err := r.Cookie(SessionCookieConfig.Name)
 	if err != nil || cookie.Value == "" {
 		return Principal{}, "", ErrUnauthenticated
 	}
@@ -81,7 +87,7 @@ func (s SessionService) Logout(ctx context.Context, r *http.Request) error {
 	if s.Store == nil || s.Store.Pool == nil {
 		return nil
 	}
-	cookie, err := r.Cookie(sessionCookieName)
+	cookie, err := r.Cookie(SessionCookieConfig.Name)
 	if err != nil || cookie.Value == "" {
 		return nil
 	}
@@ -104,13 +110,13 @@ func (s SessionService) Logout(ctx context.Context, r *http.Request) error {
 
 func ClearSessionCookie(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{
-		Name:     sessionCookieName,
+		Name:     SessionCookieConfig.Name,
 		Value:    "",
 		Path:     "/",
 		MaxAge:   -1,
 		Expires:  time.Unix(1, 0).UTC(),
 		HttpOnly: true,
-		Secure:   r.TLS != nil,
+		Secure:   r.TLS != nil || SessionCookieConfig.Secure,
 		SameSite: http.SameSiteLaxMode,
 	})
 }
@@ -122,13 +128,13 @@ func SetSessionCookie(w http.ResponseWriter, r *http.Request, session Session) {
 		expires = session.AbsoluteExpires
 	}
 	http.SetCookie(w, &http.Cookie{
-		Name:     sessionCookieName,
+		Name:     SessionCookieConfig.Name,
 		Value:    session.Token,
 		Path:     "/",
 		Expires:  expires,
 		MaxAge:   int(time.Until(expires).Seconds()),
 		HttpOnly: true,
-		Secure:   r.TLS != nil,
+		Secure:   r.TLS != nil || SessionCookieConfig.Secure,
 		SameSite: http.SameSiteLaxMode,
 	})
 }

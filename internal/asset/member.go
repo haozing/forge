@@ -512,13 +512,7 @@ func (s MemberService) Create(ctx context.Context, principal auth.Principal, wor
 	if err != nil {
 		return MemberAsset{}, err
 	}
-	visibility := input.Visibility
-	if visibility == "" {
-		visibility = memberScopeVisibility(scope)
-	}
-	if !access.Valid(visibility) {
-		return MemberAsset{}, ErrInvalidVisibility
-	}
+	_ = scope
 	var title string
 	if input.Title != nil {
 		title = strings.TrimSpace(*input.Title)
@@ -539,10 +533,13 @@ func (s MemberService) Create(ctx context.Context, principal auth.Principal, wor
 		return MemberAsset{}, ErrInvalidInput
 	}
 	var resourceModelVersionID string
+	var policyRaw []byte
 	if err := s.Store.Pool.QueryRow(ctx, `
-		SELECT COALESCE(current_version_id::text, '') FROM model.resource_models
-		WHERE organization_id = $1::uuid AND id = $2::uuid AND status = 'active'
-	`, principal.OrganizationID, input.ResourceModelID).Scan(&resourceModelVersionID); err != nil {
+		SELECT COALESCE(m.current_version_id::text, ''), COALESCE(v.policy, '{}'::jsonb)
+		FROM model.resource_models m
+		JOIN model.resource_model_versions v ON v.organization_id = m.organization_id AND v.id = m.current_version_id
+		WHERE m.organization_id = $1::uuid AND m.id = $2::uuid AND m.status = 'active'
+	`, principal.OrganizationID, input.ResourceModelID).Scan(&resourceModelVersionID, &policyRaw); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return MemberAsset{}, ErrInvalidInput
 		}
@@ -550,6 +547,12 @@ func (s MemberService) Create(ctx context.Context, principal auth.Principal, wor
 	}
 	if resourceModelVersionID == "" {
 		return MemberAsset{}, ErrInvalidInput
+	}
+	// The requested visibility must sit inside the bound model policy's
+	// allow-list; an empty request falls back to the workspace default.
+	visibility, err := memberAssetVisibility(policyRaw, input.Visibility)
+	if err != nil {
+		return MemberAsset{}, err
 	}
 	var schemaBytes []byte
 	if err := s.Store.Pool.QueryRow(ctx, `
@@ -695,25 +698,35 @@ func optionalValue(value OptionalString) *string {
 	return value.Value
 }
 
-// publishPolicy is the publishing block of the bound model version policy.
-type publishPolicy struct {
+// PublishingPolicy is the publishing block of a ResourceModelVersion policy.
+// It is always read from the immutable version an asset version binds to
+// (asset_versions.resource_model_version_id), never from the model head: a
+// model upgrade must not reinterpret assets created under earlier versions.
+type PublishingPolicy struct {
 	Mode                     string
 	RequiredFields           []string
 	RequireCleanAttachments  bool
 	RequireHumanConfirmation bool
 }
 
-func loadPublishPolicyTx(ctx context.Context, tx pgx.Tx, organizationID, modelID string) (publishPolicy, error) {
+// PublishPolicyForAssetTx returns the publishing policy of the immutable
+// ResourceModelVersion bound to the asset's current working version.
+func PublishPolicyForAssetTx(ctx context.Context, tx pgx.Tx, organizationID, assetID string) (PublishingPolicy, error) {
 	var raw []byte
 	err := tx.QueryRow(ctx, `
 		SELECT COALESCE(v.policy, '{}'::jsonb)
-		FROM model.resource_models m
-		JOIN model.resource_model_versions v ON v.organization_id = m.organization_id AND v.id = m.current_version_id
-		WHERE m.organization_id = $1::uuid AND m.id = $2::uuid
-	`, organizationID, modelID).Scan(&raw)
+		FROM asset.assets a
+		JOIN asset.asset_versions av ON av.organization_id = a.organization_id AND av.id = a.current_working_version_id
+		JOIN model.resource_model_versions v ON v.organization_id = av.organization_id AND v.id = av.resource_model_version_id
+		WHERE a.organization_id = $1::uuid AND a.id = $2::uuid
+	`, organizationID, assetID).Scan(&raw)
 	if err != nil {
-		return publishPolicy{}, fmt.Errorf("load publishing policy: %w", err)
+		return PublishingPolicy{}, fmt.Errorf("load publishing policy: %w", err)
 	}
+	return decodePublishingPolicy(raw)
+}
+
+func decodePublishingPolicy(raw []byte) (PublishingPolicy, error) {
 	var document struct {
 		Publishing struct {
 			Mode                     string   `json:"mode"`
@@ -724,10 +737,10 @@ func loadPublishPolicyTx(ctx context.Context, tx pgx.Tx, organizationID, modelID
 	}
 	if len(raw) > 0 {
 		if err := json.Unmarshal(raw, &document); err != nil {
-			return publishPolicy{}, fmt.Errorf("decode publishing policy: %w", err)
+			return PublishingPolicy{}, fmt.Errorf("decode publishing policy: %w", err)
 		}
 	}
-	policy := publishPolicy{
+	policy := PublishingPolicy{
 		Mode:                     document.Publishing.Mode,
 		RequiredFields:           document.Publishing.RequiredFields,
 		RequireCleanAttachments:  document.Publishing.RequireCleanAttachments,
@@ -737,6 +750,45 @@ func loadPublishPolicyTx(ctx context.Context, tx pgx.Tx, organizationID, modelID
 		policy.Mode = PublishingModeDirect
 	}
 	return policy, nil
+}
+
+// publishGateFacts are the per-version facts the immutable policy gates judge.
+type publishGateFacts struct {
+	HumanConfirmed     bool
+	UncleanAttachments int64
+}
+
+// gate rejects versions that miss the policy's publish preconditions. The
+// sentinels are the shared asset errors so every surface maps them alike.
+func (p PublishingPolicy) gate(facts publishGateFacts) error {
+	if p.RequireHumanConfirmation && !facts.HumanConfirmed {
+		return ErrConfirmationRequired
+	}
+	if p.RequireCleanAttachments && facts.UncleanAttachments > 0 {
+		return ErrAttachmentNotClean
+	}
+	return nil
+}
+
+// EnsurePublishableVersionTx enforces the human-confirmation and
+// clean-attachment gates of policy against the sealed version. Callers run it
+// inside their publish transaction so the checks and the pointer switch commit
+// together.
+func EnsurePublishableVersionTx(ctx context.Context, tx pgx.Tx, organizationID, versionID string, policy PublishingPolicy) error {
+	var facts publishGateFacts
+	err := tx.QueryRow(ctx, `
+		SELECT
+		  COALESCE((SELECT confirmation_status = 'human_confirmed' FROM asset.asset_versions
+		   WHERE organization_id = $1::uuid AND id = $2::uuid), false),
+		  (SELECT count(*) FROM asset.asset_version_attachments lva
+		   JOIN asset.attachments att ON att.organization_id = lva.organization_id AND att.id = lva.attachment_id
+		   WHERE lva.organization_id = $1::uuid AND lva.asset_version_id = $2::uuid
+		     AND (att.status <> 'clean' OR att.deleted_at IS NOT NULL))
+	`, organizationID, versionID).Scan(&facts.HumanConfirmed, &facts.UncleanAttachments)
+	if err != nil {
+		return fmt.Errorf("load publish gate facts: %w", err)
+	}
+	return policy.gate(facts)
 }
 
 // Publish executes a direct-policy publish: commit the dirty draft, then
@@ -771,7 +823,7 @@ func (s MemberService) Publish(ctx context.Context, principal auth.Principal, wo
 	if row.PublicationStatus == PublicationArchived {
 		return MemberAsset{}, ErrAssetArchived
 	}
-	policy, err := loadPublishPolicyTx(ctx, tx, row.OrganizationID, row.ResourceModelID)
+	policy, err := PublishPolicyForAssetTx(ctx, tx, row.OrganizationID, assetID)
 	if err != nil {
 		return MemberAsset{}, err
 	}
@@ -787,16 +839,8 @@ func (s MemberService) Publish(ctx context.Context, principal auth.Principal, wo
 		return MemberAsset{}, err
 	}
 	row = commit.Asset
-	if policy.RequireHumanConfirmation {
-		var confirmed bool
-		if err := tx.QueryRow(ctx, `
-			SELECT confirmation_status = 'human_confirmed' FROM asset.asset_versions WHERE id = $1::uuid
-		`, row.CurrentWorkingVersionID).Scan(&confirmed); err != nil {
-			return MemberAsset{}, err
-		}
-		if !confirmed {
-			return MemberAsset{}, ErrConfirmationRequired
-		}
+	if err := EnsurePublishableVersionTx(ctx, tx, row.OrganizationID, row.CurrentWorkingVersionID, policy); err != nil {
+		return MemberAsset{}, err
 	}
 	previous := row.CurrentPublishedVersionID
 	row, err = SetPublishedPointerTx(ctx, tx, row, row.CurrentWorkingVersionID)
@@ -1038,15 +1082,6 @@ func (s MemberService) ConfirmVersion(ctx context.Context, principal auth.Princi
 		return MemberAssetVersion{}, err
 	}
 	return s.GetVersion(ctx, principal, newVersionID)
-}
-
-// memberScopeVisibility derives the asset visibility from the caller's role:
-// only workspace admins may publish to organization or public boundaries.
-func memberScopeVisibility(scope authz.Scope) string {
-	if scope.Role == authz.WorkspaceRoleAdmin {
-		return access.VisibilityWorkspace
-	}
-	return access.VisibilityWorkspace
 }
 
 // normalizeMemberFilters converts the dynamic field-filter input into typed

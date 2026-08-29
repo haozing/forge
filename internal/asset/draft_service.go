@@ -158,6 +158,23 @@ func (s MemberService) AutosaveDraft(ctx context.Context, principal auth.Princip
 		`, row.OrganizationID, row.ID, *patch.Visibility); err != nil {
 			return Draft{}, fmt.Errorf("update asset visibility: %w", err)
 		}
+		// Visibility is an Asset fact: emit the domain event in the same commit
+		// so downstream scope compilers react; the lifecycle revision already
+		// moved with the UPDATE above.
+		next := row
+		next.Visibility = *patch.Visibility
+		next.Revision++
+		if err := AppendAssetEventTx(ctx, tx, s.Events, next, principal, eventing.EventAssetVisibilityChanged, eventing.PayloadVersionV1, eventing.AssetVisibilityChangedPayload{
+			AssetID:            row.ID,
+			Visibility:         *patch.Visibility,
+			PublishedVersionID: derefOrEmpty(row.CurrentPublishedVersionID),
+		}); err != nil {
+			return Draft{}, err
+		}
+		RecordAssetAuditTx(ctx, tx, row.OrganizationID, row.WorkspaceID, principal, "asset.visibility_changed", row.ID, map[string]any{
+			"workspace_id": row.WorkspaceID,
+			"visibility":   *patch.Visibility,
+		})
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return Draft{}, err

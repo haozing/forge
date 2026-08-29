@@ -9,6 +9,7 @@ import (
 
 	"agentchunzhi/internal/auth"
 	"agentchunzhi/internal/authz"
+	"agentchunzhi/internal/eventing"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -445,20 +446,62 @@ func (s Service) UpdateMember(ctx context.Context, principal auth.Principal, mem
 			return MemberDetail{}, ErrLastAdminRequired
 		}
 	}
-	if _, err := s.Store.Pool.Exec(ctx, `
+	// Business write, audit and the membership fact commit together; the
+	// workspace row lock serializes the admin re-count against concurrent
+	// demotions and disables.
+	tx, err := s.Store.Pool.Begin(ctx)
+	if err != nil {
+		return MemberDetail{}, fmt.Errorf("begin member role change: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `
+		SELECT id FROM content.workspaces
+		WHERE organization_id = $1::uuid AND id = $2::uuid
+		FOR UPDATE
+	`, principal.OrganizationID, record.WorkspaceID); err != nil {
+		return MemberDetail{}, fmt.Errorf("lock workspace for role change: %w", err)
+	}
+	if record.Role == authz.WorkspaceRoleAdmin && role != authz.WorkspaceRoleAdmin {
+		var admins int
+		if err := tx.QueryRow(ctx, `
+			SELECT count(*) FROM content.workspace_members wm
+			JOIN identity.users u ON u.id = wm.user_id AND u.status = 'active'
+			WHERE wm.workspace_id = $1::uuid AND wm.role = 'admin' AND wm.user_id <> $2::uuid
+		`, record.WorkspaceID, record.UserID).Scan(&admins); err != nil {
+			return MemberDetail{}, err
+		}
+		if admins == 0 {
+			return MemberDetail{}, ErrLastAdminRequired
+		}
+	}
+	if _, err := tx.Exec(ctx, `
 		UPDATE content.workspace_members
 		SET role = $3, revision = revision + 1, updated_at = now()
 		WHERE organization_id = $1::uuid AND id = $2::uuid
 	`, principal.OrganizationID, record.RowID, role); err != nil {
 		return MemberDetail{}, err
 	}
-	s.writeAuditAsync(NewAuditEntry(AuditMemberRoleChange, "", principal.OrganizationID, principal.UserID,
-		auditResourceWorkspaceMember, record.RowID, map[string]any{
-			"workspace_id":   record.WorkspaceID,
-			"target_user_id": record.UserID,
-			"old_role":       record.Role,
-			"new_role":       role,
-		}))
+	if err := appendMembershipAuditTx(ctx, tx, principal, AuditMemberRoleChange, record.WorkspaceID, record.RowID, map[string]any{
+		"workspace_id":   record.WorkspaceID,
+		"target_user_id": record.UserID,
+		"old_role":       record.Role,
+		"new_role":       role,
+	}); err != nil {
+		return MemberDetail{}, err
+	}
+	if err := s.appendMembershipEventTx(ctx, tx, principal, record.WorkspaceID, eventing.WorkspaceMembershipChangedPayload{
+		WorkspaceID: record.WorkspaceID,
+		UserID:      record.UserID,
+		Role:        role,
+		OldRole:     record.Role,
+		NewRole:     role,
+		Operation:   "role_changed",
+	}); err != nil {
+		return MemberDetail{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return MemberDetail{}, fmt.Errorf("commit member role change: %w", err)
+	}
 	return s.MemberDetail(ctx, principal, record.WorkspaceID, record.UserID)
 }
 
@@ -486,16 +529,54 @@ func (s Service) RemoveMember(ctx context.Context, principal auth.Principal, mem
 	if record.UserID == principal.UserID {
 		return ErrConflict
 	}
-	if _, err := s.Store.Pool.Exec(ctx, `DELETE FROM content.workspace_members WHERE organization_id = $1::uuid AND id = $2::uuid`, principal.OrganizationID, record.RowID); err != nil {
+	tx, err := s.Store.Pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin member removal: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `
+		SELECT id FROM content.workspaces
+		WHERE organization_id = $1::uuid AND id = $2::uuid
+		FOR UPDATE
+	`, principal.OrganizationID, record.WorkspaceID); err != nil {
+		return fmt.Errorf("lock workspace for removal: %w", err)
+	}
+	if record.Role == authz.WorkspaceRoleAdmin {
+		var admins int
+		if err := tx.QueryRow(ctx, `
+			SELECT count(*) FROM content.workspace_members wm
+			JOIN identity.users u ON u.id = wm.user_id AND u.status = 'active'
+			WHERE wm.workspace_id = $1::uuid AND wm.role = 'admin' AND wm.user_id <> $2::uuid
+		`, record.WorkspaceID, record.UserID).Scan(&admins); err != nil {
+			return err
+		}
+		if admins == 0 {
+			return ErrLastAdminRequired
+		}
+	}
+	commandTag, err := tx.Exec(ctx, `DELETE FROM content.workspace_members WHERE organization_id = $1::uuid AND id = $2::uuid`, principal.OrganizationID, record.RowID)
+	if err != nil {
 		return err
 	}
-	s.writeAuditAsync(NewAuditEntry(AuditMemberRemove, "", principal.OrganizationID, principal.UserID,
-		auditResourceWorkspaceMember, record.RowID, map[string]any{
-			"workspace_id":    record.WorkspaceID,
-			"removed_user_id": record.UserID,
-			"old_role":        record.Role,
-		}))
-	return nil
+	if commandTag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	if err := appendMembershipAuditTx(ctx, tx, principal, AuditMemberRemove, record.WorkspaceID, record.RowID, map[string]any{
+		"workspace_id":    record.WorkspaceID,
+		"removed_user_id": record.UserID,
+		"old_role":        record.Role,
+	}); err != nil {
+		return err
+	}
+	if err := s.appendMembershipEventTx(ctx, tx, principal, record.WorkspaceID, eventing.WorkspaceMembershipChangedPayload{
+		WorkspaceID: record.WorkspaceID,
+		UserID:      record.UserID,
+		OldRole:     record.Role,
+		Operation:   "revoked",
+	}); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (s Service) MemberDetail(ctx context.Context, principal auth.Principal, workspaceID, userID string) (MemberDetail, error) {

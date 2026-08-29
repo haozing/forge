@@ -356,7 +356,13 @@ func v2AssetDraft(deps Dependencies) http.HandlerFunc {
 			writeETag(w, `"`+itoa(draft.Revision)+`"`)
 			writeData(w, r, http.StatusOK, v2AssetDraftResponse{Draft: draft, Tags: tags})
 		case http.MethodPatch:
-			expected := expectedRevisionFromIfMatch(r)
+			// The draft revision contract: a missing If-Match is 428, a stale
+			// revision is 412 (enforced by the draft service).
+			expected, ok := requireIfMatchV2(w, r)
+			if !ok {
+				return
+			}
+			expected = expectedRevisionFromIfMatch(r)
 			var body v2AssetDraftPatchBody
 			if !decodeV2Body(w, r, &body, 4<<20) {
 				return

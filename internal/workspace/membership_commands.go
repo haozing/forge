@@ -3,7 +3,8 @@ package workspace
 // membership_commands.go — phase 1 explicit membership commands: add, leave
 // and the eligible-member directory. Leave holds the workspace row lock while
 // re-counting admins so a concurrent demotion cannot leave the workspace
-// without an active admin; audit writes stay asynchronous.
+// without an active admin. Business writes, audit and membership facts commit
+// in one transaction.
 
 import (
 	"context"
@@ -13,6 +14,7 @@ import (
 
 	"agentchunzhi/internal/auth"
 	"agentchunzhi/internal/authz"
+	"agentchunzhi/internal/eventing"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -46,7 +48,12 @@ func (s Service) AddMember(ctx context.Context, principal auth.Principal, worksp
 	}
 	var inserted bool
 	var detail MemberDetail
-	err = s.Store.Pool.QueryRow(ctx, `
+	tx, err := s.Store.Pool.Begin(ctx)
+	if err != nil {
+		return MemberDetail{}, fmt.Errorf("begin add workspace member: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	err = tx.QueryRow(ctx, `
 		WITH target AS (
 			SELECT u.id FROM identity.users u
 			WHERE u.organization_id = $1::uuid AND u.id = $4::uuid
@@ -76,12 +83,25 @@ func (s Service) AddMember(ctx context.Context, principal auth.Principal, worksp
 	if !inserted {
 		return MemberDetail{}, ErrConflict
 	}
-	s.writeAuditAsync(NewAuditEntry(AuditMemberAdd, "", principal.OrganizationID, principal.UserID,
-		auditResourceWorkspaceMember, detail.ID, map[string]any{
-			"workspace_id":  workspaceID,
-			"added_user_id": userID,
-			"role":          role,
-		}))
+	if err := appendMembershipAuditTx(ctx, tx, principal, AuditMemberAdd, workspaceID, detail.ID, map[string]any{
+		"workspace_id":  workspaceID,
+		"added_user_id": userID,
+		"role":          role,
+	}); err != nil {
+		return MemberDetail{}, err
+	}
+	if err := s.appendMembershipEventTx(ctx, tx, principal, workspaceID, eventing.WorkspaceMembershipChangedPayload{
+		WorkspaceID: workspaceID,
+		UserID:      userID,
+		Role:        role,
+		NewRole:     role,
+		Operation:   "granted",
+	}); err != nil {
+		return MemberDetail{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return MemberDetail{}, fmt.Errorf("commit add workspace member: %w", err)
+	}
 	return detail, nil
 }
 
@@ -146,15 +166,25 @@ func (s Service) Leave(ctx context.Context, principal auth.Principal, workspaceI
 	if commandTag.RowsAffected() == 0 {
 		return ErrNotFound
 	}
+	if err := appendMembershipAuditTx(ctx, tx, principal, AuditMemberLeft, workspaceID, principal.UserID, map[string]any{
+		"workspace_id": workspaceID,
+		"left_user_id": principal.UserID,
+		"old_role":     role,
+	}); err != nil {
+		return err
+	}
+	if err := s.appendMembershipEventTx(ctx, tx, principal, workspaceID, eventing.WorkspaceMembershipChangedPayload{
+		WorkspaceID: workspaceID,
+		UserID:      principal.UserID,
+		Role:        role,
+		OldRole:     role,
+		Operation:   "left",
+	}); err != nil {
+		return err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit workspace leave: %w", err)
 	}
-	s.writeAuditAsync(NewAuditEntry(AuditMemberLeft, "", principal.OrganizationID, principal.UserID,
-		auditResourceWorkspaceMember, principal.UserID, map[string]any{
-			"workspace_id": workspaceID,
-			"left_user_id": principal.UserID,
-			"old_role":     role,
-		}))
 	return nil
 }
 
