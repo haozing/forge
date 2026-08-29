@@ -204,10 +204,10 @@ func (s InvitationService) Create(ctx context.Context, principal auth.Principal,
 			return Invitation{}, "", err
 		}
 		if _, err := tx.Exec(ctx, `
-			INSERT INTO organization.invitation_workspace_grants (invitation_id, workspace_id, role)
-			VALUES ($1::uuid, $2::uuid, $3)
+			INSERT INTO organization.invitation_workspace_grants (invitation_id, organization_id, workspace_id, role)
+			VALUES ($1::uuid, $4::uuid, $2::uuid, $3)
 			ON CONFLICT (invitation_id, workspace_id) DO UPDATE SET role = EXCLUDED.role
-		`, invitationID, grant.WorkspaceID, grant.Role); err != nil {
+		`, invitationID, grant.WorkspaceID, grant.Role, principal.OrganizationID); err != nil {
 			return Invitation{}, "", err
 		}
 		grants = append(grants, grant)

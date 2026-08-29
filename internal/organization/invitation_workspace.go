@@ -146,9 +146,9 @@ func (s InvitationService) CreateWorkspaceScoped(ctx context.Context, principal 
 		return Invitation{}, "", err
 	}
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO organization.invitation_workspace_grants (invitation_id, workspace_id, role)
-		VALUES ($1::uuid, $2::uuid, $3)
-	`, invitationID, workspaceID, input.Role); err != nil {
+		INSERT INTO organization.invitation_workspace_grants (invitation_id, organization_id, workspace_id, role)
+		VALUES ($1::uuid, $4::uuid, $2::uuid, $3)
+	`, invitationID, workspaceID, input.Role, principal.OrganizationID); err != nil {
 		return Invitation{}, "", err
 	}
 	// Encrypted delivery in the same transaction; the raw token only exists

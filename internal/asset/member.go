@@ -247,7 +247,8 @@ func (s MemberService) ListPage(ctx context.Context, principal auth.Principal, w
 	if !sortKey.Desc {
 		direction = "ASC"
 	}
-	orderBy := fmt.Sprintf("(%s %s, a.id %s)", cursorColumn, direction, direction)
+	// A row constructor cannot carry sort directions; use a plain column list.
+	orderBy := fmt.Sprintf("%s %s, a.id %s", cursorColumn, direction, direction)
 	where := []string{
 		"a.organization_id = $1::uuid",
 		"a.workspace_id = $2::uuid",
@@ -1126,11 +1127,20 @@ func (s MemberService) ConfirmVersion(ctx context.Context, principal auth.Princi
 	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE asset.asset_drafts
-		SET base_version_id = $3::uuid, revision = revision + 1, committed_revision = revision,
+		-- PG UPDATE assignments all read the OLD row: committed must track the new revision.
+		SET base_version_id = $3::uuid, revision = revision + 1, committed_revision = revision + 1,
 		    updated_by = $4::uuid, updated_at = now()
 		WHERE organization_id = $1::uuid AND asset_id = $2::uuid
 	`, organizationID, assetID, newVersionID, principal.UserID); err != nil {
 		return MemberAssetVersion{}, fmt.Errorf("rebase draft after confirm: %w", err)
+	}
+	// The confirmed snapshot becomes the working copy.
+	if _, err := tx.Exec(ctx, `
+		UPDATE asset.assets
+		SET current_working_version_id = $3::uuid, revision = revision + 1, updated_at = now()
+		WHERE organization_id = $1::uuid AND id = $2::uuid
+	`, organizationID, assetID, newVersionID); err != nil {
+		return MemberAssetVersion{}, fmt.Errorf("advance working pointer after confirm: %w", err)
 	}
 	// The rebased draft starts unconfirmed and inherits the new snapshot's tags.
 	if err := initializeDraftTagsFromVersionTx(ctx, tx, organizationID, func() string {

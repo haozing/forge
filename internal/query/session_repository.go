@@ -73,7 +73,14 @@ func persistSessionTx(ctx context.Context, tx pgx.Tx, snapshot sessionSnapshotRo
 	`, snapshot.ID, snapshot.OrganizationID, snapshot.SubjectKind, snapshot.SubjectID,
 		snapshot.Channel, snapshot.RequestHash, snapshot.ScopeFingerprint,
 		snapshot.PolicyRevision, snapshot.RequestedMode, snapshot.ExecutedMode,
-		snapshot.RankingMethod, snapshot.Degraded, snapshot.DegradationReasons,
+		snapshot.RankingMethod, snapshot.Degraded,
+		// pgx binds a nil slice as SQL NULL; the column is NOT NULL.
+		func() []string {
+			if snapshot.DegradationReasons == nil {
+				return []string{}
+			}
+			return snapshot.DegradationReasons
+		}(),
 		nullString(snapshot.ProjectionProfileID), snapshot.ProjectionGen,
 		snapshot.ResultCount, snapshot.ExpiresAt); err != nil {
 		return fmt.Errorf("insert search session: %w", err)

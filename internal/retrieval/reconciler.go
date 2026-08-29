@@ -42,11 +42,11 @@ func ReconcileProjection(ctx context.Context, st *store.Store, queue QueueInsert
 		UPDATE retrieval.projection_runs run
 		SET ready_embedding_count = sub.actual
 		FROM (
-		    SELECT run_id, count(*) AS actual
+		    SELECT projection_run_id, count(*) AS actual
 		    FROM retrieval.chunk_embeddings
-		    GROUP BY run_id
+		    GROUP BY projection_run_id
 		) sub
-		WHERE run.id = sub.run_id
+		WHERE run.id = sub.projection_run_id
 		  AND run.ready_embedding_count <> sub.actual
 		  AND run.status IN ('lexical_ready', 'embedding')
 	`); err != nil {

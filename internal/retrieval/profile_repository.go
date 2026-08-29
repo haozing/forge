@@ -238,8 +238,8 @@ func CountEligibleVersions(ctx context.Context, q rowQuerier, organizationID str
 		  AND EXISTS (
 		        SELECT 1
 		        FROM jsonb_object_keys(COALESCE(mv.policy->'channels','{}'::jsonb)) AS channel
-		        WHERE COALESCE(mv.policy #>
-		              ('{channels,'||channel||',enabled}')::text[], '')::boolean
+		        WHERE COALESCE(mv.policy #>>
+		              ARRAY['channels', channel, 'enabled'], 'false')::boolean
 		      )
 	`, organizationID).Scan(&count)
 	return count, err
@@ -272,8 +272,8 @@ func CountCoveredVersions(ctx context.Context, q rowQuerier, organizationID, pro
 		  AND EXISTS (
 		        SELECT 1
 		        FROM jsonb_object_keys(COALESCE(mv.policy->'channels','{}'::jsonb)) AS channel
-		        WHERE COALESCE(mv.policy #>
-		              ('{channels,'||channel||',enabled}')::text[], '')::boolean
+		        WHERE COALESCE(mv.policy #>>
+		              ARRAY['channels', channel, 'enabled'], 'false')::boolean
 		      )
 	`, organizationID, profileID).Scan(&count)
 	return count, err

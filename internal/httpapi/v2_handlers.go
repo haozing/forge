@@ -431,7 +431,8 @@ func v2AssetDraft(deps Dependencies) http.HandlerFunc {
 }
 
 type v2CommitBody struct {
-	DraftRevision string `json:"draft_revision"`
+	// draft_revision is an integer in the v2 contract (openapi-v2.yaml).
+	DraftRevision *int64 `json:"draft_revision"`
 }
 
 func v2CommitDraft(deps Dependencies) http.HandlerFunc {
@@ -451,13 +452,18 @@ func v2CommitDraft(deps Dependencies) http.HandlerFunc {
 		if !decodeV2Body(w, r, &body, 16*1024) {
 			return
 		}
+		if body.DraftRevision == nil {
+			writeError(w, http.StatusUnprocessableEntity, "draft_revision_required")
+			return
+		}
 		assetID := r.PathValue("assetId")
 		target, err := deps.MemberAssetService.Get(r.Context(), principal, assetID)
 		if err != nil {
 			v2ServiceError(w, err)
 			return
 		}
-		result, err := deps.MemberAssetService.CommitDraft(r.Context(), principal, target.WorkspaceID, assetID, body.DraftRevision)
+		result, err := deps.MemberAssetService.CommitDraft(r.Context(), principal, target.WorkspaceID, assetID,
+			strconv.FormatInt(*body.DraftRevision, 10))
 		if err != nil {
 			v2ServiceError(w, err)
 			return

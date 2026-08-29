@@ -135,7 +135,7 @@ func insertRebuildTx(ctx context.Context, tx pgx.Tx, row rebuildRow) (Rebuild, e
 			 reason, status, idempotency_key, request_hash, requested_by)
 		VALUES ($1::uuid, NULLIF($2,'')::uuid, NULLIF($3,'')::uuid, $4, $5, $6, 'queued',
 		        NULLIF($7,''), $8, NULLIF($9,'')::uuid)
-		ON CONFLICT (organization_id, idempotency_key) DO UPDATE SET updated_at = now()
+		ON CONFLICT (organization_id, idempotency_key) DO UPDATE SET requested_at = now()
 		RETURNING id::text, organization_id::text, COALESCE(workspace_id::text,''),
 		          COALESCE(projection_profile_id::text,''), scope_type, scope_id, reason,
 		          status, total_count, queued_count, ready_count, degraded_count, failed_count,
@@ -258,7 +258,7 @@ func ProcessBackfillPage(ctx context.Context, st *store.Store, queue QueueInsert
 		      )
 		  AND EXISTS (
 		        SELECT 1 FROM jsonb_object_keys(COALESCE(mv.policy->'channels','{}'::jsonb)) AS channel
-		        WHERE COALESCE(mv.policy #> ('{channels,'||channel||',enabled}')::text[], '')::boolean
+		        WHERE COALESCE(mv.policy #>> ARRAY['channels', channel, 'enabled'], 'false')::boolean
 		      )
 		  AND CASE $3
 		        WHEN 'workspace' THEN a.workspace_id::text = $4

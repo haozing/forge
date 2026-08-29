@@ -74,7 +74,7 @@ func Claim(ctx context.Context, db *store.Store, workerID string) (ClaimedDelive
 	var claim ClaimedDelivery
 	err = tx.QueryRow(ctx, `
 		UPDATE notification.email_deliveries d
-		SET status = 'sending', locked_by = $2, locked_until = now() + make_interval(secs => $3),
+		SET status = 'sending', locked_by = $1, locked_until = now() + make_interval(secs => $2),
 		    attempt_count = d.attempt_count + 1, updated_at = now()
 		WHERE d.id = (
 			SELECT id FROM notification.email_deliveries
@@ -85,7 +85,7 @@ func Claim(ctx context.Context, db *store.Store, workerID string) (ClaimedDelive
 		)
 		RETURNING d.id::text, d.organization_id::text, d.template, d.recipient_email,
 		          d.key_version, d.encrypted_payload, d.attempt_count, d.locked_by
-	`, workerID, token, LeasePeriod.Seconds()).Scan(
+	`, token, LeasePeriod.Seconds()).Scan(
 		&claim.ID, &claim.OrganizationID, &claim.Template, &claim.Recipient,
 		&claim.KeyVersion, &claim.Ciphertext, &claim.Attempt, &claim.LeaseToken)
 	if errors.Is(err, pgx.ErrNoRows) {

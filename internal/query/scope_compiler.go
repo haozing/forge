@@ -155,7 +155,7 @@ func (c ScopeCompiler) ForAgent(ctx context.Context, principal auth.Principal, r
 		  ON v.organization_id = rm.organization_id AND v.id = rm.current_version_id
 		WHERE ap.organization_id = $1::uuid AND ap.agent_user_id = $2::uuid
 		  AND 'query.execute' = ANY(ap.actions)
-		  AND COALESCE(NULLIF(v.policy #>> ('{channels,'||$3||',enabled}')::text, '')::boolean, false)
+		  AND COALESCE(NULLIF(v.policy #>> ARRAY['channels', $3, 'enabled'], '')::boolean, false)
 	`, principal.OrganizationID, principal.UserID, string(ChannelAgent))
 	if err != nil {
 		return QueryAccessScope{}, fmt.Errorf("load agent access policies: %w", err)
@@ -318,7 +318,7 @@ func (c ScopeCompiler) workspaceModels(ctx context.Context, organizationID, work
 		  ON v.organization_id = rm.organization_id AND v.id = rm.current_version_id
 		WHERE rm.organization_id = $1::uuid AND rm.status = 'active'
 		  AND (rm.workspace_id = $2::uuid OR rm.workspace_id IS NULL)
-		  AND COALESCE(NULLIF(v.policy #>> ('{channels,'||$3||',enabled}')::text, '')::boolean, false)
+		  AND COALESCE(NULLIF(v.policy #>> ARRAY['channels', $3, 'enabled'], '')::boolean, false)
 	`, organizationID, workspaceID, string(channel))
 	return collectModelIDs(rows, "list workspace models")
 }
@@ -332,7 +332,7 @@ func (c ScopeCompiler) organizationModels(ctx context.Context, organizationID st
 		JOIN model.resource_model_versions v
 		  ON v.organization_id = rm.organization_id AND v.id = rm.current_version_id
 		WHERE rm.organization_id = $1::uuid AND rm.status = 'active'
-		  AND COALESCE(NULLIF(v.policy #>> ('{channels,'||$2||',enabled}')::text, '')::boolean, false)
+		  AND COALESCE(NULLIF(v.policy #>> ARRAY['channels', $2, 'enabled'], '')::boolean, false)
 	`, organizationID, string(channel))
 	return collectModelIDs(rows, "list organization models")
 }

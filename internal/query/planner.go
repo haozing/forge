@@ -26,7 +26,7 @@ func loadModelPolicies(ctx context.Context, store *store.Store, organizationID s
 	}
 	rows, err := store.Pool.Query(ctx, `
 		SELECT rm.id::text,
-		       COALESCE(NULLIF(v.policy #>> ('{channels,'||$2||',enabled}')::text, '')::boolean, false),
+		       COALESCE(NULLIF(v.policy #>> ARRAY['channels', $2, 'enabled'], '')::boolean, false),
 		       COALESCE(NULLIF(v.policy #>> '{retrieval,fulltext,enabled}'::text[], '')::boolean, false),
 		       COALESCE(NULLIF(v.policy #>> '{retrieval,semantic,enabled}'::text[], '')::boolean, false)
 		FROM model.resource_models rm

@@ -281,9 +281,12 @@ func (r RunRepository) AdoptChecksumTx(ctx context.Context, tx pgx.Tx, run Run, 
 	if liveSibling != "" {
 		// A live run already covers this canonical text: the current run is
 		// superseded and the winner stays in charge of the pointer.
+		// The lexical_pointer CHECK only allows 'stale' for runs that had
+		// reached lexical readiness; younger runs retire as failed.
 		if _, err := tx.Exec(ctx, `
 			UPDATE retrieval.projection_runs
-			SET status = 'stale', stale_at = now(), updated_at = now()
+			SET status = CASE WHEN lexical_ready_at IS NULL THEN 'failed' ELSE 'stale' END,
+			    stale_at = now(), failure_code = 'superseded', updated_at = now()
 			WHERE id = $1::uuid AND status NOT IN ('stale')
 		`, run.ID); err != nil {
 			return "", fmt.Errorf("retire superseded retrieval run: %w", err)
@@ -650,7 +653,7 @@ func BuildEligibilityTx(ctx context.Context, tx pgx.Tx, organizationID, assetVer
 		    OR COALESCE(mv.policy #>> '{retrieval,semantic,enabled}','')::boolean
 		) AND EXISTS (
 		    SELECT 1 FROM jsonb_object_keys(COALESCE(mv.policy->'channels','{}'::jsonb)) AS channel
-		    WHERE COALESCE(mv.policy #> ('{channels,'||channel||',enabled}')::text[], '')::boolean
+		    WHERE COALESCE(mv.policy #>> ARRAY['channels', channel, 'enabled'], 'false')::boolean
 		)
 		FROM asset.asset_versions v
 		JOIN model.resource_model_versions mv

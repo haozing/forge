@@ -312,8 +312,10 @@ func CreateVersionTx(ctx context.Context, tx pgx.Tx, material VersionMaterial) (
 		}
 	}
 
-	// Lock the asset row to serialize version_no allocation.
-	var workingVersion string
+	// Lock the asset row to serialize version_no allocation. The working
+	// pointer is NULL for a brand-new asset: the deferred pointer constraint
+	// lets this transaction insert asset, version and draft in order.
+	var workingVersion *string
 	var revision int64
 	err := tx.QueryRow(ctx, `
 		SELECT current_working_version_id::text, revision FROM asset.assets
@@ -323,8 +325,8 @@ func CreateVersionTx(ctx context.Context, tx pgx.Tx, material VersionMaterial) (
 		return "", 0, fmt.Errorf("lock asset for version: %w", err)
 	}
 	parent := material.ParentVersionID
-	if parent == "" {
-		parent = workingVersion
+	if parent == "" && workingVersion != nil {
+		parent = *workingVersion
 	}
 	var nextNo int64
 	err = tx.QueryRow(ctx, `
@@ -342,9 +344,12 @@ func CreateVersionTx(ctx context.Context, tx pgx.Tx, material VersionMaterial) (
 	err = tx.QueryRow(ctx, `
 		INSERT INTO asset.asset_versions
 			(organization_id, workspace_id, asset_id, resource_model_id, resource_model_version_id,
-			 version_no, origin, confirmation_status, title, summary, markdown, fields,
+			 version_no, origin, confirmation_status, confirmed_by, confirmed_at, title, summary, markdown, fields,
 			 source_raw_input_id, parent_version_id, content_checksum, created_by)
-		VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6, $7, $8, $9, $10, $11, $12::jsonb,
+		VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6, $7, $8,
+			CASE WHEN $8 = 'human_confirmed' THEN NULLIF($16,'')::uuid END,
+			CASE WHEN $8 = 'human_confirmed' THEN now() END,
+			$9, $10, $11, $12::jsonb,
 			NULLIF($13,'')::uuid, NULLIF($14,'')::uuid, $15, NULLIF($16,'')::uuid)
 		RETURNING id::text
 	`, material.OrganizationID, material.WorkspaceID, material.AssetID, material.ResourceModelID,
@@ -654,7 +659,8 @@ func (s MemberService) GetDraft(ctx context.Context, principal auth.Principal, a
 		       d.title, d.summary, d.markdown, d.fields, d.origin, d.updated_by, d.updated_at
 		FROM asset.asset_drafts d
 		JOIN asset.assets a ON a.organization_id = d.organization_id AND a.id = d.asset_id
-		WHERE d.organization_id = $1::uuid AND d.asset_id = $2::uuid AND a.status IN ('active','archived')
+		WHERE d.organization_id = $1::uuid AND d.asset_id = $2::uuid
+		  AND a.publication_status IN ('draft', 'published', 'archived')
 	`, principal.OrganizationID, assetID).Scan(&draft.AssetID, &draft.BaseVersionID,
 		&draft.Revision, &draft.CommittedRevision, &draft.Title, &draft.Summary,
 		&draft.Markdown, &fields, &draft.Origin, &updatedBy, &draft.UpdatedAt)

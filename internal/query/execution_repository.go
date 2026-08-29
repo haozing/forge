@@ -117,6 +117,10 @@ func CompleteQueryExecution(ctx context.Context, store *store.Store, executionID
 	if succeeded {
 		status = "succeeded"
 	}
+	// pgx binds a nil slice as SQL NULL; the column is NOT NULL.
+	if reasons == nil {
+		reasons = []string{}
+	}
 	if _, err := store.Pool.Exec(ctx, `
 		UPDATE retrieval.query_executions SET
 			status = $2, executed_mode = NULLIF($3,''), ranking_method = NULLIF($4,''),

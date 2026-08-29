@@ -6,3 +6,5 @@ tmp_*
 *.log
 *.local
 /artifacts/*.dump
+.env.test
+docker-compose.override.yml

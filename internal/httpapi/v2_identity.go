@@ -640,9 +640,8 @@ func v2CompletePasswordReset(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
 			return
 		}
-		if _, ok := requireIdempotencyKeyV2(w, r); !ok {
-			return
-		}
+		// Public one-time-token surface: the reset token is single-use, which
+		// is the replay boundary (idempotency middleware excludes /api/public/v2).
 		var input v2PasswordResetCompleteRequest
 		if !decodeV2Body(w, r, &input, 16*1024) {
 			return
@@ -706,9 +705,8 @@ func v2AcceptInvitation(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
 			return
 		}
-		if _, ok := requireIdempotencyKeyV2(w, r); !ok {
-			return
-		}
+		// Public one-time-token surface: the invitation token itself is the
+		// replay boundary (idempotency middleware excludes /api/public/v2).
 		var input v2AcceptInvitationRequest
 		if !decodeV2Body(w, r, &input, 16*1024) {
 			return

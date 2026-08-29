@@ -167,12 +167,12 @@ func CancelPendingRequestsTx(ctx context.Context, tx pgx.Tx, organizationID, ass
 	commandTag, err := tx.Exec(ctx, `
 		UPDATE asset.publication_requests
 		SET status = 'cancelled',
-		    cancelled_by = NULLIF($4, '')::uuid,
-		    cancel_reason = $5,
+		    cancelled_by = NULLIF($3, '')::uuid,
+		    cancel_reason = $4,
 		    revision = revision + 1,
 		    decided_at = now()
 		WHERE organization_id = $1::uuid AND asset_id = $2::uuid AND status = 'pending'
-	`, organizationID, assetID, actorUserID, actorUserID, reason)
+	`, organizationID, assetID, actorUserID, reason)
 	if err != nil {
 		return 0, fmt.Errorf("cancel pending publication requests: %w", err)
 	}

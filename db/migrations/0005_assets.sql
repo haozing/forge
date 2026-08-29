@@ -42,14 +42,21 @@ CREATE TABLE asset.assets (
 
 -- The working pointer and the shared draft must exist by commit time; the
 -- deferral lets create transactions insert asset, version and draft in order.
+-- A deferred constraint trigger keeps the tuple captured at INSERT time, so
+-- the check must re-read the row's current value instead of using NEW.
 CREATE FUNCTION asset.require_asset_pointers() RETURNS trigger
 LANGUAGE plpgsql AS $$
+DECLARE
+    working uuid;
+    draft uuid;
 BEGIN
-    IF NEW.current_working_version_id IS NULL THEN
+    SELECT current_working_version_id, draft_id INTO working, draft
+    FROM asset.assets WHERE id = NEW.id;
+    IF working IS NULL THEN
         RAISE EXCEPTION 'asset requires a current working version'
             USING ERRCODE = 'not_null_violation';
     END IF;
-    IF NEW.draft_id IS NULL THEN
+    IF draft IS NULL THEN
         RAISE EXCEPTION 'asset requires a shared draft'
             USING ERRCODE = 'not_null_violation';
     END IF;
@@ -182,10 +189,15 @@ CREATE TRIGGER asset_versions_immutable_update
     FOR EACH ROW EXECUTE FUNCTION asset.forbid_version_content_update();
 
 -- Every version must be sealed before its creating transaction commits.
+-- The deferred trigger keeps the INSERT-time tuple, so it must re-read the
+-- row's current sealed_at instead of testing NEW.
 CREATE FUNCTION asset.require_version_sealed() RETURNS trigger
 LANGUAGE plpgsql AS $$
+DECLARE
+    sealed timestamptz;
 BEGIN
-    IF NEW.sealed_at IS NULL THEN
+    SELECT sealed_at INTO sealed FROM asset.asset_versions WHERE id = NEW.id;
+    IF sealed IS NULL THEN
         RAISE EXCEPTION 'asset version must be sealed in its creating transaction'
             USING ERRCODE = 'restrict_violation';
     END IF;

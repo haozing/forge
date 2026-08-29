@@ -55,7 +55,7 @@ func (s InvitationService) Resolve(ctx context.Context, token string) (ResolvedI
 		       COALESCE((SELECT json_agg(w.name ORDER BY w.name)
 		         FROM organization.invitation_workspace_grants g
 		         JOIN content.workspaces w ON w.id = g.workspace_id
-		         WHERE g.invitation_id = i.id), '[]'::jsonb)
+		         WHERE g.invitation_id = i.id), '[]'::json)
 		FROM organization.member_invitations i
 		JOIN organization.organizations o ON o.id = i.organization_id
 		JOIN identity.users inviter ON inviter.id = i.invited_by
