@@ -26,7 +26,7 @@ func SeedBuiltinResourceModels(ctx context.Context, s *Store, organizationID str
 			  AND u.status = 'active'
 			ORDER BY u.created_at, u.id
 			LIMIT 1
-		) a ON TRUE
+		) a
 		CROSS JOIN (VALUES
 			('builtin_document', '通用文档', '系统内置通用文档模型：标题、Markdown 正文、附件、标签', 'document'),
 			('builtin_note', '通用笔记', '系统内置通用笔记模型：标题、正文、附件、标签', 'note'),
