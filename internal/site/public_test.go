@@ -334,3 +334,27 @@ func contains(value, fragment string) bool {
 }
 
 func runeCount(value string) int { return utf8.RuneCountInString(value) }
+
+// TestMergePublicPostsKeepsBoundHit is the acceptance lock for the public
+// list contract (S5-POSTS): when the query service returns an asset that IS
+// bound to the site, the merged page must render exactly one item with the
+// binding's display path — the merge only ever drops UNBOUND hits, never
+// bound ones.
+func TestMergePublicPostsKeepsBoundHit(t *testing.T) {
+	published := time.Date(2026, 8, 30, 5, 53, 35, 0, time.UTC)
+	assetID := "cd28948e-91ad-4b9d-9fd7-5f041f32f747"
+	hits := []agentquery.Item{hit(assetID, "ITD 站点文章", nil, published)}
+	facts := map[string]boundFact{
+		assetID: fact(assetID, "posts/pangolin-ab800a", 0, nil),
+	}
+	items := mergePublicPosts(hits, facts)
+	if len(items) != 1 {
+		t.Fatalf("items = %d, want the bound hit rendered", len(items))
+	}
+	if items[0].AssetID != assetID || items[0].DisplayPath != "posts/pangolin-ab800a" {
+		t.Fatalf("item = %+v, want the asset with the binding display path", items[0])
+	}
+	if items[0].PublishedAt == nil || !items[0].PublishedAt.Equal(published) {
+		t.Fatalf("published_at = %v, want the asset fallback %v", items[0].PublishedAt, published)
+	}
+}

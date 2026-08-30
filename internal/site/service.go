@@ -195,7 +195,10 @@ func (s Service) ListSites(ctx context.Context, principal auth.Principal, worksp
 		limit = 50
 	}
 	var cursorTime *time.Time
-	var cursorID string
+	// cursorID rides as interface{}: an empty string would fail the uuid Bind
+	// even when the NULL comparison short-circuits (same defect family the
+	// binding list hit; nil binds SQL NULL cleanly).
+	var cursorID any
 	if strings.TrimSpace(cursor) != "" {
 		parsed, err := decodeKeysetCursor(cursor)
 		if err != nil {

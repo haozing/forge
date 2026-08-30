@@ -99,7 +99,10 @@ func (s FacetService) CountsForOrganization(ctx context.Context, organizationID,
 	if scope.Scope == "published" {
 		pointer = "a.current_published_version_id"
 	}
-	args := []any{organizationID, workspaceID}
+	// No pre-seeded args: organization/workspace ride the where list so every
+	// placeholder is referenced exactly once (unreferenced slots fail PG type
+	// inference).
+	args := []any{}
 	arg := func(value any) string {
 		args = append(args, value)
 		return fmt.Sprintf("$%d", len(args))

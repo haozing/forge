@@ -138,7 +138,12 @@ func listBindingsPage(ctx context.Context, db queryRunner, organizationID, works
 		limit = 50
 	}
 	var cursorTime *time.Time
-	var cursorID string
+	// cursorID rides as interface{}: an empty string would fail uuid Bind
+	// even when the NULL comparison short-circuits. cursorTime stays a typed
+	// *time.Time so pgx encodes it natively as timestamptz — a NULLIF text
+	// cast would force the parameter to text, which time.Time cannot
+	// encode into (paged lists would fail).
+	var cursorID any
 	if strings.TrimSpace(cursor) != "" {
 		parsed, err := decodeKeysetCursor(cursor)
 		if err != nil {
@@ -293,7 +298,7 @@ func (s Service) CreateBinding(ctx context.Context, principal auth.Principal, wo
 		return Binding{}, ErrConflict
 	}
 	item, err := scanBindingRow(tx.QueryRow(ctx, `
-		INSERT INTO site.site_content_bindings
+		INSERT INTO site.site_content_bindings AS b
 			(organization_id, workspace_id, site_id, asset_id, display_path, content_type,
 			 section_slug, sort_order, on_homepage, on_navigation, display_config,
 			 display_published_at, created_by)

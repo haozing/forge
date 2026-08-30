@@ -102,7 +102,8 @@ func persistSessionTx(ctx context.Context, tx pgx.Tx, snapshot sessionSnapshotRo
 			nullableInt(item.SemanticRank > 0, item.SemanticRank),
 			nullableFloat(item.RRFScore > 0, item.RRFScore),
 			nullableFloat(item.HasRerankScore, item.RerankScore),
-			item.FinalScore, item.RankingMethod,
+			// structured sessions carry no scores: the payload CHECK forbids them.
+			nullableFloat(item.RankingMethod != "structured", item.FinalScore), item.RankingMethod,
 			item.SourceType, item.Locator,
 			nullableInt(item.SourceType != "", item.CharStart),
 			nullableInt(item.SourceType != "", item.CharEnd),

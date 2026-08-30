@@ -2,6 +2,10 @@ package query
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
 	"testing"
 
 	"agentchunzhi/internal/access"
@@ -127,5 +131,38 @@ func TestPublicSiteScopeFingerprintDiscriminatesVisitors(t *testing.T) {
 	member.SubjectID = "00000000-0000-4000-8000-00000000000b"
 	if computeScopeFingerprint(anonymous, "secret") == computeScopeFingerprint(member, "secret") {
 		t.Fatal("anonymous and member visitor scopes must fingerprint differently")
+	}
+}
+
+// TestExecuteAuditBindsExactlyScopeWorkspaces guards the audit contract the
+// real-database acceptance reads: retrieval.query_execution_workspaces rows
+// must mirror the compiled scope exactly — for the public-site channel that
+// is precisely the site's one workspace (doc phase 5 §3.2), never an
+// organization-wide expansion. Execute has exactly one workspace-binding call
+// site and it passes scope.WorkspaceIDs verbatim; the audit begin (which runs
+// before the scope compile) must not pre-bind any workspace list.
+func TestExecuteAuditBindsExactlyScopeWorkspaces(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join(".", "service.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(raw)
+	bindCalls := regexp.MustCompile(`BindExecutionWorkspaces\((?s:[^)]*)\)`)
+	matches := bindCalls.FindAllString(source, -1)
+	if len(matches) != 1 {
+		t.Fatalf("BindExecutionWorkspaces call sites = %d, want exactly 1", len(matches))
+	}
+	if !strings.Contains(matches[0], "scope.WorkspaceIDs") {
+		t.Fatalf("audit binding must pass scope.WorkspaceIDs verbatim, got: %s", matches[0])
+	}
+	begin := regexp.MustCompile(`BeginQueryExecution\((?s:[^)]*)\)`)
+	beginMatches := begin.FindAllString(source, -1)
+	if len(beginMatches) != 1 {
+		t.Fatalf("BeginQueryExecution call sites = %d, want exactly 1", len(beginMatches))
+	}
+	// The begin call tail binds no workspace list (nested parens defeat the
+	// naive match above, so anchor on the literal tail).
+	if !strings.Contains(source, "requestHash, normalized.Mode, nil)") {
+		t.Fatal("audit begin runs before the scope compile and must not bind workspaces")
 	}
 }
