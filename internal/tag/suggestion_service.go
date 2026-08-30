@@ -151,11 +151,11 @@ func (s SuggestionService) AcceptTx(ctx context.Context, tx pgx.Tx, decision Acc
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO asset.asset_draft_tags
 			(organization_id, workspace_id, asset_draft_id, tag_id, source, confidence, added_by)
-		SELECT $1::uuid, workspace_id, $3::uuid, $4::uuid, $5, $6, $7::uuid
+		SELECT $1::uuid, workspace_id, $2::uuid, $3::uuid, $4, $5::numeric, $6::uuid
 		FROM asset.asset_drafts
-		WHERE organization_id = $1::uuid AND id = $3::uuid
+		WHERE organization_id = $1::uuid AND id = $2::uuid
 		ON CONFLICT (asset_draft_id, tag_id) DO NOTHING
-	`, decision.Actor.OrganizationID, "", decision.DraftID, decision.TagID, source, decision.Confidence, decision.Actor.UserID); err != nil {
+	`, decision.Actor.OrganizationID, decision.DraftID, decision.TagID, source, decision.Confidence, decision.Actor.UserID); err != nil {
 		return fmt.Errorf("accept suggestion into draft: %w", err)
 	}
 	return nil
@@ -182,13 +182,13 @@ func (s SuggestionService) Reject(ctx context.Context, actor auth.Principal, sug
 func (s SuggestionService) MarkSuggestionsMaterialized(ctx context.Context, tx pgx.Tx, draftID, versionID string) error {
 	_, err := tx.Exec(ctx, `
 		UPDATE asset.asset_version_tag_suggestions s
-		SET materialized_version_id = $3::uuid
+		SET materialized_version_id = $2::uuid
 		FROM asset.asset_draft_tags dt
 		WHERE s.accepted_into_draft_id = $1::uuid
 		  AND s.status = 'accepted'
 		  AND dt.asset_draft_id = s.accepted_into_draft_id
 		  AND dt.tag_id = s.resolved_tag_id
-		  AND (s.materialized_version_id IS NULL OR s.materialized_version_id <> $3::uuid)
-	`, draftID, draftID, versionID)
+		  AND (s.materialized_version_id IS NULL OR s.materialized_version_id <> $2::uuid)
+	`, draftID, versionID)
 	return err
 }

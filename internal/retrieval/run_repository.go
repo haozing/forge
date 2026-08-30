@@ -286,7 +286,9 @@ func (r RunRepository) AdoptChecksumTx(ctx context.Context, tx pgx.Tx, run Run, 
 		if _, err := tx.Exec(ctx, `
 			UPDATE retrieval.projection_runs
 			SET status = CASE WHEN lexical_ready_at IS NULL THEN 'failed' ELSE 'stale' END,
-			    stale_at = now(), failure_code = 'superseded', updated_at = now()
+			    -- stale_metadata CHECK: stale_at must be set iff status='stale'.
+			    stale_at = CASE WHEN lexical_ready_at IS NULL THEN NULL ELSE now() END,
+			    failure_code = 'superseded', updated_at = now()
 			WHERE id = $1::uuid AND status NOT IN ('stale')
 		`, run.ID); err != nil {
 			return "", fmt.Errorf("retire superseded retrieval run: %w", err)

@@ -16,7 +16,8 @@ import (
 
 func writeAgentApplicationError(w http.ResponseWriter, err error, fallback string) {
 	switch {
-	case errors.Is(err, adminservice.ErrApplicationListInvalidInput), errors.Is(err, adminservice.ErrApplicationStatusInvalidInput), errors.Is(err, adminservice.ErrApplicationUpdateInvalidInput):
+	case errors.Is(err, adminservice.ErrInvalidInput),
+		errors.Is(err, adminservice.ErrApplicationListInvalidInput), errors.Is(err, adminservice.ErrApplicationStatusInvalidInput), errors.Is(err, adminservice.ErrApplicationUpdateInvalidInput):
 		writeError(w, http.StatusUnprocessableEntity, "validation_failed")
 	case errors.Is(err, adminservice.ErrApplicationNotFound):
 		writeError(w, http.StatusNotFound, "agent_application_not_found")

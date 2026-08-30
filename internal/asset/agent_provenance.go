@@ -25,7 +25,17 @@ func agentProvenanceTx(ctx context.Context, tx pgx.Tx, organizationID, versionID
 		SELECT pr.agent_user_id::text, pr.agent_application_id::text, COALESCE(pr.rule_version, ''),
 		       pr.input_version_id::text, pr.id::text
 		FROM integration.agent_processing_results pr
-		WHERE pr.organization_id = $1::uuid AND pr.output_version_id = $2::uuid
+		WHERE pr.organization_id = $1::uuid AND pr.output_version_id IN (
+		    -- A human_confirmed derivation reparents the published pointer one
+		    -- level above the agent output; walk two parent hops so the six
+		    -- fields survive confirm-of-confirm chains.
+		    SELECT id FROM asset.asset_versions WHERE organization_id = $1::uuid AND id = $2::uuid
+		    UNION SELECT parent_version_id FROM asset.asset_versions
+		      WHERE organization_id = $1::uuid AND id = $2::uuid AND parent_version_id IS NOT NULL
+		    UNION SELECT p.parent_version_id FROM asset.asset_versions v
+		      JOIN asset.asset_versions p ON p.organization_id = v.organization_id AND p.id = v.parent_version_id
+		      WHERE v.organization_id = $1::uuid AND v.id = $2::uuid AND p.parent_version_id IS NOT NULL
+		)
 		ORDER BY pr.completed_at DESC
 		LIMIT 1
 	`, organizationID, versionID).Scan(&agentUserID, &agentApplicationID, &ruleVersion,

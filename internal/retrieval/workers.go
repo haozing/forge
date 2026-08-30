@@ -89,11 +89,14 @@ type FinalizeProjectionRunArgs struct {
 	RunID string `json:"run_id" river:"unique"`
 }
 
+
 func (FinalizeProjectionRunArgs) Kind() string { return JobKindFinalizeProjectionRun }
 
 func (FinalizeProjectionRunArgs) InsertOpts() river.InsertOpts {
 	return river.InsertOpts{
-		MaxAttempts: 8,
+		// Pending outcomes retry in-process; embeddings may take minutes on
+		// large assets, so allow enough attempts before giving up.
+		MaxAttempts: 24,
 		Queue:       BuildQueue,
 		UniqueOpts:  river.UniqueOpts{ByArgs: true},
 	}
@@ -487,6 +490,12 @@ func RunFinalizeProjection(ctx context.Context, engine Engine, runID string) err
 	}
 	if outcome == FinalizeFailed {
 		return fmt.Errorf("retrieval run %s finalized as failed", runID)
+	}
+	if outcome == FinalizePending {
+		// Embeddings or the build are still outstanding. The job must retry:
+		// ByArgs uniqueness would silently swallow any new finalize enqueue
+		// while this completed row is retained, deadlocking the run.
+		return fmt.Errorf("retrieval run %s finalize pending; retrying", runID)
 	}
 	return nil
 }

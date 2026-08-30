@@ -121,10 +121,10 @@ func (s Service) RegisterAgent(ctx context.Context, principal auth.Principal, in
 		return RegisterAgentResult{}, fmt.Errorf("create agent user: %w", err)
 	}
 	if err := tx.QueryRow(ctx, `
-		INSERT INTO identity.api_keys (user_id, name, key_prefix, key_hash, expires_at, capabilities)
-		VALUES ($1::uuid, $2, $3, $4, $5, $6::jsonb)
+		INSERT INTO identity.api_keys (organization_id, user_id, name, key_prefix, key_hash, expires_at, capabilities)
+		VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7::jsonb)
 		RETURNING id::text
-	`, agentUserID, input.ApiKeyName, keyPrefix, auth.HashAPIKey(rawKey), input.ExpiresAt, string(capabilitiesJSON)).Scan(new(string)); err != nil {
+	`, principal.OrganizationID, agentUserID, input.ApiKeyName, keyPrefix, auth.HashAPIKey(rawKey), input.ExpiresAt, string(capabilitiesJSON)).Scan(new(string)); err != nil {
 		return RegisterAgentResult{}, fmt.Errorf("create agent api key: %w", err)
 	}
 	if err := tx.QueryRow(ctx, `

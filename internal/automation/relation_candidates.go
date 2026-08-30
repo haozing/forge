@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"agentchunzhi/internal/auth"
 	"agentchunzhi/internal/query"
@@ -36,6 +37,29 @@ type RelationCandidateQuery struct {
 // Candidates runs one fulltext query over the workspace's published assets and
 // maps the hits to relatable-asset candidates. Excluding the source asset is
 // not this type's job — the preparation service owns that filter.
+// orQuery turns the source title/summary into an OR-of-terms query: the
+// lexical search ANDs plain multi-term queries, so the source-specific words
+// would zero out every hit on related-but-differently-worded assets. Each
+// term is escaped with the shared PGroonga escaper; only the literal OR
+// separators are ours, so no operators can be injected.
+func orQuery(text string) string {
+	terms := strings.Fields(text)
+	if len(terms) > 10 {
+		terms = terms[:10]
+	}
+	escaped := make([]string, 0, len(terms))
+	for _, term := range terms {
+		if len([]rune(term)) < 2 {
+			continue
+		}
+		escaped = append(escaped, query.EscapePGroongaQuery(term))
+	}
+	if len(escaped) == 0 {
+		return query.EscapePGroongaQuery(text)
+	}
+	return strings.Join(escaped, " OR ")
+}
+
 func (r RelationCandidateQuery) Candidates(ctx context.Context, principal auth.Principal, workspaceID, queryText string, limit int) ([]workflows.RelationCandidate, error) {
 	if r.Query == nil {
 		return nil, errors.New("relation candidate query service is not configured")
@@ -48,7 +72,7 @@ func (r RelationCandidateQuery) Candidates(ctx context.Context, principal auth.P
 	}
 	req := query.Request{
 		Mode:  query.ModeFulltext,
-		Query: queryText,
+		Query: orQuery(queryText),
 		TopK:  limit,
 	}
 	var response query.Response

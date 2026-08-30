@@ -23,6 +23,9 @@ import (
 type OpenAIModelFactory struct {
 	AllowedHosts []string
 	Resolver     *net.Resolver
+	// AllowPrivateEgress permits RFC1918/loopback model egress; local test
+	// stacks only. Production configuration rejects the flag.
+	AllowPrivateEgress bool
 	Limiter      *ModelRequestLimiter
 }
 
@@ -65,7 +68,7 @@ func (f OpenAIModelFactory) build(ctx context.Context, config modelendpoint.Runt
 	maxTokens := config.Options.MaxOutputTokens
 	transport := http.RoundTripper(&http.Transport{
 		Proxy:             nil,
-		DialContext:       safeDialContext(f.Resolver),
+		DialContext:       safeDialContext(f.Resolver, f.AllowPrivateEgress),
 		ForceAttemptHTTP2: true,
 		TLSClientConfig:   &tls.Config{MinVersion: tls.VersionTLS12},
 	})
@@ -167,7 +170,10 @@ func (b *releaseModelResponseBody) Close() error {
 	return err
 }
 
-func safeDialContext(resolver *net.Resolver) func(context.Context, string, string) (net.Conn, error) {
+// safeDialContext blocks private/loopback egress unless the deployment
+// explicitly opted out (local test stacks only; production config rejects
+// the flag).
+func safeDialContext(resolver *net.Resolver, allowPrivateEgress bool) func(context.Context, string, string) (net.Conn, error) {
 	if resolver == nil {
 		resolver = net.DefaultResolver
 	}
@@ -182,6 +188,9 @@ func safeDialContext(resolver *net.Resolver) func(context.Context, string, strin
 			return nil, fmt.Errorf("resolve model address: %w", err)
 		}
 		for _, candidate := range addresses {
+			if allowPrivateEgress {
+				return dialer.DialContext(ctx, network, net.JoinHostPort(candidate.IP.String(), port))
+			}
 			if !candidate.IP.IsGlobalUnicast() || candidate.IP.IsPrivate() || candidate.IP.IsLoopback() || candidate.IP.IsLinkLocalUnicast() {
 				continue
 			}

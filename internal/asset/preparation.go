@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"sort"
 	"strings"
 
@@ -267,6 +268,9 @@ func (s AssetPreparationService) relationCandidates(ctx context.Context, princip
 	}
 	candidates, err := s.Relations.Candidates(ctx, principal, metadata.WorkspaceID, query.String(), 20)
 	if err != nil {
+		// Fail closed, but never silently: an operator must see why relation
+		// suggestions are missing.
+		log.Printf("asset prepare relation candidates unavailable (run=%s asset=%s): %v", "", metadata.AssetID, err)
 		return nil
 	}
 	filtered := make([]workflows.RelationCandidate, 0, len(candidates))

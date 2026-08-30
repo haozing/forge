@@ -62,6 +62,7 @@ type Config struct {
 	AgentModelSecretEncryptionKey   string
 	AgentCheckpointEncryptionKey    string
 	AgentModelAllowedHosts          []string
+	AgentModelAllowPrivateEgress     bool
 	AgentModelDefaultTimeout        int
 	AgentModelMaxCacheEntries       int
 	AgentModelMaxConcurrentRequests int
@@ -122,6 +123,7 @@ func Load() Config {
 		AgentModelSecretEncryptionKey:   strings.TrimSpace(os.Getenv("AGENT_MODEL_SECRET_ENCRYPTION_KEY")),
 		AgentCheckpointEncryptionKey:    strings.TrimSpace(os.Getenv("AGENT_CHECKPOINT_ENCRYPTION_KEY")),
 		AgentModelAllowedHosts:          envCSV("AGENT_MODEL_ALLOWED_HOSTS"),
+		AgentModelAllowPrivateEgress:    strings.EqualFold(strings.TrimSpace(os.Getenv("AGENT_MODEL_ALLOW_PRIVATE_EGRESS")), "true"),
 		AgentModelDefaultTimeout:        int(envInt64OrDefault("AGENT_MODEL_DEFAULT_TIMEOUT_SECONDS", 120)),
 		AgentModelMaxCacheEntries:       int(envInt64OrDefault("AGENT_MODEL_MAX_CACHE_ENTRIES", 100)),
 		AgentModelMaxConcurrentRequests: int(envInt64OrDefault("AGENT_MODEL_MAX_CONCURRENT_REQUESTS", 20)),
@@ -238,6 +240,9 @@ func (c Config) Validate() error {
 
 	if len(c.RateLimitHMACKey) > 0 && len(c.RateLimitHMACKey) < 32 {
 		return errors.New("RATE_LIMIT_HMAC_KEY must be at least 32 bytes")
+	}
+	if production && c.AgentModelAllowPrivateEgress {
+		return errors.New("AGENT_MODEL_ALLOW_PRIVATE_EGRESS must not be enabled in production")
 	}
 	if production && len(c.RateLimitHMACKey) == 0 {
 		return errors.New("RATE_LIMIT_HMAC_KEY is required in production (at least 32 bytes)")

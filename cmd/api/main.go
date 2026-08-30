@@ -73,6 +73,7 @@ func main() {
 		Secrets: agentruntime.EnvironmentSecretResolver{},
 		Factory: agentruntime.OpenAIModelFactory{
 			AllowedHosts: cfg.AgentModelAllowedHosts,
+			AllowPrivateEgress: cfg.AgentModelAllowPrivateEgress,
 			Limiter:      agentruntime.NewModelRequestLimiter(cfg.AgentModelMaxConcurrentRequests),
 		},
 		MaxEntries: cfg.AgentModelMaxCacheEntries,

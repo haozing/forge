@@ -1333,11 +1333,12 @@ func insertRunNotification(ctx context.Context, tx pgx.Tx, runID string, succeed
 	}
 	_, err := tx.Exec(ctx, `
 		INSERT INTO content.notifications (
-			organization_id, workspace_id, recipient_user_id, type, title, body,
-			object_type, object_id, metadata
+			organization_id, workspace_id, recipient_user_id, kind, payload
 		)
-		SELECT organization_id, workspace_id, created_by, $2, $3, $4,
-		       'task_run', id, jsonb_build_object('status', status, 'operation', operation)
+		SELECT organization_id, workspace_id, created_by, 'system',
+		       jsonb_build_object('type', $2::text, 'title', $3::text, 'body', $4::text,
+		                          'object_type', 'task_run', 'object_id', id::text,
+		                          'status', status, 'operation', operation)
 		FROM automation.runs WHERE id = $1::uuid
 	`, runID, notificationType, title, body)
 	return err
