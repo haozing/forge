@@ -139,7 +139,16 @@ func workspaceAgentApplicationsFinal(deps Dependencies) http.HandlerFunc {
 			writeAgentApplicationError(w, err, "agent_application_load_failed")
 			return
 		}
-		writeJSON(w, http.StatusCreated, item)
+		// The raw API key exists exactly once, at registration; merge it into
+		// the re-read application view so the caller can actually use the
+		// credential. It is never returned again afterwards.
+		payload := map[string]any{}
+		if raw, err := json.Marshal(item); err == nil {
+			_ = json.Unmarshal(raw, &payload)
+		}
+		payload["api_key"] = created.ApiKey
+		payload["api_key_prefix"] = created.ApiKeyPrefix
+		writeJSON(w, http.StatusCreated, payload)
 	}
 }
 

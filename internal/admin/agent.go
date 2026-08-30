@@ -282,7 +282,9 @@ func validCapabilities(values []string) bool {
 
 func allowedAgentCapability(value string) bool {
 	switch value {
-	case "query.read", "reference.read", "asset.create", "asset.edit", "asset.publish", "asset.archive", "agent.run":
+	// query.execute is required by the open-API unified query gate
+	// (ForOpenAPI); without it an application can never be granted search.
+	case "query.read", "query.execute", "reference.read", "asset.create", "asset.edit", "asset.publish", "asset.archive", "agent.run":
 		return true
 	default:
 		return false
