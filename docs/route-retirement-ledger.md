@@ -24,7 +24,7 @@
 | `/api/frontend/automation-jobs/{jobId}/run-now`（operation=prepare_asset 的任务） | 阶段 4 | `/api/v2/workspaces/{workspaceId}/assets/{assetId}/prepare` | Prepare/suggestion contract test | planned | P4-3: 成员 prepare 迁建议流（202 返回 run_id，不产版本）；openapi-v2.yaml 已冻结 prepareAsset/listSuggestions/acceptSuggestion/rejectSuggestion/batchAcceptSuggestions/listProcessingResults 六端点；旧 run-now 不再被新代码调用 |
 | `/api/open/v1/agent/tasks`、`/api/open/v1/agent/tasks/{taskId}` | 阶段 4 | `/api/open/v2/agent-tasks`（多资产 1..20、幂等键、返回 run_id） | AgentTask v2 contract test | planned | P4-3: agenttask.Service.Create/Get 已多资产化（去重、全 validUUID、run input 用全量 asset_ids）并返回 run_id（外部系统「更新受控 AssetDraft」语义=建议流）；v2 open 路由（POST /api/open/v2/agent-tasks、GET .../{taskId}，复用 v1 守卫链）与 contract test 已由主线合入；v1 双路由待前端/调用方切换后删除 |
 | `/api/open/v1/automation/runs/{runId}/callback` | 阶段 4 | `/api/open/v2/automation/runs/{runId}/callback` | Automation callback contract test | planned | P4-3 记账（§4.6）: 统一 API 读写本阶段只迁 prepare 分支，其余动作分支后续批次迁 v2 服务调用 |
-| `/api/public/workspaces/{workspaceId}/assets`、`/api/public/assets/{assetId}` | 阶段 5 | `/api/public/v2/sites/{siteId}/content...` | PublicSite contract test | planned | 待阶段 5 |
+| `/api/public/workspaces/{workspaceId}/assets`、`/api/public/assets/{assetId}` | 阶段 5 | `/api/public/v2/sites/{slug}` 及其 posts/sections/tags/search 子路径 | PublicSite contract test | retired | P5-3: 公开读取面已注册（registerPublicV2Routes 七端点，internal/site PublicReader + query.Service ChannelPublicSite + D4 ETag + public_site_ip 限流）；public_assets.go 已删除，旧双路由 404（TestLegacyPublicAssetRoutesAreRetired / TestPublicSiteV2RoutesRegistered） |
 | 其他 Agent、PublicSite 和剩余 frontend 旧入口 | 阶段 5-6 | 对应 `/api/v2`、`/api/open/v2`、`/api/public/v2` | 所属领域 contract test | planned | 待所属阶段 |
 
 约束：

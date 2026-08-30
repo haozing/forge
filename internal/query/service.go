@@ -106,6 +106,28 @@ func (s Service) AgentQuery(ctx context.Context, principal auth.Principal, req R
 		}, req)
 }
 
+// PublicSiteQuery runs one public-site request through the standard Execute
+// flow: an anonymous or member visitor reads the content band of the site's
+// workspace (doc phase 5 D2/D5'). The visitor principal is a routing marker,
+// never an identity.users subject: anonymous reads carry no user id and the
+// audit and session repositories persist subject_kind='public_site' with a
+// NULL subject_id (see nullableSubject); member visitors keep their users.id
+// on the audit row while the scope still compiles through ForPublicSite.
+// Request validation stays with validateRequest — all four modes are legal,
+// the public surface picks per endpoint (site search fulltext/hybrid, listing
+// and tag pages structured).
+func (s Service) PublicSiteQuery(ctx context.Context, site PublicSiteRef, visitor VisitorIdentity, req Request) (Response, error) {
+	principal := auth.Principal{
+		OrganizationID: site.OrganizationID,
+		UserID:         visitor.UserID,
+		UserType:       UserTypePublicSite,
+	}
+	return s.Execute(ctx, principal, ChannelPublicSite,
+		func(ctx context.Context) (QueryAccessScope, error) {
+			return s.compiler().ForPublicSite(ctx, site, visitor)
+		}, req)
+}
+
 // Execute implements the phase 3 query execution flow (doc §10.1): audit
 // begin, scope compile, validation, plan, recall, ranking, session persist,
 // final authorization, audit complete.
@@ -129,8 +151,11 @@ func (s Service) Execute(ctx context.Context, principal auth.Principal, channel 
 		return Response{}, ErrInvalidQueryMode
 	}
 	subjectKind := SubjectMember
-	if principal.UserType == auth.UserTypeAgent {
+	switch principal.UserType {
+	case auth.UserTypeAgent:
 		subjectKind = SubjectAgent
+	case UserTypePublicSite:
+		subjectKind = SubjectPublicSite
 	}
 
 	// 1. Audit begin (before scope compile and business validation).

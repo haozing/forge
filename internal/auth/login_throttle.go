@@ -17,13 +17,15 @@ import (
 	"agentchunzhi/internal/store"
 )
 
-// Bucket types fixed by the phase 1 contract.
+// Bucket types fixed by the phase 1 contract; public_site_ip is the phase 5
+// anonymous public-site visitor bucket (doc phase 5 B5).
 const (
 	BucketLoginEmail   = "login_email"
 	BucketLoginIP      = "login_ip"
 	BucketResetEmail   = "password_reset_email"
 	BucketResetIP      = "password_reset_ip"
 	BucketInvitationIP = "invitation_ip"
+	BucketPublicSiteIP = "public_site_ip"
 )
 
 // Default windows from the contract.
@@ -33,6 +35,9 @@ var (
 	ResetEmailLimit   = RatePolicy{Window: time.Hour, Max: 3, Block: time.Hour}
 	ResetIPLimit      = RatePolicy{Window: 15 * time.Minute, Max: 20, Block: 15 * time.Minute}
 	InvitationIPLimit = RatePolicy{Window: 15 * time.Minute, Max: 20, Block: 15 * time.Minute}
+	// PublicSiteIPLimit is the phase 5 public-face budget: 120 requests per
+	// minute per client address prefix, blocked for one minute once exceeded.
+	PublicSiteIPLimit = RatePolicy{Window: time.Minute, Max: 120, Block: time.Minute}
 )
 
 type RatePolicy struct {
@@ -126,4 +131,38 @@ func ClientIPPrefix(effectiveAddr string) string {
 		return v4.Mask(net.CIDRMask(24, 32)).String()
 	}
 	return ip.Mask(net.CIDRMask(56, 128)).String()
+}
+
+// bucketCounter is the shared DB-backed bucket primitive. *LoginThrottle
+// implements it; the interface exists so the public-site limiter can be
+// unit-tested against a fake counter without a database.
+type bucketCounter interface {
+	CheckAndIncrement(ctx context.Context, bucketType, value string, policy RatePolicy) (bool, time.Duration, error)
+}
+
+var _ bucketCounter = (*LoginThrottle)(nil)
+
+// PublicSiteIPThrottle is the anonymous public-site visitor rate limiter
+// (phase 5 B5): one shared budget per client address prefix across all public
+// site reads, 120 requests per minute. It reuses the HMAC'd
+// security.auth_rate_limits buckets (bucket_type='public_site_ip') so the
+// limit is shared by every instance behind the deployment. Unlike the login
+// buckets there is no success/failure distinction: every public request
+// counts and nothing is cleared afterwards. P5-3 wires this onto the public
+// routes; the capability and its tests live here.
+type PublicSiteIPThrottle struct {
+	Counter bucketCounter
+}
+
+// NewPublicSiteIPThrottle wires the limiter onto the shared DB bucket store.
+func NewPublicSiteIPThrottle(store *store.Store, hmacKey []byte) *PublicSiteIPThrottle {
+	return &PublicSiteIPThrottle{Counter: NewLoginThrottle(store, hmacKey)}
+}
+
+// Allow records one public read for the effective client address and reports
+// whether the request may proceed. A refused result carries the retry-after
+// duration. The address is truncated through ClientIPPrefix so a /24 (IPv4)
+// or /56 (IPv6) shares one bucket, matching the login IP buckets.
+func (t *PublicSiteIPThrottle) Allow(ctx context.Context, effectiveAddr string) (bool, time.Duration, error) {
+	return t.Counter.CheckAndIncrement(ctx, BucketPublicSiteIP, ClientIPPrefix(effectiveAddr), PublicSiteIPLimit)
 }

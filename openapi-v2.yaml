@@ -100,6 +100,27 @@ paths:
                 allOf:
                   - $ref: '#/components/schemas/PublicationRequest'
                   - $ref: '#/components/schemas/Envelope'
+    delete:
+      tags: [publication-requests]
+      operationId: cancelPublicationRequest
+      description: 提交者取消自己的 pending 请求
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - name: requestId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: 已取消
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/PublicationRequest'
+                  - $ref: '#/components/schemas/Envelope'
+        '409': { $ref: '#/components/responses/Error' }
   /api/v2/workspaces/{workspaceId}/publication-requests/{requestId}/approve:
     post:
       tags: [publication-requests]
@@ -185,6 +206,31 @@ paths:
                   - $ref: '#/components/schemas/PublicationRequest'
                   - $ref: '#/components/schemas/Envelope'
   /api/v2/workspaces/{workspaceId}/publication-requests/{requestId}/comments:
+    get:
+      tags: [publication-requests]
+      operationId: listPublicationComments
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - name: requestId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: 评论列表（keyset 分页）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    properties:
+                      items: { type: array, items: { $ref: '#/components/schemas/PublicationComment' } }
+                      next_cursor: { type: string }
+                      has_more: { type: boolean }
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
     post:
       tags: [publication-requests]
       operationId: createPublicationComment
@@ -2003,6 +2049,29 @@ paths:
         '403': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
   /api/v2/workspaces/{workspaceId}/retrieval/rebuilds:
+    get:
+      tags: [query]
+      operationId: listWorkspaceRetrievalRebuilds
+      description: 工作区 rebuild 批次列表（workspace admin）
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: rebuild 批次列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    properties:
+                      items: { type: array, items: { $ref: '#/components/schemas/RetrievalRebuild' } }
+                      next_cursor: { type: string }
+                      has_more: { type: boolean }
+                  - $ref: '#/components/schemas/Envelope'
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
     post:
       tags: [query]
       operationId: createWorkspaceRetrievalRebuild
@@ -2159,7 +2228,553 @@ paths:
         '403': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
 
+
+  /api/v2/workspaces/{workspaceId}/sites:
+    get:
+      tags: [sites]
+      operationId: listSites
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+      responses:
+        '200':
+          description: 站点列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    properties:
+                      items: { type: array, items: { $ref: '#/components/schemas/PublicSite' } }
+                  - $ref: '#/components/schemas/Envelope'
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+    post:
+      tags: [sites]
+      operationId: createSite
+      description: 创建公开站点（site.manage + Idempotency-Key）
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SiteCreate' }
+      responses:
+        '201':
+          description: 已创建
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/PublicSite'
+                  - $ref: '#/components/schemas/Envelope'
+        '409': { description: slug/domain 冲突, content: { application/json: { schema: { $ref: '#/components/schemas/Envelope' } } } }
+        '422': { $ref: '#/components/responses/Error' }
+  /api/v2/workspaces/{workspaceId}/sites/{siteId}:
+    get:
+      tags: [sites]
+      operationId: getSite
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/SiteId'
+      responses:
+        '200':
+          description: 站点详情
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/PublicSite'
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
+    patch:
+      tags: [sites]
+      operationId: patchSite
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/SiteId'
+        - $ref: '#/components/parameters/IfMatch'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SitePatch' }
+      responses:
+        '200':
+          description: 已更新
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/PublicSite'
+                  - $ref: '#/components/schemas/Envelope'
+        '409': { description: revision 冲突, content: { application/json: { schema: { $ref: '#/components/schemas/Envelope' } } } }
+        '428': { $ref: '#/components/responses/Error' }
+    delete:
+      tags: [sites]
+      operationId: disableSite
+      description: 停用站点（软语义；公开面随之 404）
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/SiteId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: 已停用
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/PublicSite'
+                  - $ref: '#/components/schemas/Envelope'
+  /api/v2/workspaces/{workspaceId}/sites/{siteId}/bindings:
+    get:
+      tags: [sites]
+      operationId: listSiteBindings
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/SiteId'
+        - name: cursor
+          in: query
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, maximum: 100 }
+      responses:
+        '200':
+          description: 绑定列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    properties:
+                      items: { type: array, items: { $ref: '#/components/schemas/SiteBinding' } }
+                      next_cursor: { type: string }
+                      has_more: { type: boolean }
+                  - $ref: '#/components/schemas/Envelope'
+    post:
+      tags: [sites]
+      operationId: createSiteBinding
+      description: 绑定已发布资产到站点（binding_target_invalid=422 当未发布/越档/通道关闭）
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/SiteId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BindingCreate' }
+      responses:
+        '201':
+          description: 已绑定
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SiteBinding'
+                  - $ref: '#/components/schemas/Envelope'
+        '409': { description: display_path 冲突, content: { application/json: { schema: { $ref: '#/components/schemas/Envelope' } } } }
+        '422': { $ref: '#/components/responses/Error' }
+  /api/v2/workspaces/{workspaceId}/sites/{siteId}/bindings/{bindingId}:
+    patch:
+      tags: [sites]
+      operationId: patchSiteBinding
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/SiteId'
+        - name: bindingId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BindingPatch' }
+      responses:
+        '200':
+          description: 已更新
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SiteBinding'
+                  - $ref: '#/components/schemas/Envelope'
+    delete:
+      tags: [sites]
+      operationId: deleteSiteBinding
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/SiteId'
+        - name: bindingId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200': { description: 已解绑, content: { application/json: { schema: { $ref: '#/components/schemas/Envelope' } } } }
+  /api/v2/workspaces/{workspaceId}/sites/{siteId}/preview:
+    get:
+      tags: [sites]
+      operationId: previewSite
+      description: 站点预览快照（no-store；React 复用公开面组件渲染）
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/SiteId'
+      responses:
+        '200':
+          description: 预览快照
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SitePreview'
+                  - $ref: '#/components/schemas/Envelope'
+  /api/public/v2/sites/{slug}:
+    get:
+      tags: [sites-public]
+      operationId: publicSiteHome
+      description: 站点信息与首页 sections（匿名；disabled/不存在 404；ETag 条件请求）
+      parameters:
+        - $ref: '#/components/parameters/PublicSiteSlug'
+      responses:
+        '200':
+          description: 首页
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PublicSiteHome' }
+        '304': { description: ETag 未变化 }
+        '404': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+  /api/public/v2/sites/{slug}/posts:
+    get:
+      tags: [sites-public]
+      operationId: publicSitePosts
+      parameters:
+        - $ref: '#/components/parameters/PublicSiteSlug'
+        - name: q
+          in: query
+          schema: { type: string }
+        - name: tags_any
+          in: query
+          schema: { type: array, items: { type: string } }
+        - name: cursor
+          in: query
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, maximum: 100 }
+      responses:
+        '200':
+          description: 文章列表（绑定白名单 merge 后）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PublicPostPage' }
+        '404': { $ref: '#/components/responses/Error' }
+  /api/public/v2/sites/{slug}/posts/{displayPath}:
+    get:
+      tags: [sites-public]
+      operationId: publicSitePost
+      description: 文章详情（每次解析 current_published_version_id；未发布/越档 404）
+      parameters:
+        - $ref: '#/components/parameters/PublicSiteSlug'
+        - name: displayPath
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: 文章内容（白名单投影）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PublicPostContent' }
+        '304': { description: ETag 未变化 }
+        '404': { $ref: '#/components/responses/Error' }
+  /api/public/v2/sites/{slug}/sections/{sectionSlug}:
+    get:
+      tags: [sites-public]
+      operationId: publicSiteSection
+      parameters:
+        - $ref: '#/components/parameters/PublicSiteSlug'
+        - name: sectionSlug
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: 栏目条目
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PublicPostPage' }
+        '404': { $ref: '#/components/responses/Error' }
+  /api/public/v2/sites/{slug}/tags:
+    get:
+      tags: [sites-public]
+      operationId: publicSiteTags
+      parameters:
+        - $ref: '#/components/parameters/PublicSiteSlug'
+      responses:
+        '200':
+          description: 标签聚合（public+published 口径）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PublicTagFacets' }
+        '404': { $ref: '#/components/responses/Error' }
+  /api/public/v2/sites/{slug}/tags/{key}:
+    get:
+      tags: [sites-public]
+      operationId: publicSiteTagPage
+      parameters:
+        - $ref: '#/components/parameters/PublicSiteSlug'
+        - name: key
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: 标签页
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PublicPostPage' }
+        '404': { $ref: '#/components/responses/Error' }
+  /api/public/v2/sites/{slug}/search:
+    get:
+      tags: [sites-public]
+      operationId: publicSiteSearch
+      parameters:
+        - $ref: '#/components/parameters/PublicSiteSlug'
+        - name: q
+          in: query
+          required: true
+          schema: { type: string }
+        - name: mode
+          in: query
+          schema: { type: string, enum: [fulltext, hybrid] }
+      responses:
+        '200':
+          description: 站内搜索
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PublicPostPage' }
+        '422': { $ref: '#/components/responses/Error' }
+
+  /api/open/v2/agent-tasks:
+    post:
+      tags: [agent-tasks]
+      operationId: createAgentTask
+      description: Agent 整理任务（开放凭据；多资产 1..20；幂等键；202 返回 run_id）
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [agent_application_id, operation, input_asset_ids]
+              properties:
+                agent_application_id: { type: string, format: uuid }
+                operation: { type: string, enum: [prepare_asset] }
+                input_asset_ids:
+                  type: array
+                  minItems: 1
+                  maxItems: 20
+                  items: { type: string, format: uuid }
+      responses:
+        '202':
+          description: 任务已受理
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    properties:
+                      task_id: { type: string }
+                      run_id: { type: string }
+                  - $ref: '#/components/schemas/Envelope'
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+  /api/open/v2/agent-tasks/{taskId}:
+    get:
+      tags: [agent-tasks]
+      operationId: getAgentTask
+      parameters:
+        - name: taskId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: 任务详情
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
 components:
+  schemas:
+    PublicSite:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        workspace_id: { type: string, format: uuid }
+        slug: { type: string }
+        name: { type: string }
+        domain: { type: string }
+        template: { type: string, enum: [blog, pro] }
+        default_content_scope: { type: string, enum: [public, organization, workspace] }
+        homepage_config: { type: object }
+        navigation_config: { type: object }
+        status: { type: string, enum: [active, disabled] }
+        revision: { type: integer }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    SiteCreate:
+      type: object
+      required: [slug, name]
+      properties:
+        slug: { type: string, pattern: '^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$' }
+        name: { type: string, maxLength: 200 }
+        domain: { type: string }
+        template: { type: string, enum: [blog, pro] }
+        default_content_scope: { type: string, enum: [public, organization, workspace] }
+        homepage_config: { type: object }
+        navigation_config: { type: object }
+    SitePatch:
+      type: object
+      properties:
+        name: { type: string, maxLength: 200 }
+        domain: { type: string }
+        template: { type: string, enum: [blog, pro] }
+        default_content_scope: { type: string, enum: [public, organization, workspace] }
+        homepage_config: { type: object }
+        navigation_config: { type: object }
+        status: { type: string, enum: [active, disabled] }
+    SiteBinding:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        site_id: { type: string, format: uuid }
+        asset_id: { type: string, format: uuid }
+        display_path: { type: string }
+        content_type: { type: string, enum: [article, featured, about] }
+        section_slug: { type: string }
+        sort_order: { type: integer }
+        on_homepage: { type: boolean }
+        on_navigation: { type: boolean }
+        display_config: { type: object }
+        display_published_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    BindingCreate:
+      type: object
+      required: [asset_id, display_path]
+      properties:
+        asset_id: { type: string, format: uuid }
+        display_path: { type: string, pattern: '^[a-z0-9][a-z0-9/-]{0,120}[a-z0-9]$' }
+        content_type: { type: string, enum: [article, featured, about] }
+        section_slug: { type: string }
+        sort_order: { type: integer }
+        on_homepage: { type: boolean }
+        on_navigation: { type: boolean }
+        display_config: { type: object }
+    BindingPatch:
+      type: object
+      properties:
+        display_path: { type: string }
+        content_type: { type: string, enum: [article, featured, about] }
+        section_slug: { type: string }
+        sort_order: { type: integer }
+        on_homepage: { type: boolean }
+        on_navigation: { type: boolean }
+        display_config: { type: object }
+    SitePreview:
+      type: object
+      properties:
+        site: { $ref: '#/components/schemas/PublicSite' }
+        bindings:
+          type: array
+          items: { $ref: '#/components/schemas/SiteBinding' }
+    PublicSiteInfo:
+      type: object
+      properties:
+        slug: { type: string }
+        name: { type: string }
+        template: { type: string, enum: [blog, pro] }
+        navigation_config: { type: object }
+    PublicSection:
+      type: object
+      properties:
+        type: { type: string, enum: [latest, featured, column] }
+        title: { type: string }
+        section_slug: { type: string }
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/PublicPost' }
+    PublicSiteHome:
+      type: object
+      properties:
+        site: { $ref: '#/components/schemas/PublicSiteInfo' }
+        sections:
+          type: array
+          items: { $ref: '#/components/schemas/PublicSection' }
+    PublicPost:
+      type: object
+      properties:
+        asset_id: { type: string, format: uuid }
+        display_path: { type: string }
+        title: { type: string }
+        summary: { type: string }
+        content_kind: { type: string }
+        tags:
+          type: array
+          items: { $ref: '#/components/schemas/TagSummary' }
+        updated_at: { type: string, format: date-time, nullable: true }
+        published_at: { type: string, format: date-time, nullable: true }
+    PublicPostPage:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/PublicPost' }
+        next_cursor: { type: string }
+        has_more: { type: boolean }
+    PublicPostContent:
+      type: object
+      properties:
+        asset_id: { type: string, format: uuid }
+        display_path: { type: string }
+        title: { type: string }
+        summary: { type: string }
+        markdown: { type: string, description: 正文 markdown 原文；渲染与净化由前端负责 }
+        fields:
+          type: object
+          description: 按 field_schema 投影的白名单字段
+        content_kind: { type: string }
+        tags:
+          type: array
+          items: { $ref: '#/components/schemas/TagSummary' }
+        updated_at: { type: string, format: date-time, nullable: true }
+        published_at: { type: string, format: date-time, nullable: true }
+        section_slug: { type: string }
+    PublicTagFacets:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              key: { type: string }
+              display_name: { type: string }
+              count: { type: integer }
   responses:
     Error:
       description: v2 错误信封
@@ -2169,6 +2784,16 @@ components:
   parameters:
     WorkspaceId:
       name: workspaceId
+    PublicSiteSlug:
+      name: slug
+      in: path
+      required: true
+      schema: { type: string }
+    SiteId:
+      name: siteId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
       in: path
       required: true
       schema: { type: string, format: uuid }

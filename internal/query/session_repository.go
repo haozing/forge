@@ -70,7 +70,7 @@ func persistSessionTx(ctx context.Context, tx pgx.Tx, snapshot sessionSnapshotRo
 			 projection_profile_id, projection_generation, result_count, expires_at)
 		VALUES ($1::uuid, $2::uuid, $3, $4::uuid, $5, $6, $7, $8, $9, $10, $11, $12, $13,
 		        NULLIF($14,'')::uuid, $15, $16, $17)
-	`, snapshot.ID, snapshot.OrganizationID, snapshot.SubjectKind, snapshot.SubjectID,
+	`, snapshot.ID, snapshot.OrganizationID, snapshot.SubjectKind, nullableSubject(snapshot.SubjectID),
 		snapshot.Channel, snapshot.RequestHash, snapshot.ScopeFingerprint,
 		snapshot.PolicyRevision, snapshot.RequestedMode, snapshot.ExecutedMode,
 		snapshot.RankingMethod, snapshot.Degraded,
@@ -121,6 +121,17 @@ func nullString(value string) any {
 	return value
 }
 
+// nullableSubject renders the persisted subject_id binding of a query subject.
+// Public-site visitors are anonymous unless a member session identifies them:
+// the public channel never mints an identity.users row, so an anonymous
+// subject (subject_kind='public_site', empty id) must persist a NULL
+// subject_id in the retrieval audit and search session tables — migration 0009
+// made both columns nullable for exactly this case. Member and agent subjects
+// keep binding their identity.users id unchanged.
+func nullableSubject(subjectID string) any {
+	return nullString(subjectID)
+}
+
 func nullableInt(condition bool, value int) any {
 	if !condition {
 		return nil
@@ -141,7 +152,7 @@ func loadSession(ctx context.Context, store *store.Store, organizationID, sessio
 	var fingerprint, profileID string
 	var reasons []string
 	err := store.Pool.QueryRow(ctx, `
-		SELECT id::text, organization_id::text, subject_kind, subject_id::text, channel,
+		SELECT id::text, organization_id::text, subject_kind, COALESCE(subject_id::text, ''), channel,
 		       request_hash, scope_fingerprint_at_create, policy_revision_at_create,
 		       requested_mode, executed_mode, ranking_method, degraded,
 		       degradation_reasons, COALESCE(projection_profile_id::text,''),

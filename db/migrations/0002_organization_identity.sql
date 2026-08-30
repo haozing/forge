@@ -89,8 +89,10 @@ CREATE TABLE identity.user_preferences (
 );
 
 CREATE TABLE security.auth_rate_limits (
+    -- public_site_ip is the phase 5 anonymous public-site visitor bucket
+    -- (120/min per client address prefix; B5).
     bucket_type text NOT NULL CHECK (bucket_type IN
-        ('login_email', 'login_ip', 'password_reset_email', 'password_reset_ip', 'invitation_ip')),
+        ('login_email', 'login_ip', 'password_reset_email', 'password_reset_ip', 'invitation_ip', 'public_site_ip')),
     key_hash text NOT NULL,
     window_started_at timestamptz NOT NULL DEFAULT now(),
     attempt_count integer NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),

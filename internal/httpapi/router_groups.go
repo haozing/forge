@@ -13,6 +13,7 @@ func newRouter(deps Dependencies) *http.ServeMux {
 	registerV2IdentityRoutes(deps, mux)
 	registerV2OrganizationRoutes(deps, mux)
 	registerV2AssetRoutes(deps, mux)
+	registerV2SiteRoutes(deps, mux)
 	registerV2TagRoutes(deps, mux)
 	registerV2ReviewRoutes(deps, mux)
 	registerV2QueryRoutes(deps, mux)
@@ -174,6 +175,18 @@ func registerV2SuggestionRoutes(deps Dependencies, mux *http.ServeMux) {
 	mux.HandleFunc("/api/v2/workspaces/{workspaceId}/suggestions/{kind}/{suggestionId}/reject", v2SuggestionReject(deps))
 }
 
+// registerV2SiteRoutes holds the phase 5 public-site management surface:
+// workspace site CRUD (GET/POST collection, GET/PATCH/DELETE resource where
+// DELETE is the soft disable), binding CRUD and the no-store JSON preview
+// snapshot. Binding surfaces sit behind site.manage per the stage 5 matrix.
+func registerV2SiteRoutes(deps Dependencies, mux *http.ServeMux) {
+	mux.HandleFunc("/api/v2/workspaces/{workspaceId}/sites", v2SitesCollection(deps))
+	mux.HandleFunc("/api/v2/workspaces/{workspaceId}/sites/{siteId}", v2SiteResource(deps))
+	mux.HandleFunc("/api/v2/workspaces/{workspaceId}/sites/{siteId}/bindings", v2SiteBindingsCollection(deps))
+	mux.HandleFunc("/api/v2/workspaces/{workspaceId}/sites/{siteId}/bindings/{bindingId}", v2SiteBindingResource(deps))
+	mux.HandleFunc("/api/v2/workspaces/{workspaceId}/sites/{siteId}/preview", v2SitePreview(deps))
+}
+
 func registerV2ReviewRoutes(deps Dependencies, mux *http.ServeMux) {
 	mux.HandleFunc("/api/v2/workspaces/{workspaceId}/publication-requests", v2PublicationRequests(deps))
 	mux.HandleFunc("/api/v2/workspaces/{workspaceId}/publication-requests/batch", v2PublicationBatch(deps))
@@ -201,9 +214,18 @@ func registerOpenV2Routes(deps Dependencies, mux *http.ServeMux) {
 	mux.HandleFunc("/api/open/v2/hooks/assets", webhookCreateAsset(deps))
 }
 
+// registerPublicV2Routes holds the phase 5 public read face: anonymous or
+// optional-member visitors read one site slug, throttled per address prefix
+// through the shared public_site_ip bucket. Safe reads only: no idempotency
+// contract applies (requiresHTTPIdempotency excludes /api/public/v2).
 func registerPublicV2Routes(deps Dependencies, mux *http.ServeMux) {
-	_ = deps
-	// /api/public/v2/sites/... arrives with phase 5.
+	mux.HandleFunc("/api/public/v2/sites/{slug}", publicSiteView(deps))
+	mux.HandleFunc("/api/public/v2/sites/{slug}/posts", publicSitePosts(deps))
+	mux.HandleFunc("/api/public/v2/sites/{slug}/posts/{displayPath...}", publicSitePost(deps))
+	mux.HandleFunc("/api/public/v2/sites/{slug}/sections/{sectionSlug}", publicSiteSection(deps))
+	mux.HandleFunc("/api/public/v2/sites/{slug}/tags", publicSiteTags(deps))
+	mux.HandleFunc("/api/public/v2/sites/{slug}/tags/{key}", publicSiteTagPage(deps))
+	mux.HandleFunc("/api/public/v2/sites/{slug}/search", publicSiteSearch(deps))
 }
 
 // The phase 1 legacy identity/workspace registrations (current-user profile,
@@ -328,8 +350,9 @@ func registerLegacyContainerRoutes(deps Dependencies, mux *http.ServeMux) {
 	mux.HandleFunc("/api/frontend/containers/{containerId}/move", moveContainerFinal(deps))
 	mux.HandleFunc("/api/frontend/containers/{containerId}/children", containerChildrenFinal(deps))
 	mux.HandleFunc("/api/frontend/containers/{containerId}/assets", listContainerAssets(deps))
-	mux.HandleFunc("/api/public/workspaces/{workspaceId}/assets", publicAssets(deps))
-	mux.HandleFunc("/api/public/assets/{assetId}", publicAsset(deps))
+	// /api/public/workspaces/{workspaceId}/assets and /api/public/assets/{assetId}
+	// retired in phase 5: the public read face lives at
+	// /api/public/v2/sites/{slug}/... (see docs/route-retirement-ledger.md).
 }
 
 func registerLegacyAutomationRoutes(deps Dependencies, mux *http.ServeMux) {

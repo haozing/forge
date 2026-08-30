@@ -70,7 +70,7 @@ func BeginQueryExecution(ctx context.Context, store *store.Store, organizationID
 			(organization_id, subject_kind, subject_id, channel, request_id, request_hash, requested_mode)
 		VALUES ($1::uuid, $2, $3::uuid, $4, $5, $6, $7)
 		RETURNING id::text
-	`, organizationID, subjectKind, subjectID, channel, requestID, requestHash, requestedMode).Scan(&executionID); err != nil {
+	`, organizationID, subjectKind, nullableSubject(subjectID), channel, requestID, requestHash, requestedMode).Scan(&executionID); err != nil {
 		return "", fmt.Errorf("%w: insert audit: %v", ErrQueryAuditUnavailable, err)
 	}
 	for _, workspaceID := range workspaceIDs {

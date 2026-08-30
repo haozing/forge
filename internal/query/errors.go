@@ -49,6 +49,13 @@ var (
 	ErrRetrievalUnavailable = NewAPIError(503, "retrieval_unavailable", "no recall path of the requested mode is available")
 	// ErrQueryAuditUnavailable maps to 503 query_audit_unavailable.
 	ErrQueryAuditUnavailable = NewAPIError(503, "query_audit_unavailable", "query audit could not be recorded")
+	// ErrPublicSiteContentUnavailable maps to 503 site_content_unavailable:
+	// the public site's workspace currently has no active model with the
+	// public_site channel enabled, so there is no content band to serve at
+	// all (phase 5 fail-closed rule, doc §3.2). It is a permanent serving
+	// state of the site, not a transient provider outage; the public handler
+	// surfaces the fixed code without leaking scope details.
+	ErrPublicSiteContentUnavailable = NewAPIError(503, "site_content_unavailable", "the public site currently exposes no queryable content")
 	// ErrCitationRefNotFound maps to 404 when a citation reference fails
 	// validation; validation never leaks which part failed.
 	ErrCitationRefNotFound = NewAPIError(404, "citation_ref_not_found", "citation reference could not be validated")

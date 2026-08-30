@@ -270,6 +270,8 @@ func (p TransferProcessor) processImportRow(ctx context.Context, header importBa
 		if err != nil {
 			var rowErrors []ImportRowError
 			switch {
+			case errors.Is(err, errImportTagKeyInvalid):
+				rowErrors = []ImportRowError{{Code: "tag_key_invalid", Message: err.Error()}}
 			case errors.Is(err, tag.ErrUnknownTag):
 				rowErrors = []ImportRowError{{Code: "unknown_tag"}}
 			case errors.Is(err, tag.ErrArchived):
@@ -903,17 +905,45 @@ const (
 // allowed number of new tags under unknown_tag_policy=create.
 var errImportTagCreateLimitExceeded = errors.New("import batch exceeded the created tag limit")
 
+// errImportTagKeyInvalid marks a tag_keys entry that fails key normalization;
+// such a row is rejected with the tag_key_invalid code regardless of the batch
+// policy — only the existence policy differs between reject and create.
+var errImportTagKeyInvalid = errors.New("tag key is invalid")
+
+// normalizeImportTagKeys canonicalizes every entry before resolution.
+// Normalization is idempotent, so keys read back from an export cell (already
+// normalized) pass through unchanged; the pass exists so structurally broken
+// entries reject the row as tag_key_invalid before anything is written.
+func normalizeImportTagKeys(keys []string) ([]string, error) {
+	normalized := make([]string, 0, len(keys))
+	for _, key := range keys {
+		value, err := tag.NormalizeKey(key)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %s", errImportTagKeyInvalid, err)
+		}
+		normalized = append(normalized, value)
+	}
+	return normalized, nil
+}
+
 // resolveImportRowTags maps one row's tag_keys onto workspace tag identities
-// inside the row transaction. The batch's frozen policy decides the channel:
-// reject fails unknown/archived keys via tag.ResolveExisting semantics; create
-// resolves through tag.CreateOrReuseTx and atomically charges the actual number
-// of newly created tags against the batch's created_tag_count budget.
+// inside the row transaction. Keys are normalized first: a structurally
+// invalid entry fails the row as tag_key_invalid under either batch policy.
+// The batch's frozen policy then decides the channel: reject fails
+// unknown/archived keys via tag.ResolveExisting semantics; create resolves
+// through tag.ResolveForImportTx (reuse active, create missing as 'import'
+// catalog entries, restore archived hits) and atomically charges the actual
+// number of newly created tags against the batch's created_tag_count budget.
 func (p TransferProcessor) resolveImportRowTags(ctx context.Context, tx pgx.Tx, header importBatchHeader, actor auth.Principal, tagKeys []string) ([]string, error) {
-	ids := make([]string, 0, len(tagKeys))
+	keys, err := normalizeImportTagKeys(tagKeys)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(keys))
 	if header.unknownTagPolicy == UnknownTagPolicyCreate {
 		created := 0
-		for _, key := range tagKeys {
-			resolved, err := tag.CreateOrReuseTx(ctx, tx, actor, header.workspaceID, key)
+		for _, key := range keys {
+			resolved, err := tag.ResolveForImportTx(ctx, tx, header.organizationID, header.workspaceID, key, "", header.submittedBy)
 			if err != nil {
 				return nil, err
 			}
@@ -937,7 +967,7 @@ func (p TransferProcessor) resolveImportRowTags(ctx context.Context, tx pgx.Tx, 
 		}
 		return ids, nil
 	}
-	resolved, err := tag.ResolveExisting(ctx, p.Store, actor, header.workspaceID, tagKeys)
+	resolved, err := tag.ResolveExisting(ctx, p.Store, actor, header.workspaceID, keys)
 	if err != nil {
 		return nil, err
 	}

@@ -32,8 +32,18 @@ type FacetService struct {
 
 // Counts applies any/all/none on top of the scope and returns per-tag counts
 // for tags carried by at least one asset in the filtered set. Tag status
-// defaults to active.
+// defaults to active. The principal only supplies the organization id — no
+// permission check happens here; the caller passes the authorized scope.
 func (s FacetService) Counts(ctx context.Context, principal auth.Principal, workspaceID string, scope FacetScope, filter KeyFilter, tagStatus string, limit int) ([]FacetItem, error) {
+	return s.CountsForOrganization(ctx, principal.OrganizationID, workspaceID, scope, filter, tagStatus, limit)
+}
+
+// CountsForOrganization is the principal-free variant for public-site faces
+// (phase 5): the public band is already scoped by the query compiler
+// (visibility=public, publication_status=published), so there is no principal
+// to authorize — the organization id comes from the resolved site. It reuses
+// the exact SQL construction of Counts.
+func (s FacetService) CountsForOrganization(ctx context.Context, organizationID, workspaceID string, scope FacetScope, filter KeyFilter, tagStatus string, limit int) ([]FacetItem, error) {
 	if limit <= 0 || limit > 100 {
 		limit = 50
 	}
@@ -51,7 +61,7 @@ func (s FacetService) Counts(ctx context.Context, principal auth.Principal, work
 		rows, err := s.Store.Pool.Query(ctx, `
 			SELECT id::text FROM asset.tags
 			WHERE organization_id = $1::uuid AND workspace_id = $2::uuid AND normalized_key = ANY($3::text[])
-		`, principal.OrganizationID, workspaceID, keys)
+		`, organizationID, workspaceID, keys)
 		if err != nil {
 			return nil, err
 		}
@@ -89,13 +99,13 @@ func (s FacetService) Counts(ctx context.Context, principal auth.Principal, work
 	if scope.Scope == "published" {
 		pointer = "a.current_published_version_id"
 	}
-	args := []any{principal.OrganizationID, workspaceID}
+	args := []any{organizationID, workspaceID}
 	arg := func(value any) string {
 		args = append(args, value)
 		return fmt.Sprintf("$%d", len(args))
 	}
 	where := []string{
-		"a.organization_id = " + arg(principal.OrganizationID) + "::uuid",
+		"a.organization_id = " + arg(organizationID) + "::uuid",
 		"a.workspace_id = " + arg(workspaceID) + "::uuid",
 		"a.deleted_at IS NULL",
 	}

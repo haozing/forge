@@ -2,8 +2,10 @@ package query
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
+	"agentchunzhi/internal/auth"
 	"agentchunzhi/internal/store"
 )
 
@@ -143,4 +145,61 @@ func loadAuthorizedAssets(ctx context.Context, store *store.Store, scope QueryAc
 		candidates = append(candidates, candidate)
 	}
 	return candidates, rows.Err()
+}
+
+// AuthorizePublicSiteAsset is the extracted single-pair re-check predicate for
+// the public-site detail path (doc phase 5 §3.3, audit item A3): the query
+// service has no detail mode, so the site domain reads the published version
+// from the main data and re-checks it here before serving. The pair must
+// still be the asset's current published pointer, the asset must stay
+// published and visible inside the visitor's tiered band (D5'), the workspace
+// must stay active and the bound model must keep the public_site channel
+// enabled on the policy of the served version. The band reuses the exact
+// membership resolution and tiering the ForPublicSite compiler applies, so a
+// detail answer can never exceed what a list query of the same site would
+// have served. The boolean is the only signal: callers hide every failure
+// behind a not-found so existence never leaks.
+func AuthorizePublicSiteAsset(ctx context.Context, store *store.Store, site PublicSiteRef, visitor VisitorIdentity, assetID, versionID string) (bool, error) {
+	if store == nil || store.Pool == nil {
+		return false, errors.New("database store is not initialized")
+	}
+	if !ValidUUID(site.OrganizationID) || !ValidUUID(site.WorkspaceID) ||
+		!ValidUUID(assetID) || !ValidUUID(versionID) {
+		return false, nil
+	}
+	// Membership is re-derived from the presented user id, never trusted from
+	// the wire (doc phase 5 D5').
+	if err := newCompiler(store, "").resolvePublicSiteVisitor(ctx, site, &visitor); err != nil {
+		return false, err
+	}
+	allowed := publicSiteVisibilities(site.DefaultScope, visitor.UserType == auth.UserTypeMember, visitor.WorkspaceMember)
+	var authorized bool
+	err := store.Pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM asset.assets a
+			JOIN asset.asset_versions v
+			  ON v.organization_id = a.organization_id AND v.id = a.current_published_version_id
+			JOIN model.resource_model_versions mv
+			  ON mv.organization_id = a.organization_id AND mv.id = v.resource_model_version_id
+			JOIN model.resource_models rm
+			  ON rm.organization_id = a.organization_id AND rm.id = a.resource_model_id
+			JOIN content.workspaces w
+			  ON w.organization_id = a.organization_id AND w.id = a.workspace_id
+			WHERE a.organization_id = $1::uuid
+			  AND a.workspace_id = $2::uuid
+			  AND a.id = $3::uuid
+			  AND v.id = $4::uuid
+			  AND a.publication_status = 'published'
+			  AND a.deleted_at IS NULL
+			  AND a.visibility = ANY($5::text[])
+			  AND w.status = 'active'
+			  AND rm.status = 'active'
+			  AND COALESCE(NULLIF(mv.policy #>> '{channels,public_site,enabled}', '')::boolean, false)
+		)
+	`, site.OrganizationID, site.WorkspaceID, assetID, versionID, allowed).Scan(&authorized)
+	if err != nil {
+		return false, fmt.Errorf("authorize public site asset: %w", err)
+	}
+	return authorized, nil
 }

@@ -100,6 +100,9 @@ var memberRoleActions = map[string]map[string]bool{
 		ActionPublicationComment:  true,
 		ActionPublicationCancel:   true, // only own requests; service narrows
 		ActionAgentApplicationUse: true,
+		// Phase 5 sites: every collaboration role may read the site surface;
+		// only admin mutates it (site.manage stays admin-only).
+		ActionSiteRead: true,
 	},
 	WorkspaceRoleReviewer: {
 		ActionWorkspaceRead:       true,
@@ -113,6 +116,7 @@ var memberRoleActions = map[string]map[string]bool{
 		ActionPublicationReject:   true,
 		ActionPublicationBatch:    true,
 		ActionAgentApplicationUse: true,
+		ActionSiteRead:            true,
 	},
 	WorkspaceRoleViewer: {
 		ActionWorkspaceRead:       true,
@@ -121,6 +125,7 @@ var memberRoleActions = map[string]map[string]bool{
 		ActionAssetRead:           true,
 		ActionQueryExecute:        true,
 		ActionAgentApplicationUse: true,
+		ActionSiteRead:            true,
 	},
 }
 

@@ -386,8 +386,12 @@ CREATE INDEX projection_rebuilds_org_idx
 CREATE TABLE retrieval.search_sessions (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     organization_id uuid NOT NULL REFERENCES organization.organizations(id) ON DELETE CASCADE,
+    -- subject_kind carries 'member' | 'agent' | 'public_site'; the length CHECK
+    -- below is the only constraint (phase 5 D5'/A2).
     subject_kind text NOT NULL CHECK (char_length(subject_kind) BETWEEN 1 AND 30),
-    subject_id uuid NOT NULL,
+    -- Nullable for anonymous public-site visitors: no identity.users row is
+    -- ever minted for them, so subject_kind='public_site' rows bind NULL.
+    subject_id uuid,
     channel text NOT NULL
         CHECK (channel IN ('workspace', 'agent', 'open_api', 'public_site')),
     request_hash text NOT NULL,
@@ -483,8 +487,12 @@ CREATE INDEX search_session_items_expiry_idx
 CREATE TABLE retrieval.query_executions (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     organization_id uuid NOT NULL REFERENCES organization.organizations(id) ON DELETE CASCADE,
+    -- subject_kind carries 'member' | 'agent' | 'public_site'; the length CHECK
+    -- below is the only constraint (phase 5 D5'/A2).
     subject_kind text NOT NULL CHECK (char_length(subject_kind) BETWEEN 1 AND 30),
-    subject_id uuid NOT NULL,
+    -- Nullable for anonymous public-site visitors: no identity.users row is
+    -- ever minted for them, so subject_kind='public_site' rows bind NULL.
+    subject_id uuid,
     channel text NOT NULL
         CHECK (channel IN ('workspace', 'agent', 'open_api', 'public_site')),
     request_id text NOT NULL DEFAULT '',

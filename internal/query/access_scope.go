@@ -24,11 +24,21 @@ const (
 // VersionScopePublished is the only phase 3 version scope.
 const VersionScopePublished = "published"
 
-// Subject kinds stored in search_sessions / query_executions.
+// Subject kinds stored in search_sessions / query_executions. public_site
+// marks the phase 5 public-site channel: its visitors are anonymous unless a
+// member session identifies them, so audit rows may bind a NULL subject_id
+// (migration 0009 made the column nullable for exactly this case).
 const (
-	SubjectMember = "member"
-	SubjectAgent  = "agent"
+	SubjectMember     = "member"
+	SubjectAgent      = "agent"
+	SubjectPublicSite = "public_site"
 )
+
+// UserTypePublicSite is the auth.Principal.UserType marker of a public-site
+// visitor principal built by PublicSiteQuery. It never reaches
+// identity.users (whose CHECK only accepts member/agent); it only routes the
+// audit subject_kind and the anonymous-subject binding of Task P5-1.
+const UserTypePublicSite = "public_site"
 
 // QueryAccessScope is the only authority a repository may consult. Empty ID
 // slices mean "no permission", never "unrestricted" (doc §5.1).
@@ -105,4 +115,37 @@ var publishedVisibilities = []string{
 var organizationVisibilities = []string{
 	access.VisibilityOrganization,
 	access.VisibilityPublic,
+}
+
+// publicSiteVisibilities resolves the visibility band of a public-site visitor
+// (doc phase 5 D5'). The site's default_content_scope is the exposure ceiling;
+// the verified visitor membership picks the actual tier:
+//
+//	public ceiling       → [public] for everyone;
+//	organization ceiling → [organization, public] for same-organization
+//	                       active members, [public] otherwise;
+//	workspace ceiling    → [workspace, organization, public] for active
+//	                       members of the site workspace, the organization
+//	                       tier for same-organization members, [public] for
+//	                       anonymous visitors.
+//
+// The result always contains the public band. An unknown ceiling degrades to
+// the public-only band (fail closed). Membership flags must be established by
+// the compiler's membership SQL beforehand; this function is pure so the
+// tiering matrix stays unit-testable.
+func publicSiteVisibilities(defaultScope string, organizationMember, workspaceMember bool) []string {
+	switch defaultScope {
+	case access.VisibilityWorkspace:
+		switch {
+		case workspaceMember:
+			return publishedVisibilities
+		case organizationMember:
+			return organizationVisibilities
+		}
+	case access.VisibilityOrganization:
+		if organizationMember {
+			return organizationVisibilities
+		}
+	}
+	return []string{access.VisibilityPublic}
 }

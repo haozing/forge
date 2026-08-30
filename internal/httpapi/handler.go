@@ -32,6 +32,7 @@ import (
 	agentquery "agentchunzhi/internal/query"
 	"agentchunzhi/internal/resourcemodel"
 	"agentchunzhi/internal/review"
+	"agentchunzhi/internal/site"
 	"agentchunzhi/internal/store"
 	"agentchunzhi/internal/tag"
 	"agentchunzhi/internal/workspace"
@@ -72,6 +73,12 @@ type Dependencies struct {
 	// Phase 2 tag domain services.
 	TagService   tag.Service
 	FacetService tag.FacetService
+	// Phase 5 public-site management service (site CRUD, bindings, preview).
+	Sites *site.Service
+	// Phase 5 public-site read face (anonymous/optional-member visitors):
+	// home/posts/detail/sections/tags/search with D4 ETags and the shared
+	// public_site_ip budget (B5).
+	PublicSites *site.PublicReader
 	// Phase 4 member suggestion review surface (queue, accept/reject, batch).
 	SuggestionReviews *assetservice.SuggestionReviewService
 	// Phase 3 retrieval operations services (projection profiles and rebuilds).

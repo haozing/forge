@@ -244,6 +244,125 @@ func (c ScopeCompiler) ForOpenAPI(ctx context.Context, principal auth.Principal)
 	return c.seal(ctx, scope)
 }
 
+// PublicSiteRef identifies the public site a visitor is reading. The site
+// service domain resolves it from the slug and passes the configured content
+// scope ceiling (site.default_content_scope, doc phase 5 D5').
+type PublicSiteRef struct {
+	OrganizationID string
+	WorkspaceID    string
+	// DefaultScope is the site's exposure ceiling: public | organization |
+	// workspace. Unknown values are treated as public (fail closed).
+	DefaultScope string
+}
+
+// VisitorIdentity describes the (possibly anonymous) human reading a public
+// site. The caller passes what the session carries; ForPublicSite re-verifies
+// every claim against the membership tables before widening the band.
+type VisitorIdentity struct {
+	// UserType: "" = anonymous visitor, "member" = member session.
+	UserType        string
+	OrganizationID  string
+	UserID          string
+	WorkspaceMember bool // whether the visitor is an active member of the site workspace
+}
+
+// ForPublicSite compiles the public-site visitor scope (doc phase 5 D5'/§3.2):
+// the model set is the site workspace's workspace-bound or builtin models
+// whose current published version enables the public_site channel; the
+// visibility band is the visitor tier capped by the site's
+// default_content_scope. Tiered visibility: the site configuration is the
+// ceiling, the visitor identity decides the actual tier — anonymous visitors
+// always see only the public band, same-organization active members at most
+// the organization band, and active members of the site workspace the full
+// workspace band (still capped by the ceiling). The result always contains
+// the public band. An empty model set fails closed with
+// ErrPublicSiteContentUnavailable instead of serving an empty unrestricted
+// scope.
+func (c ScopeCompiler) ForPublicSite(ctx context.Context, site PublicSiteRef, visitor VisitorIdentity) (QueryAccessScope, error) {
+	if c.Store == nil || c.Store.Pool == nil {
+		return QueryAccessScope{}, errors.New("database store is not initialized")
+	}
+	if !ValidUUID(site.OrganizationID) || !ValidUUID(site.WorkspaceID) {
+		return QueryAccessScope{}, ErrQueryScopeForbidden
+	}
+	// Membership is re-derived from the presented user id, never trusted from
+	// the wire (doc phase 5 D5': 复用既有 membership 查询).
+	if err := c.resolvePublicSiteVisitor(ctx, site, &visitor); err != nil {
+		return QueryAccessScope{}, err
+	}
+	models, err := c.workspaceModels(ctx, site.OrganizationID, site.WorkspaceID, ChannelPublicSite)
+	if err != nil {
+		return QueryAccessScope{}, err
+	}
+	if len(models) == 0 {
+		// Fail closed: no public_site-enabled model means the site has no
+		// queryable content at all (mapped to 503 site_content_unavailable).
+		return QueryAccessScope{}, ErrPublicSiteContentUnavailable
+	}
+	scope := QueryAccessScope{
+		OrganizationID: site.OrganizationID,
+		SubjectKind:    SubjectPublicSite,
+		// Anonymous visitors carry an empty id; the audit and session
+		// repositories bind NULL through nullableSubject.
+		SubjectID:           visitor.UserID,
+		Channel:             ChannelPublicSite,
+		WorkspaceIDs:        []string{site.WorkspaceID},
+		ResourceModelIDs:    models,
+		AllowedVisibilities: publicSiteVisibilities(site.DefaultScope, visitor.UserType == auth.UserTypeMember, visitor.WorkspaceMember),
+	}
+	return c.seal(ctx, scope)
+}
+
+// resolvePublicSiteVisitor verifies the presented visitor identity against the
+// same membership predicates the member compilers use. An unverifiable
+// identity degrades to anonymous instead of failing the request: the public
+// face must stay readable, only the band narrows.
+func (c ScopeCompiler) resolvePublicSiteVisitor(ctx context.Context, site PublicSiteRef, visitor *VisitorIdentity) error {
+	if visitor.UserType != auth.UserTypeMember || !ValidUUID(visitor.UserID) {
+		*visitor = VisitorIdentity{}
+		return nil
+	}
+	// Same organization-membership predicate as ForOrganizationMember.
+	var member bool
+	err := c.Store.Pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM identity.users u
+			JOIN organization.organizations o ON o.id = u.organization_id AND o.status = 'active'
+			WHERE u.id = $2::uuid AND u.organization_id = $1::uuid
+			  AND u.user_type = 'member' AND u.status = 'active'
+		)
+	`, site.OrganizationID, visitor.UserID).Scan(&member)
+	if err != nil {
+		return fmt.Errorf("load public site visitor membership: %w", err)
+	}
+	if !member {
+		*visitor = VisitorIdentity{}
+		return nil
+	}
+	visitor.UserType = auth.UserTypeMember
+	visitor.OrganizationID = site.OrganizationID
+	// Same workspace-membership predicate as ForWorkspaceMember (role
+	// agnostic: every active member of the site workspace may read its band).
+	var workspaceMember bool
+	err = c.Store.Pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM content.workspace_members wm
+			JOIN content.workspaces w ON w.organization_id = wm.organization_id
+			  AND w.id = wm.workspace_id AND w.status = 'active'
+			JOIN identity.users u ON u.id = wm.user_id AND u.user_type = 'member'
+			  AND u.status = 'active'
+			WHERE wm.organization_id = $1::uuid AND wm.workspace_id = $2::uuid
+			  AND wm.user_id = $3::uuid
+		)
+	`, site.OrganizationID, site.WorkspaceID, visitor.UserID).Scan(&workspaceMember)
+	if err != nil {
+		return fmt.Errorf("load public site visitor workspace membership: %w", err)
+	}
+	visitor.WorkspaceMember = workspaceMember
+	return nil
+}
+
 // ForMemberCompat compiles the phase-3-compatible scope used by the in-process
 // agent runtime until phase 4 rewires it onto ForAgent: the caller supplies an
 // already-resolved model allowlist and the member reaches every workspace with

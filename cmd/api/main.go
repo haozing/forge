@@ -38,6 +38,7 @@ import (
 	"agentchunzhi/internal/retrieval"
 	"agentchunzhi/internal/review"
 	"agentchunzhi/internal/store"
+	"agentchunzhi/internal/site"
 	"agentchunzhi/internal/tag"
 	"agentchunzhi/internal/workspace"
 
@@ -105,6 +106,9 @@ func main() {
 		rateLimitHMACKey = []byte(hex.EncodeToString(raw))
 		log.Printf("WARNING: RATE_LIMIT_HMAC_KEY is not set; using an ephemeral key - login throttling resets on restart")
 	}
+	// The login throttle instance is shared with the phase 5 public-site
+	// limiter so both buckets use the same HMAC key and bucket store.
+	loginThrottle := auth.NewLoginThrottle(db, rateLimitHMACKey)
 	var objects objectstore.ObjectStore
 	ossRegion, ossBucket := strings.TrimSpace(cfg.OSSRegion), strings.TrimSpace(cfg.OSSBucket)
 	if (ossRegion == "") != (ossBucket == "") {
@@ -209,6 +213,18 @@ func main() {
 		OrganizationService:  organization.Service{Store: db, Events: &events},
 		TagService:           tag.Service{Store: db, Events: &events},
 		FacetService:         tag.FacetService{Store: db},
+		// Phase 5 public-site management: workspace policy gate plus site
+		// events/audit inside the same transaction as the business write.
+		Sites: &site.Service{Store: db, Events: &events, Policy: authz.WorkspacePolicyService{Store: db}},
+		// Phase 5 public-site read face: the unified query service (plan D2)
+		// plus the tag facet counter (B4); the anonymous IP budget reuses the
+		// same LoginThrottle instance as the login buckets (B5).
+		PublicSites: &site.PublicReader{
+			Store:    db,
+			Query:    queryService,
+			Throttle: &auth.PublicSiteIPThrottle{Counter: loginThrottle},
+			Facets:   tag.FacetService{Store: db},
+		},
 		// Phase 3 retrieval operations: profiles (list via the repository,
 		// lifecycle via the service) and rebuild batches.
 		RetrievalProfiles: retrievalProfileAdapter{
@@ -231,7 +247,7 @@ func main() {
 			Store: db, Events: &events, Cipher: deliveryCipher,
 			KeyVersion: deliveryKeyVersion, BaseURL: cfg.PublicAppBaseURL,
 		},
-		LoginThrottle:     auth.NewLoginThrottle(db, rateLimitHMACKey),
+		LoginThrottle:     loginThrottle,
 		TrustedProxyCIDRs: cfg.TrustedProxyCIDRs,
 		AllowedOrigins:    cfg.MemberAllowedOrigins,
 		AppEnv:            cfg.Environment,

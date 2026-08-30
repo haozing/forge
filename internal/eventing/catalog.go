@@ -46,6 +46,12 @@ const (
 	EventAgentAccessPolicyChanged = "agent_access_policy.changed"
 )
 
+// PublicSite aggregate facts (phase 5 extends the catalog with site changes;
+// this is the only eventing change of P5-2).
+const (
+	EventSiteChanged = "site.site_changed"
+)
+
 // PublicSite binding facts.
 const (
 	EventSiteBindingChanged = "site.binding_changed"
@@ -164,6 +170,16 @@ type AgentAccessPolicyChangedPayload struct {
 	WorkspaceID string `json:"workspace_id,omitempty"`
 }
 
+// SiteChangedPayload marks a public site configuration or lifecycle change.
+// Action carries the management verb (created / updated / disabled /
+// binding_created / binding_updated / binding_deleted); binding details ride
+// on site.binding_changed.
+type SiteChangedPayload struct {
+	SiteID      string `json:"site_id"`
+	WorkspaceID string `json:"workspace_id"`
+	Action      string `json:"action"`
+}
+
 // SiteBindingChangedPayload marks a site binding change (phase 5 consumes).
 type SiteBindingChangedPayload struct {
 	SiteID    string `json:"site_id"`
@@ -202,6 +218,7 @@ func KnownEvents() map[string]int {
 		EventResourceModelPolicyPublished: PayloadVersionV1,
 		EventWorkspaceMembershipChanged:   PayloadVersionV1,
 		EventAgentAccessPolicyChanged:     PayloadVersionV1,
+		EventSiteChanged:                  PayloadVersionV1,
 		EventSiteBindingChanged:           PayloadVersionV1,
 		EventAgentProcessingCompleted:     PayloadVersionV1,
 	}
