@@ -115,6 +115,7 @@ func NewHandlerWithDeps(deps Dependencies) http.Handler {
 
 type createAssetRequest struct {
 	ResourceModelID string         `json:"resource_model_id"`
+	WorkspaceID     string         `json:"workspace_id"`
 	Title           *string        `json:"title"`
 	Markdown        *string        `json:"markdown"`
 	Fields          map[string]any `json:"fields"`
@@ -1684,6 +1685,7 @@ func createAsset(deps Dependencies) http.HandlerFunc {
 		}
 		result, err := deps.AssetService.Create(r.Context(), principal, allowedModels, idempotencyKey, assetservice.CreateInput{
 			ResourceModelID: input.ResourceModelID,
+			WorkspaceID:     input.WorkspaceID,
 			Title:           input.Title,
 			Markdown:        input.Markdown,
 			Fields:          input.Fields,

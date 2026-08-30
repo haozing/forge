@@ -388,14 +388,16 @@ func (s TransferService) StartExport(ctx context.Context, principal auth.Princip
 	if input.Format != "jsonl" && input.Format != "csv" && input.Format != "xlsx" {
 		return ExportJob{}, ErrInvalidInput
 	}
-	var modelWorkspace string
+	var modelWorkspace *string
 	if err := s.Store.Pool.QueryRow(ctx, `SELECT workspace_id::text FROM model.resource_models WHERE organization_id = $1::uuid AND id = $2::uuid`, principal.OrganizationID, input.ResourceModelID).Scan(&modelWorkspace); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ExportJob{}, ErrNotFound
 		}
 		return ExportJob{}, err
 	}
-	if modelWorkspace != workspaceID {
+	// Organization-level models (builtin seeds carry a NULL workspace) may
+	// export any authorized workspace; workspace-bound models must match.
+	if modelWorkspace != nil && *modelWorkspace != "" && *modelWorkspace != workspaceID {
 		return ExportJob{}, ErrForbidden
 	}
 	snapshot, _ := json.Marshal(map[string]any{"resource_model_id": input.ResourceModelID, "filters": input.Filters, "format": input.Format})

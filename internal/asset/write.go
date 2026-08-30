@@ -28,6 +28,7 @@ var ErrIdempotencyConflict = errors.New("idempotency key conflict")
 type AssetResult struct {
 	ID                        string         `json:"id"`
 	ResourceModelID           string         `json:"resource_model_id"`
+	WorkspaceID               string         `json:"workspace_id"`
 	CurrentWorkingVersionID   string         `json:"current_working_version_id"`
 	CurrentPublishedVersionID *string        `json:"current_published_version_id"`
 	PublicationStatus         string         `json:"publication_status"`
@@ -39,9 +40,13 @@ type AssetResult struct {
 
 type CreateInput struct {
 	ResourceModelID string
-	Title           *string
-	Markdown        *string
-	Fields          map[string]any
+	// WorkspaceID is required when the model is organization-level (builtin
+	// models ship with NULL workspace): agents have no workspace identity of
+	// their own, so the caller names the target workspace explicitly.
+	WorkspaceID string
+	Title       *string
+	Markdown    *string
+	Fields      map[string]any
 	// Source carries optional channel provenance. It is preserved in the
 	// raw_inputs payload only; version snapshots record no channel JSON.
 	Source map[string]any
@@ -96,7 +101,8 @@ func (s Service) Create(ctx context.Context, principal auth.Principal, allowedMo
 		Fields   map[string]any `json:"fields"`
 		Source   map[string]any `json:"source,omitempty"`
 	}{"api", input.Title, input.Markdown, fields, input.Source})
-	var modelVersionID, workspaceID string
+	var modelVersionID string
+	var modelWorkspace *string
 	var fieldSchema []byte
 	if err := tx.QueryRow(ctx, `
 		SELECT mv.id::text, mv.field_schema, rm.workspace_id::text
@@ -106,11 +112,37 @@ func (s Service) Create(ctx context.Context, principal auth.Principal, allowedMo
 		  AND rm.organization_id = $2::uuid
 		  AND rm.id::text = ANY($3::text[])
 		  AND rm.status = 'active'
-	`, input.ResourceModelID, principal.OrganizationID, allowedModelIDs).Scan(&modelVersionID, &fieldSchema, &workspaceID); err != nil {
+	`, input.ResourceModelID, principal.OrganizationID, allowedModelIDs).Scan(&modelVersionID, &fieldSchema, &modelWorkspace); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return AssetResult{}, ErrNotFound
 		}
 		return AssetResult{}, fmt.Errorf("load resource model version: %w", err)
+	}
+	// Workspace resolution (webhook semantics): a workspace-bound model pins
+	// the target; an organization-level model requires the caller to name it.
+	var workspaceID string
+	if modelWorkspace != nil && *modelWorkspace != "" {
+		workspaceID = *modelWorkspace
+		if input.WorkspaceID != "" && input.WorkspaceID != workspaceID {
+			return AssetResult{}, ErrInvalidInput
+		}
+	} else {
+		if !validID(input.WorkspaceID) {
+			return AssetResult{}, ErrInvalidInput
+		}
+		var wsOK bool
+		if err := tx.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM content.workspaces
+				WHERE organization_id = $1::uuid AND id = $2::uuid AND status = 'active'
+			)
+		`, principal.OrganizationID, input.WorkspaceID).Scan(&wsOK); err != nil {
+			return AssetResult{}, fmt.Errorf("load create target workspace: %w", err)
+		}
+		if !wsOK {
+			return AssetResult{}, ErrInvalidInput
+		}
+		workspaceID = input.WorkspaceID
 	}
 	if err := validateFields(fieldSchema, fields); err != nil {
 		return AssetResult{}, err
@@ -410,13 +442,13 @@ func saveIdempotency(ctx context.Context, tx pgx.Tx, principal auth.Principal, o
 func loadAssetTx(ctx context.Context, tx pgx.Tx, organizationID, assetID string) (AssetResult, error) {
 	var result AssetResult
 	err := tx.QueryRow(ctx, `
-		SELECT a.id::text, a.resource_model_id::text,
+		SELECT a.id::text, a.resource_model_id::text, a.workspace_id::text,
 		       a.current_working_version_id::text, a.current_published_version_id::text,
 		       a.publication_status, d.title, d.markdown, d.fields, a.updated_at
 		FROM asset.assets a
 		JOIN asset.asset_drafts d ON d.organization_id = a.organization_id AND d.asset_id = a.id
 		WHERE a.organization_id = $1::uuid AND a.id = $2::uuid
-	`, organizationID, assetID).Scan(&result.ID, &result.ResourceModelID,
+	`, organizationID, assetID).Scan(&result.ID, &result.ResourceModelID, &result.WorkspaceID,
 		&result.CurrentWorkingVersionID, &result.CurrentPublishedVersionID,
 		&result.PublicationStatus, &result.Title, &result.Markdown, &result.Fields, &result.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {

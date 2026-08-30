@@ -124,7 +124,10 @@ func exportDownloadFinal(deps Dependencies) http.HandlerFunc {
 		}
 		var workspaceID, status, objectKey, contentType string
 		var size *int64
-		err := deps.Store.Pool.QueryRow(r.Context(), `SELECT rm.workspace_id::text, e.status, COALESCE(e.output_object_key, ''), COALESCE(e.output_content_type, 'application/octet-stream'), e.output_size FROM asset.export_jobs e JOIN model.resource_models rm ON rm.id = e.resource_model_id AND rm.organization_id = e.organization_id WHERE e.organization_id = $1::uuid AND e.id = $2::uuid`, principal.OrganizationID, r.PathValue("jobId")).Scan(&workspaceID, &status, &objectKey, &contentType, &size)
+		// Authorization scope is the workspace the job was created under (its
+		// own NOT NULL workspace_id), not the model's current binding: models
+		// can be rebound, and organization-level models carry no binding at all.
+		err := deps.Store.Pool.QueryRow(r.Context(), `SELECT e.workspace_id::text, e.status, COALESCE(e.output_object_key, ''), COALESCE(e.output_content_type, 'application/octet-stream'), e.output_size FROM asset.export_jobs e WHERE e.organization_id = $1::uuid AND e.id = $2::uuid`, principal.OrganizationID, r.PathValue("jobId")).Scan(&workspaceID, &status, &objectKey, &contentType, &size)
 		if err != nil {
 			writeError(w, http.StatusNotFound, "export_job_not_found")
 			return

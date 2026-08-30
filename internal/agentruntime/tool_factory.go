@@ -100,7 +100,12 @@ func (f DomainToolFactory) Build(ctx context.Context, scope ReActToolScope, rawP
 			}
 			fields, _ := arguments["fields"].(map[string]any)
 			return assets.Create(ctx, principal, models, idempotencyKey("create", ctx), assetservice.CreateInput{
-				ResourceModelID: stringValue(arguments["resource_model_id"]), Fields: fields,
+				// Run scope pins the target workspace: builtin models are
+				// organization-level (NULL workspace) and would otherwise be
+				// rejected as invalid input.
+				ResourceModelID: stringValue(arguments["resource_model_id"]),
+				WorkspaceID:     scope.WorkspaceID,
+				Fields:          fields,
 			})
 		},
 		UpdateInternalAsset: func(ctx context.Context, arguments map[string]any) (any, error) {

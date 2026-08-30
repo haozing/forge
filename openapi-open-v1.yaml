@@ -311,10 +311,11 @@ components:
     Asset:
       type: object
       required:
-        [id, resource_model_id, current_working_version_id, publication_status]
+        [id, resource_model_id, workspace_id, current_working_version_id, publication_status]
       properties:
         id: { $ref: "#/components/schemas/Uuid" }
         resource_model_id: { $ref: "#/components/schemas/Uuid" }
+        workspace_id: { $ref: "#/components/schemas/Uuid" }
         current_working_version_id: { $ref: "#/components/schemas/Uuid" }
         current_published_version_id:
           oneOf:
@@ -391,6 +392,11 @@ components:
       required: [resource_model_id]
       properties:
         resource_model_id: { $ref: "#/components/schemas/Uuid" }
+        workspace_id:
+          $ref: "#/components/schemas/Uuid"
+          description: |
+            组织级模型（builtin_*，workspace 绑定为 NULL）必填：资产落入该工作区；
+            工作区专属模型自动落绑定工作区，传值不一致返回 422。
         title: { type: string, maxLength: 500 }
         markdown: { type: string, maxLength: 2000000 }
         fields:

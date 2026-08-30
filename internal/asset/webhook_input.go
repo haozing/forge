@@ -66,20 +66,43 @@ func (s TransferService) ResolveWebhookTarget(ctx context.Context, principal aut
 		if !validID(requestedModelID) {
 			return WebhookTarget{}, ErrInvalidInput
 		}
-		var modelWorkspace string
+		var modelWorkspace *string
 		if err := s.Store.Pool.QueryRow(ctx, `SELECT workspace_id::text FROM model.resource_models WHERE organization_id = $1::uuid AND id = $2::uuid`, principal.OrganizationID, requestedModelID).Scan(&modelWorkspace); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return WebhookTarget{}, ErrNotFound
 			}
 			return WebhookTarget{}, fmt.Errorf("load webhook resource model: %w", err)
 		}
-		if requestedWorkspaceID != "" && requestedWorkspaceID != modelWorkspace {
-			return WebhookTarget{}, ErrInvalidInput
+		// Workspace resolution mirrors Service.Create: a workspace-bound model
+		// pins the target; an organization-level model (builtin seeds ship with
+		// NULL workspace) requires the caller to name an active workspace.
+		workspaceID := requestedWorkspaceID
+		if modelWorkspace != nil && *modelWorkspace != "" {
+			if requestedWorkspaceID != "" && requestedWorkspaceID != *modelWorkspace {
+				return WebhookTarget{}, ErrInvalidInput
+			}
+			workspaceID = *modelWorkspace
+		} else {
+			if !validID(requestedWorkspaceID) {
+				return WebhookTarget{}, ErrInvalidInput
+			}
+			var wsOK bool
+			if err := s.Store.Pool.QueryRow(ctx, `
+				SELECT EXISTS (
+					SELECT 1 FROM content.workspaces
+					WHERE organization_id = $1::uuid AND id = $2::uuid AND status = 'active'
+				)
+			`, principal.OrganizationID, requestedWorkspaceID).Scan(&wsOK); err != nil {
+				return WebhookTarget{}, fmt.Errorf("verify webhook target workspace: %w", err)
+			}
+			if !wsOK {
+				return WebhookTarget{}, ErrInvalidInput
+			}
 		}
-		if err := authorizeWebhookModelAccess(ctx, s.Policy, s.Store, principal, modelWorkspace, requestedModelID); err != nil {
+		if err := authorizeWebhookModelAccess(ctx, s.Policy, s.Store, principal, workspaceID, requestedModelID); err != nil {
 			return WebhookTarget{}, err
 		}
-		return WebhookTarget{WorkspaceID: modelWorkspace, ResourceModelID: requestedModelID}, nil
+		return WebhookTarget{WorkspaceID: workspaceID, ResourceModelID: requestedModelID}, nil
 	}
 	workspaceID := requestedWorkspaceID
 	if workspaceID == "" {
@@ -233,7 +256,8 @@ func (s Service) CreateFromWebhook(ctx context.Context, principal auth.Principal
 		Markdown *string        `json:"markdown"`
 		Fields   map[string]any `json:"fields"`
 	}{input.Title, input.Markdown, fields})
-	var modelVersionID, modelWorkspace string
+	var modelVersionID string
+	var modelWorkspace *string
 	var fieldSchema []byte
 	if err := tx.QueryRow(ctx, `
 		SELECT mv.id::text, mv.field_schema, rm.workspace_id::text
@@ -248,19 +272,39 @@ func (s Service) CreateFromWebhook(ctx context.Context, principal auth.Principal
 		}
 		return replay, false, fmt.Errorf("load webhook resource model version: %w", err)
 	}
-	if input.WorkspaceID != modelWorkspace {
-		return replay, false, ErrForbidden
+	// Mirrors ResolveWebhookTarget: a workspace-bound model must land in its
+	// workspace; an organization-level model (builtin seeds carry a NULL
+	// workspace) lands in the caller-supplied workspace, re-verified here in
+	// the create transaction so direct calls cannot cross workspaces.
+	workspaceID := input.WorkspaceID
+	if modelWorkspace != nil && *modelWorkspace != "" {
+		if workspaceID != *modelWorkspace {
+			return replay, false, ErrForbidden
+		}
+	} else {
+		var wsOK bool
+		if err := tx.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM content.workspaces
+				WHERE organization_id = $1::uuid AND id = $2::uuid AND status = 'active'
+			)
+		`, principal.OrganizationID, workspaceID).Scan(&wsOK); err != nil {
+			return replay, false, fmt.Errorf("verify webhook asset workspace: %w", err)
+		}
+		if !wsOK {
+			return replay, false, ErrInvalidInput
+		}
 	}
 	if err := validateFields(fieldSchema, fields); err != nil {
 		return replay, false, err
 	}
-	if err := validateAssetReferences(ctx, tx, principal, modelWorkspace, fieldSchema, fields); err != nil {
+	if err := validateAssetReferences(ctx, tx, principal, workspaceID, fieldSchema, fields); err != nil {
 		return replay, false, err
 	}
 	// The webhook technical identity may only reference existing active tags;
 	// unknown or archived keys fail the whole request (tag.ErrUnknownTag /
 	// tag.ErrArchived) so external systems can never expand the catalog.
-	resolvedTags, err := tag.ResolveExisting(ctx, s.Store, principal, modelWorkspace, input.TagKeys)
+	resolvedTags, err := tag.ResolveExisting(ctx, s.Store, principal, workspaceID, input.TagKeys)
 	if err != nil {
 		return replay, false, err
 	}
@@ -284,11 +328,11 @@ func (s Service) CreateFromWebhook(ctx context.Context, principal auth.Principal
 			(organization_id, workspace_id, submitted_by, source_type, content_type, external_ref, payload, content_checksum)
 		VALUES ($1::uuid, $2::uuid, $3::uuid, 'webhook', 'application/json', NULLIF($4,''), $5::jsonb, $6)
 		RETURNING id::text
-	`, principal.OrganizationID, modelWorkspace, principal.UserID, input.ExternalRef, string(mustJSON(payload)), contentChecksum).Scan(&rawInputID); err != nil {
+	`, principal.OrganizationID, workspaceID, principal.UserID, input.ExternalRef, string(mustJSON(payload)), contentChecksum).Scan(&rawInputID); err != nil {
 		return replay, false, fmt.Errorf("record webhook raw input: %w", err)
 	}
 	assetID, versionID, versionNo, err := createAssetWithFirstVersionTx(ctx, tx,
-		principal.OrganizationID, modelWorkspace, resourceModelID, modelVersionID,
+		principal.OrganizationID, workspaceID, resourceModelID, modelVersionID,
 		rawInputID, OriginHuman, derefString(input.Title), "", derefString(input.Markdown),
 		fields, tagIDs, tag.SourceWebhook, principal.UserID)
 	if err != nil {
@@ -302,12 +346,12 @@ func (s Service) CreateFromWebhook(ctx context.Context, principal auth.Principal
 		AssetID:     assetID,
 		VersionID:   versionID,
 		VersionNo:   versionNo,
-		WorkspaceID: modelWorkspace,
+		WorkspaceID: workspaceID,
 	}); err != nil {
 		return replay, false, err
 	}
-	RecordAssetAuditTx(ctx, tx, principal.OrganizationID, modelWorkspace, principal, webhookCreateOperation, assetID, map[string]any{
-		"workspace_id": modelWorkspace,
+	RecordAssetAuditTx(ctx, tx, principal.OrganizationID, workspaceID, principal, webhookCreateOperation, assetID, map[string]any{
+		"workspace_id": workspaceID,
 		"version_id":   versionID,
 		"external_ref": input.ExternalRef,
 	})
