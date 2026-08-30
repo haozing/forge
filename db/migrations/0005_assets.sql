@@ -14,6 +14,7 @@ CREATE TABLE asset.raw_inputs (
     external_ref text,
     payload jsonb NOT NULL DEFAULT '{}'::jsonb,
     content_checksum text NOT NULL,
+    last_prepared_at timestamptz,
     created_at timestamptz NOT NULL DEFAULT now()
 );
 
@@ -361,38 +362,48 @@ CREATE TABLE asset.asset_relations (
     source_asset_version_id uuid,
     target_asset_version_id uuid,
     relation_type text NOT NULL,
+    source text NOT NULL DEFAULT 'manual'
+        CHECK (source IN ('manual', 'api', 'webhook', 'import', 'ai')),
+    confidence numeric(4, 3),
+    citation jsonb NOT NULL DEFAULT '{}'::jsonb,
+    suggestion_id uuid,
     created_by uuid NOT NULL REFERENCES identity.users(id),
     created_at timestamptz NOT NULL DEFAULT now(),
     UNIQUE (source_asset_version_id, target_asset_version_id, relation_type),
+    CHECK ((source = 'ai') = (confidence IS NOT NULL)),
+    CHECK (confidence IS NULL OR (confidence >= 0 AND confidence <= 1)),
     FOREIGN KEY (organization_id, source_asset_version_id)
         REFERENCES asset.asset_versions (organization_id, id),
     FOREIGN KEY (organization_id, target_asset_version_id)
         REFERENCES asset.asset_versions (organization_id, id)
 );
 
--- Relations follow the same sealed-version immutability as attachments and
--- tags: both endpoints must reference an unsealed (working) version.
+-- Relations carry their provenance columns (source/confidence/citation/
+-- suggestion_id) and follow a narrowed sealed rule: an edge may only be
+-- written while its SOURCE version is still unsealed, i.e. inside the source
+-- version's creating transaction (AI-suggested relations materialize there,
+-- before CreateVersionTx seals the snapshot). The TARGET endpoint is exempt
+-- on purpose: materialization points at the target asset's current working
+-- version, which is always an already-sealed snapshot. Checking both
+-- endpoints (as tags and attachments do) would reject every materialization.
 CREATE FUNCTION asset.reject_sealed_asset_relation() RETURNS trigger
 LANGUAGE plpgsql AS $$
 DECLARE
     org_id uuid;
     source_id uuid;
-    target_id uuid;
     sealed boolean;
 BEGIN
     IF TG_OP = 'DELETE' THEN
         org_id := OLD.organization_id;
         source_id := OLD.source_asset_version_id;
-        target_id := OLD.target_asset_version_id;
     ELSE
         org_id := NEW.organization_id;
         source_id := NEW.source_asset_version_id;
-        target_id := NEW.target_asset_version_id;
     END IF;
     SELECT TRUE INTO sealed
     FROM asset.asset_versions
     WHERE organization_id = org_id
-      AND id IN (source_id, target_id)
+      AND id = source_id
       AND sealed_at IS NOT NULL;
     IF sealed IS TRUE THEN
         RAISE EXCEPTION 'asset version relations are sealed'
@@ -411,6 +422,39 @@ CREATE TRIGGER asset_relations_sealed_guard
 
 CREATE INDEX asset_relations_source_idx
     ON asset.asset_relations (organization_id, source_asset_version_id, created_at DESC);
+CREATE INDEX asset_relations_target_idx
+    ON asset.asset_relations (organization_id, target_asset_version_id, relation_type);
+
+-- Draft-stage parking for relations accepted from AI suggestions (phase 4
+-- decision 2: manual flows have no draft-period relations, so this table only
+-- carries source='ai' rows; they materialize into asset_relations when the
+-- draft commits and stay for audit until the asset cascades away).
+CREATE TABLE asset.asset_draft_relations (
+    organization_id uuid NOT NULL REFERENCES organization.organizations(id),
+    workspace_id uuid NOT NULL,
+    asset_draft_id uuid NOT NULL,
+    asset_id uuid NOT NULL,
+    target_asset_id uuid NOT NULL,
+    relation_type text NOT NULL
+        CHECK (relation_type IN ('related_to', 'references', 'derived_from', 'cites', 'continues_from')),
+    source text NOT NULL DEFAULT 'ai'
+        CHECK (source IN ('manual', 'api', 'webhook', 'import', 'ai')),
+    confidence numeric(4, 3),
+    citation jsonb NOT NULL DEFAULT '{}'::jsonb,
+    suggestion_id uuid,
+    added_by uuid NOT NULL REFERENCES identity.users(id),
+    created_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (asset_draft_id, target_asset_id, relation_type),
+    CHECK ((source = 'ai') = (confidence IS NOT NULL)),
+    CHECK (confidence IS NULL OR (confidence >= 0 AND confidence <= 1)),
+    FOREIGN KEY (organization_id, asset_draft_id)
+        REFERENCES asset.asset_drafts (organization_id, id) ON DELETE CASCADE,
+    FOREIGN KEY (organization_id, target_asset_id)
+        REFERENCES asset.assets (organization_id, id)
+);
+
+CREATE INDEX asset_draft_relations_target_idx
+    ON asset.asset_draft_relations (organization_id, target_asset_id);
 
 CREATE TABLE asset.import_batches (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),

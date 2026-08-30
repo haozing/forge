@@ -64,7 +64,8 @@ func v2ServiceError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusConflict, "state_conflict")
 	case errors.Is(err, review.ErrSelfApproval):
 		writeError(w, http.StatusConflict, "self_approval_not_allowed")
-	case errors.Is(err, asset.ErrApprovalRequired), errors.Is(err, review.ErrForbidden):
+	case errors.Is(err, asset.ErrApprovalRequired), errors.Is(err, asset.ErrForbidden),
+		errors.Is(err, review.ErrForbidden):
 		writeError(w, http.StatusForbidden, "action_not_allowed")
 	case errors.Is(err, asset.ErrConfirmationRequired):
 		writeError(w, http.StatusConflict, "human_confirmation_required")
@@ -76,6 +77,12 @@ func v2ServiceError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusConflict, "tag_archived")
 	case errors.Is(err, asset.ErrTooManyTags):
 		writeError(w, http.StatusUnprocessableEntity, "too_many_tags")
+	case errors.Is(err, asset.ErrSuggestionNotFound):
+		writeError(w, http.StatusNotFound, "suggestion_not_found")
+	case errors.Is(err, asset.ErrSuggestionStateInvalid):
+		writeError(w, http.StatusConflict, "suggestion_state_invalid")
+	case errors.Is(err, asset.ErrSuggestionKindInvalid):
+		writeError(w, http.StatusUnprocessableEntity, "suggestion_kind_invalid")
 	case errors.Is(err, authz.ErrWorkspaceForbidden):
 		writeError(w, http.StatusForbidden, "action_not_allowed")
 	case errors.Is(err, authz.ErrWorkspaceNotFound):

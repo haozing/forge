@@ -29,6 +29,52 @@ const (
 	ConfirmationHumanConfirmed = "human_confirmed"
 )
 
+// Relation types on asset.asset_relations.relation_type and the phase 4
+// suggestion tables; mirrored by the database CHECK constraints.
+const (
+	RelationRelatedTo     = "related_to"
+	RelationReferences    = "references"
+	RelationDerivedFrom   = "derived_from"
+	RelationCites         = "cites"
+	RelationContinuesFrom = "continues_from"
+)
+
+// ValidRelationType mirrors the relation_type CHECK constraint.
+func ValidRelationType(value string) bool {
+	switch value {
+	case RelationRelatedTo, RelationReferences, RelationDerivedFrom, RelationCites, RelationContinuesFrom:
+		return true
+	default:
+		return false
+	}
+}
+
+// Suggestion kinds of the phase 4 review surface: field and summary share one
+// table (asset.asset_field_suggestions), tag and relation have their own.
+const (
+	SuggestionKindField    = "field"
+	SuggestionKindSummary  = "summary"
+	SuggestionKindTag      = "tag"
+	SuggestionKindRelation = "relation"
+)
+
+// Suggestion statuses shared by the three suggestion tables.
+const (
+	SuggestionStatusPending  = "pending"
+	SuggestionStatusAccepted = "accepted"
+	SuggestionStatusRejected = "rejected"
+)
+
+// ValidSuggestionKind reports whether kind addresses one of the three tables.
+func ValidSuggestionKind(kind string) bool {
+	switch kind {
+	case SuggestionKindField, SuggestionKindSummary, SuggestionKindTag, SuggestionKindRelation:
+		return true
+	default:
+		return false
+	}
+}
+
 // Attachment scan statuses on asset.attachments.status.
 const (
 	AttachmentUploading = "uploading"

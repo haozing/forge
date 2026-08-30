@@ -72,6 +72,8 @@ type Dependencies struct {
 	// Phase 2 tag domain services.
 	TagService   tag.Service
 	FacetService tag.FacetService
+	// Phase 4 member suggestion review surface (queue, accept/reject, batch).
+	SuggestionReviews *assetservice.SuggestionReviewService
 	// Phase 3 retrieval operations services (projection profiles and rebuilds).
 	RetrievalProfiles RetrievalProfileService
 	RetrievalRebuilds RetrievalRebuildService

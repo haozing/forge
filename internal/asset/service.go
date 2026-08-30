@@ -112,10 +112,12 @@ func (s Service) Publish(ctx context.Context, principal auth.Principal, allowedM
 	}); err != nil {
 		return PublishResult{}, err
 	}
-	RecordAssetAuditTx(ctx, tx, row.OrganizationID, row.WorkspaceID, principal, "asset.publish", row.ID, map[string]any{
-		"workspace_id":   row.WorkspaceID,
-		"principal_type": principal.UserType,
-	})
+	RecordAssetAuditTx(ctx, tx, row.OrganizationID, row.WorkspaceID, principal, "asset.publish", row.ID,
+		MergeAgentProvenance(map[string]any{
+			"workspace_id":   row.WorkspaceID,
+			"principal_type": principal.UserType,
+			"version_id":     row.CurrentWorkingVersionID,
+		}, agentProvenanceTx(ctx, tx, row.OrganizationID, row.CurrentWorkingVersionID)))
 	if err := tx.Commit(ctx); err != nil {
 		return PublishResult{}, fmt.Errorf("commit publish transaction: %w", err)
 	}

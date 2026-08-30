@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: AgentChunzhi v2 API
-  version: 2.0.0-phase3
+  version: 2.0.0-phase4
   description: |
     唯一 v2 契约。入口族：
     - /api/v2/... 成员会话和工作区管理 API
@@ -14,11 +14,15 @@ info:
     （profiles/activate、workspace/organization retrieval status 与 rebuilds）与查询执行审计
     （query-executions）；退役 /api/frontend/.../query|index|query-audit|search/suggestions 与
     /api/open/v1/query（见 docs/route-retirement-ledger.md）。
+    阶段 4 增补建议流：prepare（成员发起 Agent 整理，202 返回 run_id）、三类建议联合列表、
+    accept/reject/accept-batch 与 processing-results；建议只进共享 AssetDraft，版本在用户 commit 时产生
+    （origin=ai_assisted），发布审计带 Agent 溯源六要素（见 docs/route-retirement-ledger.md 阶段 4 行）。
 servers:
   - url: /
 tags:
   - name: publication-requests
   - name: assets
+  - name: suggestions
   - name: identity
   - name: workspaces
   - name: tags
@@ -383,6 +387,219 @@ paths:
                 allOf:
                   - $ref: '#/components/schemas/AssetVersion'
                   - $ref: '#/components/schemas/Envelope'
+  /api/v2/workspaces/{workspaceId}/assets/{assetId}/prepare:
+    post:
+      tags: [suggestions]
+      operationId: prepareAsset
+      description: 成员发起 Agent 整理：创建 automation.run（source=manual，绑定工作区启用的 asset_prepare
+        workflow AgentApplication）；只产出建议集，不产生版本
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/AssetId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '202':
+          description: 已受理，返回 run_id；建议经处理结果与建议端点查询
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/PrepareAccepted'
+                  - $ref: '#/components/schemas/Envelope'
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409':
+          description: 工作区没有启用的 asset_prepare AgentApplication（prepare_application_missing）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+  /api/v2/workspaces/{workspaceId}/assets/{assetId}/suggestions:
+    get:
+      tags: [suggestions]
+      operationId: listSuggestions
+      description: 三类建议（field/summary/tag/relation）联合列表 + 最近处理结果
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/AssetId'
+        - $ref: '#/components/parameters/Cursor'
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [pending, accepted, rejected, all]
+            default: pending
+        - name: run_id
+          in: query
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: 建议队列
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuggestionList'
+                  - $ref: '#/components/schemas/Envelope'
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+  /api/v2/workspaces/{workspaceId}/suggestions/{kind}/{suggestionId}/accept:
+    post:
+      tags: [suggestions]
+      operationId: acceptSuggestion
+      description: 采纳单条建议进入共享 AssetDraft（单事务，draft revision 恰 +1）；仅成员可操作
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - name: kind
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [field, summary, tag, relation]
+        - name: suggestionId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                resolved_tag_id:
+                  type: string
+                  format: uuid
+                  description: tag 建议的显式解析目标（活动工作区标签）；缺省按 suggested_key 解析/创建
+      responses:
+        '200':
+          description: 已采纳；返回建议与进入的 draft
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuggestionReviewOutcome'
+                  - $ref: '#/components/schemas/Envelope'
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409':
+          description: 建议已被决策（suggestion_state_invalid）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '422':
+          description: 建议 kind/目标不合法或合并后字段未过 schema（suggestion_target_invalid）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /api/v2/workspaces/{workspaceId}/suggestions/{kind}/{suggestionId}/reject:
+    post:
+      tags: [suggestions]
+      operationId: rejectSuggestion
+      description: 拒绝单条待定建议（终态，审计保留）
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - name: kind
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [field, summary, tag, relation]
+        - name: suggestionId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: 已拒绝（无正文数据）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409':
+          description: 建议已被决策（suggestion_state_invalid）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+  /api/v2/workspaces/{workspaceId}/assets/{assetId}/suggestions/accept-batch:
+    post:
+      tags: [suggestions]
+      operationId: batchAcceptSuggestions
+      description: 同一事务批量采纳（最多 100 条）；draft 内容合并为一次 autosave，revision 恰 +1
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/AssetId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refs]
+              properties:
+                refs:
+                  type: array
+                  minItems: 1
+                  maxItems: 100
+                  items:
+                    type: object
+                    required: [kind, suggestion_id]
+                    properties:
+                      kind:
+                        type: string
+                        enum: [field, summary, tag, relation]
+                      suggestion_id: { type: string, format: uuid }
+                      resolved_tag_id: { type: string, format: uuid }
+      responses:
+        '200':
+          description: 批量结果：成功项、失败项与共享的 draft revision
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/BatchAcceptResponse'
+                  - $ref: '#/components/schemas/Envelope'
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+  /api/v2/workspaces/{workspaceId}/assets/{assetId}/processing-results:
+    get:
+      tags: [suggestions]
+      operationId: listProcessingResults
+      description: 资产的处理结果列表（含建议计数汇总、字段 diff、整体置信度与输出版本回填）
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/AssetId'
+      responses:
+        '200':
+          description: 最近处理结果
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    properties:
+                      processing_results:
+                        type: array
+                        items: { $ref: '#/components/schemas/ProcessingResult' }
+                  - $ref: '#/components/schemas/Envelope'
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
   /api/public/v2/sessions:
     post:
       tags: [identity]
@@ -2182,6 +2399,139 @@ components:
         reranker_model_identity: { type: string }
         started_at: { type: string, format: date-time }
         completed_at: { type: string, format: date-time }
+
+    SuggestionKind:
+      type: string
+      enum: [field, summary, tag, relation]
+    SuggestionStatus:
+      type: string
+      enum: [pending, accepted, rejected]
+    RelationType:
+      type: string
+      enum: [related_to, references, derived_from, cites, continues_from]
+    SuggestionItem:
+      type: object
+      description: 三类建议表的联合视图行；kind 决定哪些字段有值
+      properties:
+        id: { type: string, format: uuid }
+        kind: { $ref: '#/components/schemas/SuggestionKind' }
+        source_version_id: { type: string, format: uuid }
+        run_id: { type: string, format: uuid }
+        field_key:
+          type: string
+          description: 仅 field 建议返回
+        value:
+          type: object
+          nullable: true
+          description: field/summary 建议值（JSON 值 / 摘要文本）
+        previous_value:
+          type: object
+          nullable: true
+        suggested_key:
+          type: string
+          description: 仅 tag 建议返回（归一化 key）
+        suggested_display_name:
+          type: string
+          description: 仅 tag 建议返回
+        is_new:
+          type: boolean
+          description: 仅 tag 建议返回；true 表示建议创建新标签
+        target_asset_id:
+          type: string
+          format: uuid
+          description: 仅 relation 建议返回
+        relation_type:
+          allOf: [{ $ref: '#/components/schemas/RelationType' }]
+          description: 仅 relation 建议返回
+        confidence: { type: number, minimum: 0, maximum: 1 }
+        status: { $ref: '#/components/schemas/SuggestionStatus' }
+        citation:
+          type: array
+          nullable: true
+          description: 引用依据（extraction/retrieval 引用，含 ref 与 snippet）
+          items:
+            type: object
+            properties:
+              kind: { type: string }
+              ref: { type: string }
+              snippet: { type: string }
+        created_at: { type: string, format: date-time }
+        reviewed_by: { type: string, format: uuid, nullable: true }
+    SuggestionReviewOutcome:
+      type: object
+      properties:
+        suggestion_id: { type: string, format: uuid }
+        kind: { $ref: '#/components/schemas/SuggestionKind' }
+        draft_id: { type: string, format: uuid }
+        draft_revision: { type: integer }
+    BatchAcceptResponse:
+      type: object
+      properties:
+        accepted:
+          type: array
+          items: { $ref: '#/components/schemas/SuggestionReviewOutcome' }
+        failed:
+          type: array
+          description: 未落库的条目及原因（状态不合法、合并校验失败等）
+          items:
+            type: object
+            properties:
+              ref:
+                type: object
+                properties:
+                  kind: { $ref: '#/components/schemas/SuggestionKind' }
+                  suggestion_id: { type: string, format: uuid }
+                  resolved_tag_id: { type: string, format: uuid }
+              error: { type: string }
+        draft_id: { type: string, format: uuid }
+        draft_revision:
+          type: integer
+          description: 本次调用共享的 draft revision（恰 +1）
+    ProcessingResult:
+      type: object
+      description: 一次 Agent 处理的可审计载体（§8.1 五要素）
+      properties:
+        id: { type: string, format: uuid }
+        run_id: { type: string, format: uuid }
+        input_version_id: { type: string, format: uuid }
+        output_version_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: 用户 commit 采纳建议产生版本后回填
+        suggestion_summary:
+          type: object
+          nullable: true
+          description: 建议计数汇总 {field,summary,tag,relation}
+          additionalProperties: { type: integer }
+        field_diff:
+          type: array
+          nullable: true
+          items:
+            type: object
+            properties:
+              key: { type: string }
+              old: { nullable: true }
+              new: { nullable: true }
+              confidence: { type: number }
+        overall_confidence: { type: number, nullable: true }
+        created_at: { type: string, format: date-time }
+    SuggestionList:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/SuggestionItem' }
+        has_more: { type: boolean }
+        next_cursor: { type: string, nullable: true }
+        processing_results:
+          type: array
+          description: 同资产最近 10 条处理结果（队列头部摘要）
+          items: { $ref: '#/components/schemas/ProcessingResult' }
+    PrepareAccepted:
+      type: object
+      properties:
+        run_id: { type: string, format: uuid }
 
     Envelope:
       type: object

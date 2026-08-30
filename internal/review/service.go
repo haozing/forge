@@ -499,6 +499,12 @@ func (s Service) decide(ctx context.Context, principal auth.Principal, workspace
 	if _, err := s.require(ctx, principal, workspaceID, action); err != nil {
 		return Request{}, err
 	}
+	// Publication decisions are a member-only act: an agent principal can
+	// submit through the open surface but never approve or reject (doc §6
+	// permission matrix).
+	if principal.UserType != auth.UserTypeMember {
+		return Request{}, ErrForbidden
+	}
 	if !s.validID(requestID) {
 		return Request{}, ErrInvalidInput
 	}
@@ -604,11 +610,19 @@ func (s Service) decide(ctx context.Context, principal auth.Principal, workspace
 	if err := s.appendEventTx(ctx, tx, principal, request, publicationEventFor(nextStatus, ""), nil); err != nil {
 		return Request{}, err
 	}
-	store.AppendAuditTx(ctx, tx, store.NewAuditEntry("publication."+decision, principal.OrganizationID, principal.UserID, "publication_request", requestID, map[string]any{
+	decisionMetadata := map[string]any{
 		"workspace_id": assetWorkspace,
 		"asset_id":     assetID,
 		"decision":     decision,
-	}), assetWorkspace)
+	}
+	if decision == "approve" {
+		// Doc §8.3 publish record: agent-prepared versions carry the six
+		// provenance fields (agent user/application, rule version, input and
+		// output version, processing result).
+		decisionMetadata = asset.MergeAgentProvenance(decisionMetadata,
+			asset.AgentProvenanceTx(ctx, tx, principal.OrganizationID, versionID))
+	}
+	store.AppendAuditTx(ctx, tx, store.NewAuditEntry("publication."+decision, principal.OrganizationID, principal.UserID, "publication_request", requestID, decisionMetadata), assetWorkspace)
 	if err := tx.Commit(ctx); err != nil {
 		return Request{}, err
 	}

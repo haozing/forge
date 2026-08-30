@@ -27,6 +27,7 @@ import (
 	"agentchunzhi/internal/resourcemodel"
 	"agentchunzhi/internal/retrieval"
 	"agentchunzhi/internal/store"
+	"agentchunzhi/internal/tag"
 	"agentchunzhi/internal/transcription"
 	"agentchunzhi/internal/worker"
 	"agentchunzhi/internal/workflows"
@@ -147,7 +148,17 @@ func main() {
 	if err != nil {
 		log.Fatalf("retrieval provider registry startup failed: %v", err)
 	}
-	queryService := query.Service{Store: db, Embeddings: embeddings, CursorSecret: cfg.SearchCursorSecret}
+	// The worker-side query service mirrors the API construction (cmd/api:
+	// CursorSecret/QueryHashSecret/session TTL/query budget) so the retrieval
+	// channels sign and audit identically in both processes.
+	queryService := query.Service{
+		Store:           db,
+		Embeddings:      embeddings,
+		CursorSecret:    cfg.SearchCursorSecret,
+		QueryHashSecret: cfg.QueryHashSecret,
+		SessionTTL:      cfg.RetrievalSessionTTL,
+		QueryTimeout:    cfg.RetrievalQueryTimeout,
+	}
 	reactProcessor := &agentruntime.PersistentReActService{
 		Store: db, Cipher: checkpointCipher, Models: modelRegistry,
 		ToolFactory: agentruntime.DomainToolFactory{Store: db, Events: events, Query: queryService},
@@ -161,8 +172,13 @@ func main() {
 	if err != nil {
 		log.Fatalf("asset_prepare workflow startup failed: %v", err)
 	}
+	// Phase 4 suggestion stream: relation candidates come from the unified
+	// query engine (fail-closed on retrieval errors) and tag suggestions go
+	// through the tag domain service.
 	preparation := &asset.AssetPreparationService{
 		Store: db, Events: events, Permissions: authz.ScopeResolver{Store: db}, Workflow: assetPrepareWorkflow,
+		Relations: automation.RelationCandidateQuery{Query: queryService},
+		Tags:      tag.SuggestionService{Store: db},
 	}
 	var attachmentScanner attachment.Scanner
 	if cfg.AttachmentClamAVAddr != "" {

@@ -915,10 +915,11 @@ func (s MemberService) Publish(ctx context.Context, principal auth.Principal, wo
 	}); err != nil {
 		return MemberAsset{}, err
 	}
-	RecordAssetAuditTx(ctx, tx, row.OrganizationID, row.WorkspaceID, principal, "asset.publish", row.ID, map[string]any{
-		"workspace_id": row.WorkspaceID,
-		"version_id":   row.CurrentWorkingVersionID,
-	})
+	RecordAssetAuditTx(ctx, tx, row.OrganizationID, row.WorkspaceID, principal, "asset.publish", row.ID,
+		MergeAgentProvenance(map[string]any{
+			"workspace_id": row.WorkspaceID,
+			"version_id":   row.CurrentWorkingVersionID,
+		}, agentProvenanceTx(ctx, tx, row.OrganizationID, row.CurrentWorkingVersionID)))
 	if err := tx.Commit(ctx); err != nil {
 		return MemberAsset{}, err
 	}

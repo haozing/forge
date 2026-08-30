@@ -112,6 +112,7 @@ func NewAssetPrepareGraph(extractors ...CandidateExtractor) (Runnable, error) {
 			input.Values = cloneValues(extracted.Fields)
 			input.Values["_model_input_tokens"] = extracted.InputTokens
 			input.Values["_model_output_tokens"] = extracted.OutputTokens
+			input.extraction = &extracted
 		}
 		return input, nil
 	})); err != nil {
@@ -145,7 +146,16 @@ func NewAssetPrepareGraph(extractors ...CandidateExtractor) (Runnable, error) {
 		delete(candidate, "_model_input_tokens")
 		delete(candidate, "_model_output_tokens")
 		candidate["asset_ids"] = append([]string(nil), input.AssetIDs...)
-		return Output{WorkflowKey: "asset_prepare", CodeVersion: 1, Candidate: candidate, Values: input.Values, InputTokens: inputTokens, OutputTokens: outputTokens}, nil
+		output := Output{WorkflowKey: "asset_prepare", CodeVersion: 1, Candidate: candidate, Values: input.Values, InputTokens: inputTokens, OutputTokens: outputTokens}
+		// The suggestion slots ride the extraction side-channel; they are
+		// already whitelist-validated by the extractor.
+		if input.extraction != nil {
+			output.Summary = input.extraction.Summary
+			output.FieldConfidence = input.extraction.FieldConfidence
+			output.Tags = input.extraction.Tags
+			output.Relations = input.extraction.Relations
+		}
+		return output, nil
 	})); err != nil {
 		return nil, err
 	}

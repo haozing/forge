@@ -81,6 +81,12 @@ func TestLegacyReviewRoutesAreRetired(t *testing.T) {
 		`"/api/v2/assets/{assetId}/draft"`,
 		`"/api/v2/assets/{assetId}/commit-draft"`,
 		`"/api/v2/asset-versions/{versionId}/confirm"`,
+		`"/api/v2/workspaces/{workspaceId}/assets/{assetId}/suggestions"`,
+		`"/api/v2/workspaces/{workspaceId}/assets/{assetId}/suggestions/accept-batch"`,
+		`"/api/v2/workspaces/{workspaceId}/assets/{assetId}/processing-results"`,
+		`"/api/v2/workspaces/{workspaceId}/assets/{assetId}/prepare"`,
+		`"/api/v2/workspaces/{workspaceId}/suggestions/{kind}/{suggestionId}/accept"`,
+		`"/api/v2/workspaces/{workspaceId}/suggestions/{kind}/{suggestionId}/reject"`,
 	} {
 		if !strings.Contains(source, required) {
 			t.Fatalf("v2 route %s must be registered", required)
@@ -119,6 +125,18 @@ func TestIdempotencyCoverageMatrix(t *testing.T) {
 		{http.MethodPost, "/api/public/v2/organization-invitations/accept", false},
 		{http.MethodPost, "/api/frontend/workspaces", true},
 		{http.MethodPost, "/api/v2/workspaces/w/query", false},
+		// Phase 4 suggestion surface: the four write commands are covered, the
+		// two queue reads are safe methods.
+		{http.MethodPost, "/api/v2/workspaces/w/suggestions/field/s/accept", true},
+		{http.MethodPost, "/api/v2/workspaces/w/suggestions/tag/s/reject", true},
+		{http.MethodPost, "/api/v2/workspaces/w/assets/a/suggestions/accept-batch", true},
+		{http.MethodPost, "/api/v2/workspaces/w/assets/a/prepare", true},
+		// Phase 4 open agent tasks: create is a write command, the detail read
+		// is safe.
+		{http.MethodPost, "/api/open/v2/agent-tasks", true},
+		{http.MethodGet, "/api/open/v2/agent-tasks/t", false},
+		{http.MethodGet, "/api/v2/workspaces/w/assets/a/suggestions", false},
+		{http.MethodGet, "/api/v2/workspaces/w/assets/a/processing-results", false},
 	}
 	for _, tc := range cases {
 		request := httptest.NewRequest(tc.method, tc.path, nil)

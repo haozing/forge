@@ -236,6 +236,18 @@ func persistDraftPatch(ctx context.Context, tx pgx.Tx, organizationID string, dr
 	return nil
 }
 
+// RelationMaterial is one out-edge that materializes with the version. The
+// target resolves to the target asset's current working version at materiali-
+// zation time; AI-suggested edges carry their confidence, citation and
+// originating suggestion identity for the backfill.
+type RelationMaterial struct {
+	TargetAssetID string
+	RelationType  string
+	Confidence    float64
+	Citation      []byte
+	SuggestionID  string
+}
+
 // VersionMaterial is the content snapshot a commit turns into an immutable
 // AssetVersion. It is produced from the draft, an import row, a webhook
 // payload or an agent candidate.
@@ -257,24 +269,42 @@ type VersionMaterial struct {
 	// draft carries none of its own (import and webhook channels materialize
 	// the first version before their draft exists). Empty means "manual".
 	TagSource        string
-	AttachmentIDs    []string // must reference clean, unexpired attachments
+	AttachmentIDs    []string           // must reference clean, unexpired attachments
+	Relations        []RelationMaterial // materialize as asset_relations rows (source='ai')
 	SourceRawInputID string
 	CreatedBy        string
 }
 
 // CreateVersionTx is the only version factory. It locks the asset, appends
-// the sealed snapshot, materializes draft provenance for tags/attachments,
-// advances the working pointer and bumps the asset revision. The caller owns
-// the surrounding transaction and any asset lifecycle change.
+// the sealed snapshot, materializes draft provenance for tags/attachments/
+// relations, advances the working pointer and bumps the asset revision. The
+// caller owns the surrounding transaction and any asset lifecycle change.
+// Materialized relation identities stay internal; use createVersionTx when a
+// commit path needs to backfill suggestion rows.
 func CreateVersionTx(ctx context.Context, tx pgx.Tx, material VersionMaterial) (string, int64, error) {
+	versionID, versionNo, _, err := createVersionTx(ctx, tx, material)
+	return versionID, versionNo, err
+}
+
+// materializedRelation pairs one relation input with the asset_relations row
+// it produced; an empty ID marks a skipped or already-present edge.
+type materializedRelation struct {
+	material RelationMaterial
+	id       string
+}
+
+// createVersionTx is CreateVersionTx plus the materialized relation
+// identities, which the draft commit uses to backfill
+// asset_relation_suggestions.materialized_relation_id.
+func createVersionTx(ctx context.Context, tx pgx.Tx, material VersionMaterial) (string, int64, []materializedRelation, error) {
 	if !ValidOrigin(material.Origin) {
-		return "", 0, ErrInvalidOrigin
+		return "", 0, nil, ErrInvalidOrigin
 	}
 	if material.ConfirmationStatus == "" {
 		material.ConfirmationStatus = ConfirmationUnconfirmed
 	}
 	if !ValidConfirmation(material.ConfirmationStatus) {
-		return "", 0, ErrInvalidConfirmation
+		return "", 0, nil, ErrInvalidConfirmation
 	}
 	// Attachments must be clean, unexpired and workspace-scoped.
 	if len(material.AttachmentIDs) > 0 {
@@ -286,17 +316,17 @@ func CreateVersionTx(ctx context.Context, tx pgx.Tx, material VersionMaterial) (
 			  AND (status <> 'clean' OR deleted_at IS NOT NULL
 			       OR (expires_at IS NOT NULL AND expires_at <= now()))
 		`, material.OrganizationID, material.WorkspaceID, material.AttachmentIDs).Scan(&bad); err != nil {
-			return "", 0, fmt.Errorf("verify version attachments: %w", err)
+			return "", 0, nil, fmt.Errorf("verify version attachments: %w", err)
 		}
 		if bad > 0 {
-			return "", 0, ErrAttachmentNotClean
+			return "", 0, nil, ErrAttachmentNotClean
 		}
 	}
 	// Tags must be workspace-scoped identities; archived tags are rejected on
 	// commit because they can no longer enter new versions.
 	tagIDs := dedupeSort(material.TagIDs)
 	if len(tagIDs) > MaxTagsPerDraft {
-		return "", 0, ErrTooManyTags
+		return "", 0, nil, ErrTooManyTags
 	}
 	if len(tagIDs) > 0 {
 		var bad int
@@ -305,10 +335,10 @@ func CreateVersionTx(ctx context.Context, tx pgx.Tx, material VersionMaterial) (
 			WHERE organization_id = $1::uuid AND workspace_id = $2::uuid
 			  AND id = ANY($3::uuid[]) AND status <> 'active'
 		`, material.OrganizationID, material.WorkspaceID, tagIDs).Scan(&bad); err != nil {
-			return "", 0, fmt.Errorf("verify version tags: %w", err)
+			return "", 0, nil, fmt.Errorf("verify version tags: %w", err)
 		}
 		if bad > 0 {
-			return "", 0, ErrTagArchived
+			return "", 0, nil, ErrTagArchived
 		}
 	}
 
@@ -322,7 +352,7 @@ func CreateVersionTx(ctx context.Context, tx pgx.Tx, material VersionMaterial) (
 		WHERE organization_id = $1::uuid AND id = $2::uuid FOR UPDATE
 	`, material.OrganizationID, material.AssetID).Scan(&workingVersion, &revision)
 	if err != nil {
-		return "", 0, fmt.Errorf("lock asset for version: %w", err)
+		return "", 0, nil, fmt.Errorf("lock asset for version: %w", err)
 	}
 	parent := material.ParentVersionID
 	if parent == "" && workingVersion != nil {
@@ -333,11 +363,11 @@ func CreateVersionTx(ctx context.Context, tx pgx.Tx, material VersionMaterial) (
 		SELECT COALESCE(max(version_no), 0) + 1 FROM asset.asset_versions WHERE asset_id = $1::uuid
 	`, material.AssetID).Scan(&nextNo)
 	if err != nil {
-		return "", 0, fmt.Errorf("allocate version number: %w", err)
+		return "", 0, nil, fmt.Errorf("allocate version number: %w", err)
 	}
 	fieldsJSON, err := json.Marshal(material.Fields)
 	if err != nil {
-		return "", 0, fmt.Errorf("encode version fields: %w", err)
+		return "", 0, nil, fmt.Errorf("encode version fields: %w", err)
 	}
 	checksum := ContentChecksum(material.Title, material.Summary, material.Markdown, material.Fields, tagIDs, material.AttachmentIDs)
 	var versionID string
@@ -357,7 +387,7 @@ func CreateVersionTx(ctx context.Context, tx pgx.Tx, material VersionMaterial) (
 		material.Title, material.Summary, material.Markdown, string(fieldsJSON),
 		material.SourceRawInputID, parent, checksum, material.CreatedBy).Scan(&versionID)
 	if err != nil {
-		return "", 0, fmt.Errorf("insert version: %w", err)
+		return "", 0, nil, fmt.Errorf("insert version: %w", err)
 	}
 	// Materialize version provenance only through the sealed boundary. Draft
 	// relations carry their source and confidence into the snapshot; channels
@@ -377,7 +407,7 @@ func CreateVersionTx(ctx context.Context, tx pgx.Tx, material VersionMaterial) (
 			WHERE d.organization_id = $1::uuid AND d.asset_id = $6::uuid
 			ON CONFLICT DO NOTHING
 		`, material.OrganizationID, material.WorkspaceID, versionID, tagID, material.CreatedBy, material.AssetID, tagSource); err != nil {
-			return "", 0, fmt.Errorf("insert version tag: %w", err)
+			return "", 0, nil, fmt.Errorf("insert version tag: %w", err)
 		}
 	}
 	for _, attachmentID := range dedupeSort(material.AttachmentIDs) {
@@ -386,15 +416,23 @@ func CreateVersionTx(ctx context.Context, tx pgx.Tx, material VersionMaterial) (
 			VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, NULLIF($5,'')::uuid)
 			ON CONFLICT DO NOTHING
 		`, material.OrganizationID, material.WorkspaceID, versionID, attachmentID, material.CreatedBy); err != nil {
-			return "", 0, fmt.Errorf("insert version attachment: %w", err)
+			return "", 0, nil, fmt.Errorf("insert version attachment: %w", err)
 		}
+	}
+	// Relations materialize before the snapshot seals: the sealed-endpoint
+	// guard only constrains the source side, and the source (this version) is
+	// still unsealed here. Targets resolve to their asset's current working
+	// version, which is necessarily an already-sealed snapshot.
+	relations, err := materializeVersionRelationsTx(ctx, tx, material, versionID)
+	if err != nil {
+		return "", 0, nil, err
 	}
 	// Seal the snapshot inside the creating transaction; the deferred trigger
 	// refuses to commit an unsealed version.
 	if _, err := tx.Exec(ctx, `
 		UPDATE asset.asset_versions SET sealed_at = now() WHERE id = $1::uuid
 	`, versionID); err != nil {
-		return "", 0, fmt.Errorf("seal version: %w", err)
+		return "", 0, nil, fmt.Errorf("seal version: %w", err)
 	}
 	// Advance the working pointer and the asset revision.
 	if _, err := tx.Exec(ctx, `
@@ -402,9 +440,95 @@ func CreateVersionTx(ctx context.Context, tx pgx.Tx, material VersionMaterial) (
 		SET current_working_version_id = $3::uuid, revision = revision + 1, updated_at = now()
 		WHERE organization_id = $1::uuid AND id = $2::uuid
 	`, material.OrganizationID, material.AssetID, versionID); err != nil {
-		return "", 0, fmt.Errorf("advance working pointer: %w", err)
+		return "", 0, nil, fmt.Errorf("advance working pointer: %w", err)
 	}
-	return versionID, nextNo, nil
+	return versionID, nextNo, relations, nil
+}
+
+// materializeVersionRelationsTx writes the version's out-edges (source='ai')
+// against the target assets' current working versions. A target without a
+// working pointer, a deleted or cross-workspace target, or an edge that
+// already exists is skipped and reported with an empty identity — a commit
+// never fails because a suggested target stopped being relatable.
+func materializeVersionRelationsTx(ctx context.Context, tx pgx.Tx, material VersionMaterial, versionID string) ([]materializedRelation, error) {
+	relations, err := normalizeRelationMaterials(material.Relations)
+	if err != nil {
+		return nil, err
+	}
+	materialized := make([]materializedRelation, 0, len(relations))
+	for _, relation := range relations {
+		var targetVersionID string
+		err := tx.QueryRow(ctx, `
+			SELECT COALESCE(current_working_version_id::text, '')
+			FROM asset.assets
+			WHERE organization_id = $1::uuid AND id = $2::uuid AND workspace_id = $3::uuid
+			  AND deleted_at IS NULL AND id <> $4::uuid
+		`, material.OrganizationID, relation.TargetAssetID, material.WorkspaceID, material.AssetID).Scan(&targetVersionID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			materialized = append(materialized, materializedRelation{material: relation})
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("resolve relation target: %w", err)
+		}
+		if targetVersionID == "" {
+			materialized = append(materialized, materializedRelation{material: relation})
+			continue
+		}
+		citation := relation.Citation
+		if len(citation) == 0 {
+			citation = []byte("{}")
+		}
+		var relationID string
+		err = tx.QueryRow(ctx, `
+			INSERT INTO asset.asset_relations
+				(organization_id, source_asset_version_id, target_asset_version_id,
+				 relation_type, source, confidence, citation, suggestion_id, created_by)
+			VALUES ($1::uuid, $2::uuid, $3::uuid, $4, 'ai', $5, $6::jsonb, NULLIF($7, '')::uuid, $8::uuid)
+			ON CONFLICT (source_asset_version_id, target_asset_version_id, relation_type) DO NOTHING
+			RETURNING id::text
+		`, material.OrganizationID, versionID, targetVersionID, relation.RelationType,
+			relation.Confidence, string(citation), relation.SuggestionID, material.CreatedBy).Scan(&relationID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			materialized = append(materialized, materializedRelation{material: relation})
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("insert version relation: %w", err)
+		}
+		materialized = append(materialized, materializedRelation{material: relation, id: relationID})
+	}
+	return materialized, nil
+}
+
+// normalizeRelationMaterials validates relation inputs, drops duplicates (same
+// target and type keep the first entry) and sorts by (target, type) so the
+// materialization order — and therefore the returned identity list — is
+// deterministic.
+func normalizeRelationMaterials(relations []RelationMaterial) ([]RelationMaterial, error) {
+	normalized := make([]RelationMaterial, 0, len(relations))
+	seen := make(map[string]bool, len(relations))
+	for _, relation := range relations {
+		if !ValidRelationType(relation.RelationType) {
+			return nil, ErrInvalidInput
+		}
+		if !validID(relation.TargetAssetID) {
+			return nil, ErrInvalidInput
+		}
+		key := relation.TargetAssetID + "\x00" + relation.RelationType
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		normalized = append(normalized, relation)
+	}
+	sort.Slice(normalized, func(i, j int) bool {
+		if normalized[i].TargetAssetID != normalized[j].TargetAssetID {
+			return normalized[i].TargetAssetID < normalized[j].TargetAssetID
+		}
+		return normalized[i].RelationType < normalized[j].RelationType
+	})
+	return normalized, nil
 }
 
 var (
@@ -476,6 +600,10 @@ func commitDraftTx(ctx context.Context, tx pgx.Tx, events *eventing.EventStore, 
 	if err != nil {
 		return CommitResult{}, err
 	}
+	relations, err := loadDraftRelationMaterials(ctx, tx, row.OrganizationID, draft.DraftID)
+	if err != nil {
+		return CommitResult{}, err
+	}
 	material := VersionMaterial{
 		OrganizationID:  row.OrganizationID,
 		WorkspaceID:     row.WorkspaceID,
@@ -488,7 +616,18 @@ func commitDraftTx(ctx context.Context, tx pgx.Tx, events *eventing.EventStore, 
 		Fields:          draft.Fields,
 		TagIDs:          tagIDs,
 		AttachmentIDs:   attachmentIDs,
+		Relations:       relations,
 		CreatedBy:       principal.UserID,
+	}
+	// A commit that lands any accepted AI suggestion seals as ai_assisted
+	// (doc §10: 用户 commit 产生 origin=ai_assisted 未发布版本); a suggestion-free
+	// human draft keeps the origin it was created with.
+	aiAssisted, err := draftCarriesAcceptedSuggestionsTx(ctx, tx, row.OrganizationID, draft.DraftID)
+	if err != nil {
+		return CommitResult{}, err
+	}
+	if aiAssisted {
+		material.Origin = OriginAIAssisted
 	}
 	// The bound immutable model version is the model head at commit time; its
 	// field schema gates the snapshot inside the same transaction.
@@ -510,28 +649,65 @@ func commitDraftTx(ctx context.Context, tx pgx.Tx, events *eventing.EventStore, 
 	// Confirmation never inherits from the base version: a new snapshot is
 	// judged afresh.
 	material.ConfirmationStatus = ConfirmationUnconfirmed
-	versionID, versionNo, err := CreateVersionTx(ctx, tx, material)
+	versionID, versionNo, materializedRelations, err := createVersionTx(ctx, tx, material)
 	if err != nil {
 		return CommitResult{}, err
 	}
+	// Accepted suggestions that actually entered this draft backfill the
+	// version that finally carried them; source versions stay immutable.
+	// 1. Tags: the tag service keeps its own draft-relation join so only
+	//    suggestions whose tag survived on the draft count as materialized.
+	if err := (tag.SuggestionService{}).MarkSuggestionsMaterialized(ctx, tx, draft.DraftID, versionID); err != nil {
+		return CommitResult{}, fmt.Errorf("materialize tag suggestions: %w", err)
+	}
+	// 2. Field/summary suggestions.
+	if _, err := tx.Exec(ctx, `
+		UPDATE asset.asset_field_suggestions
+		SET materialized_version_id = $3::uuid
+		WHERE organization_id = $1::uuid AND accepted_into_draft_id = $2::uuid
+		  AND status = 'accepted'
+		  AND materialized_version_id IS DISTINCT FROM $3::uuid
+	`, row.OrganizationID, draft.DraftID, versionID); err != nil {
+		return CommitResult{}, fmt.Errorf("materialize field suggestions: %w", err)
+	}
+	// 3. Relation suggestions: createVersionTx returned the edge identities in
+	//    input order; skipped edges (empty id) leave the suggestion unbacked
+	//    so a later commit can still land it.
+	for _, materialized := range materializedRelations {
+		if materialized.material.SuggestionID == "" || materialized.id == "" {
+			continue
+		}
+		if _, err := tx.Exec(ctx, `
+			UPDATE asset.asset_relation_suggestions
+			SET materialized_version_id = $3::uuid, materialized_relation_id = $4::uuid
+			WHERE organization_id = $1::uuid AND id = $2::uuid
+			  AND accepted_into_draft_id = $5::uuid AND status = 'accepted'
+		`, row.OrganizationID, materialized.material.SuggestionID, versionID,
+			materialized.id, draft.DraftID); err != nil {
+			return CommitResult{}, fmt.Errorf("materialize relation suggestions: %w", err)
+		}
+	}
+	// 4. Processing results record the version the user's commit produced.
+	//    The precise join is the draft's pre-commit base version: a run read
+	//    that version, its accepted suggestions entered this draft, and this
+	//    commit is the output. Runs whose input version was already superseded
+	//    (an intermediate commit without accepts) keep a NULL output and are
+	//    reported by their own lifecycle. This must run before the rebase
+	//    below rewrites base_version_id.
+	if _, err := tx.Exec(ctx, `
+		UPDATE integration.agent_processing_results
+		SET output_version_id = $3::uuid
+		WHERE organization_id = $1::uuid AND asset_id = $2::uuid
+		  AND output_version_id IS NULL
+		  AND input_version_id = (
+		      SELECT base_version_id FROM asset.asset_drafts
+		      WHERE organization_id = $1::uuid AND id = $4::uuid
+		  )
+	`, row.OrganizationID, row.ID, versionID, draft.DraftID); err != nil {
+		return CommitResult{}, fmt.Errorf("backfill processing results: %w", err)
+	}
 	if _, err := CancelPendingRequestsTx(ctx, tx, row.OrganizationID, row.ID, principal.UserID, reviewCancelReasonNewVersion); err != nil {
 		return CommitResult{}, err
-	}
-	// Accepted suggestions that actually entered this draft backfill the
-	// version that finally carried their tag; source versions stay immutable.
-	if _, err := tx.Exec(ctx, `
-		UPDATE asset.asset_version_tag_suggestions sg
-		SET materialized_version_id = $3::uuid
-		WHERE sg.accepted_into_draft_id = (
-			SELECT id FROM asset.asset_drafts WHERE organization_id = $1::uuid AND asset_id = $2::uuid
-		)
-		  AND sg.status = 'accepted'
-		  AND EXISTS (
-		    SELECT 1 FROM asset.asset_draft_tags dt
-		    WHERE dt.asset_draft_id = sg.accepted_into_draft_id AND dt.tag_id = sg.resolved_tag_id
-		  )
-	`, row.OrganizationID, row.ID, versionID); err != nil {
-		return CommitResult{}, fmt.Errorf("materialize tag suggestions: %w", err)
 	}
 	// Re-point the draft at the new snapshot and mark it clean.
 	if _, err := tx.Exec(ctx, `
@@ -562,6 +738,28 @@ func commitDraftTx(ctx context.Context, tx pgx.Tx, events *eventing.EventStore, 
 }
 
 const reviewCancelReasonNewVersion = "new_version"
+
+// draftCarriesAcceptedSuggestionsTx reports whether any accepted suggestion is
+// attached to this draft: a parked relation (asset_draft_relations only holds
+// accepted AI relations), an ai-source draft tag, or a field/summary
+// suggestion accepted into this draft. It feeds the commit's origin choice
+// (ai_assisted vs. the draft's original origin).
+func draftCarriesAcceptedSuggestionsTx(ctx context.Context, tx pgx.Tx, organizationID, draftID string) (bool, error) {
+	var ok bool
+	err := tx.QueryRow(ctx, `
+		SELECT EXISTS (SELECT 1 FROM asset.asset_draft_relations
+		               WHERE organization_id = $1::uuid AND asset_draft_id = $2::uuid)
+		    OR EXISTS (SELECT 1 FROM asset.asset_draft_tags
+		               WHERE organization_id = $1::uuid AND asset_draft_id = $2::uuid AND source = 'ai')
+		    OR EXISTS (SELECT 1 FROM asset.asset_field_suggestions
+		               WHERE organization_id = $1::uuid AND accepted_into_draft_id = $2::uuid
+		                 AND status = 'accepted')
+	`, organizationID, draftID).Scan(&ok)
+	if err != nil {
+		return false, fmt.Errorf("load draft suggestion adoption: %w", err)
+	}
+	return ok, nil
+}
 
 func loadDraftTagIDs(ctx context.Context, tx pgx.Tx, draftID string) ([]string, error) {
 	rows, err := tx.Query(ctx, `SELECT tag_id::text FROM asset.asset_draft_tags WHERE asset_draft_id = $1::uuid ORDER BY tag_id`, draftID)
@@ -595,6 +793,37 @@ func loadDraftAttachmentIDs(ctx context.Context, tx pgx.Tx, draftID string) ([]s
 		ids = append(ids, id)
 	}
 	return ids, rows.Err()
+}
+
+// loadDraftRelationMaterials reads the AI relations accepted onto the draft,
+// in deterministic (target, type) order, for the commit's VersionMaterial.
+// Only source='ai' rows live in asset_draft_relations (phase 4 decision 2);
+// a row without confidence carries no AI provenance and does not materialize.
+func loadDraftRelationMaterials(ctx context.Context, tx pgx.Tx, organizationID, draftID string) ([]RelationMaterial, error) {
+	rows, err := tx.Query(ctx, `
+		SELECT target_asset_id::text, relation_type, confidence, citation, COALESCE(suggestion_id::text, '')
+		FROM asset.asset_draft_relations
+		WHERE organization_id = $1::uuid AND asset_draft_id = $2::uuid
+		ORDER BY target_asset_id, relation_type
+	`, organizationID, draftID)
+	if err != nil {
+		return nil, fmt.Errorf("load draft relations: %w", err)
+	}
+	defer rows.Close()
+	materials := []RelationMaterial{}
+	for rows.Next() {
+		var material RelationMaterial
+		var confidence *float64
+		if err := rows.Scan(&material.TargetAssetID, &material.RelationType, &confidence, &material.Citation, &material.SuggestionID); err != nil {
+			return nil, err
+		}
+		if confidence == nil {
+			continue
+		}
+		material.Confidence = *confidence
+		materials = append(materials, material)
+	}
+	return materials, rows.Err()
 }
 
 // ContentChecksum covers title, summary, markdown, normalized fields, tag

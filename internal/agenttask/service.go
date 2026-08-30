@@ -27,6 +27,10 @@ var (
 
 const PrepareAsset = "prepare_asset"
 
+// MaxTaskAssets caps one prepare task so a single workflow run stays bounded
+// (doc §5: agenttask v2 accepts 1..20 input assets).
+const MaxTaskAssets = 20
+
 type Service struct {
 	Store *store.Store
 }
@@ -42,6 +46,7 @@ type TaskResult struct {
 	ID                 string     `json:"id"`
 	Status             string     `json:"status"`
 	Operation          string     `json:"operation"`
+	RunID              string     `json:"run_id,omitempty"`
 	CandidateVersionID *string    `json:"candidate_version_id,omitempty"`
 	ErrorCode          string     `json:"error_code,omitempty"`
 	AttemptCount       int        `json:"attempt_count"`
@@ -53,20 +58,23 @@ func (s Service) Create(ctx context.Context, principal auth.Principal, input Cre
 	input.AgentApplicationID = strings.TrimSpace(input.AgentApplicationID)
 	input.Operation = strings.TrimSpace(input.Operation)
 	input.IdempotencyKey = strings.TrimSpace(input.IdempotencyKey)
-	if principal.UserType != "agent" || !query.ValidUUID(input.AgentApplicationID) || !validOperation(input.Operation) || !validIdempotencyKey(input.IdempotencyKey) || len(input.InputAssetIDs) != 1 || len(readableModelIDs) == 0 || len(editableModelIDs) == 0 {
+	// One task may batch up to MaxTaskAssets assets of a single workspace;
+	// duplicates collapse before hashing so idempotent replays agree.
+	input.InputAssetIDs = dedupeAssetIDs(input.InputAssetIDs)
+	if principal.UserType != "agent" || !query.ValidUUID(input.AgentApplicationID) || !validOperation(input.Operation) || !validIdempotencyKey(input.IdempotencyKey) || len(input.InputAssetIDs) == 0 || len(input.InputAssetIDs) > MaxTaskAssets || len(readableModelIDs) == 0 || len(editableModelIDs) == 0 {
 		return TaskResult{}, ErrInvalidInput
 	}
 	if input.Operation != PrepareAsset {
 		return TaskResult{}, ErrUnsupportedOperation
 	}
-	assetID := strings.TrimSpace(input.InputAssetIDs[0])
-	if !query.ValidUUID(assetID) {
-		return TaskResult{}, ErrInvalidInput
+	for _, assetID := range input.InputAssetIDs {
+		if !query.ValidUUID(assetID) {
+			return TaskResult{}, ErrInvalidInput
+		}
 	}
 	if s.Store == nil || s.Store.Pool == nil {
 		return TaskResult{}, errors.New("database store is not initialized")
 	}
-	input.InputAssetIDs = []string{assetID}
 	tx, err := s.Store.Pool.Begin(ctx)
 	if err != nil {
 		return TaskResult{}, fmt.Errorf("begin agent task: %w", err)
@@ -108,37 +116,68 @@ func (s Service) Create(ctx context.Context, principal auth.Principal, input Cre
 		return TaskResult{}, fmt.Errorf("load agent application for task: %w", err)
 	}
 
-	var versionID, modelID, workspaceID string
-	err = tx.QueryRow(ctx, `
-		SELECT a.current_working_version_id::text, a.resource_model_id::text,
-		       a.workspace_id::text
+	// Every input asset must be editable through the agent's model scope and
+	// carry a working version; the whole task shares one workspace because the
+	// workflow run row records exactly one. The lock order is the id order so
+	// concurrent multi-asset tasks cannot deadlock.
+	rows, err := tx.Query(ctx, `
+		SELECT a.id::text, a.current_working_version_id::text, a.resource_model_id::text, a.workspace_id::text
 		FROM asset.assets a
-		WHERE a.id = $1::uuid
+		WHERE a.id = ANY($1::uuid[])
 		  AND a.organization_id = $2::uuid
 		  AND a.resource_model_id::text = ANY($3::text[])
 		  AND a.resource_model_id::text = ANY($4::text[])
 		  AND a.current_working_version_id IS NOT NULL
 		  AND a.deleted_at IS NULL
+		ORDER BY a.id
 		FOR UPDATE OF a
-	`, assetID, principal.OrganizationID, readableModelIDs, editableModelIDs).Scan(&versionID, &modelID, &workspaceID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return TaskResult{}, ErrNotFound
-	}
+	`, input.InputAssetIDs, principal.OrganizationID, readableModelIDs, editableModelIDs)
 	if err != nil {
-		return TaskResult{}, fmt.Errorf("load asset for agent task: %w", err)
+		return TaskResult{}, fmt.Errorf("load assets for agent task: %w", err)
+	}
+	defer rows.Close()
+	var workspaceID string
+	assetIDs := make([]string, 0, len(input.InputAssetIDs))
+	versionIDs := make([]string, 0, len(input.InputAssetIDs))
+	modelIDs := make([]string, 0, len(input.InputAssetIDs))
+	for rows.Next() {
+		var assetID, versionID, modelID, assetWorkspace string
+		if err := rows.Scan(&assetID, &versionID, &modelID, &assetWorkspace); err != nil {
+			return TaskResult{}, fmt.Errorf("scan agent task asset: %w", err)
+		}
+		if workspaceID == "" {
+			workspaceID = assetWorkspace
+		} else if workspaceID != assetWorkspace {
+			return TaskResult{}, ErrInvalidInput
+		}
+		assetIDs = append(assetIDs, assetID)
+		versionIDs = append(versionIDs, versionID)
+		modelIDs = append(modelIDs, modelID)
+	}
+	if err := rows.Err(); err != nil {
+		return TaskResult{}, fmt.Errorf("iterate agent task assets: %w", err)
+	}
+	if len(assetIDs) != len(input.InputAssetIDs) {
+		return TaskResult{}, ErrNotFound
 	}
 
 	var result TaskResult
 	err = tx.QueryRow(ctx, `
 		INSERT INTO integration.agent_tasks
 			(organization_id, agent_application_id, agent_user_id, operation, status, input_asset_ids, idempotency_key)
-		VALUES ($1::uuid, $2::uuid, $3::uuid, $4, 'queued', ARRAY[$5::uuid], $6)
+		VALUES ($1::uuid, $2::uuid, $3::uuid, $4, 'queued', $5::uuid[], $6)
 		RETURNING id::text, status, operation, created_at
-	`, principal.OrganizationID, input.AgentApplicationID, boundAgentUserID, input.Operation, assetID, input.IdempotencyKey).Scan(&result.ID, &result.Status, &result.Operation, &result.CreatedAt)
+	`, principal.OrganizationID, input.AgentApplicationID, boundAgentUserID, input.Operation, assetIDs, input.IdempotencyKey).Scan(&result.ID, &result.Status, &result.Operation, &result.CreatedAt)
 	if err != nil {
 		return TaskResult{}, fmt.Errorf("create agent task: %w", err)
 	}
-	runInput := map[string]any{"asset_ids": []string{assetID}, "asset_version_id": versionID}
+	// The run carries the full asset list; the single-asset shape keeps the
+	// pinned asset_version_id so retries read the exact version the task was
+	// created against.
+	runInput := map[string]any{"asset_ids": assetIDs}
+	if len(assetIDs) == 1 {
+		runInput["asset_version_id"] = versionIDs[0]
+	}
 	runInputJSON, _ := json.Marshal(runInput)
 	runInputChecksum := sha256.Sum256(runInputJSON)
 	var runID string
@@ -166,13 +205,15 @@ func (s Service) Create(ctx context.Context, principal auth.Principal, input Cre
 	`, principal.OrganizationID, runID, result.ID); err != nil {
 		return TaskResult{}, fmt.Errorf("record agent task workflow run: %w", err)
 	}
-	metadata, _ := json.Marshal(map[string]string{
+	result.RunID = runID
+	metadata, _ := json.Marshal(map[string]any{
 		"agent_application_id": input.AgentApplicationID,
 		"agent_user_id":        principal.UserID,
-		"asset_id":             assetID,
-		"asset_version_id":     versionID,
-		"resource_model_id":    modelID,
+		"asset_ids":            assetIDs,
+		"asset_version_ids":    versionIDs,
+		"resource_model_ids":   modelIDs,
 		"operation":            input.Operation,
+		"run_id":               runID,
 	})
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO audit.audit_log
@@ -199,12 +240,14 @@ func (s Service) Get(ctx context.Context, principal auth.Principal, taskID strin
 	}
 	var result TaskResult
 	err := s.Store.Pool.QueryRow(ctx, `
-                SELECT id::text, status, operation, candidate_version_id::text, COALESCE(error_code, ''),
-		       COALESCE((SELECT MAX(attempt_count) FROM automation.runs r WHERE r.agent_task_id = integration.agent_tasks.id), 0),
-                       created_at, completed_at
-                FROM integration.agent_tasks
-                WHERE id = $1::uuid AND organization_id = $2::uuid AND agent_user_id = $3::uuid
-        `, taskID, principal.OrganizationID, principal.UserID).Scan(&result.ID, &result.Status, &result.Operation, &result.CandidateVersionID, &result.ErrorCode, &result.AttemptCount, &result.CreatedAt, &result.CompletedAt)
+                SELECT t.id::text, t.status, t.operation, t.candidate_version_id::text, COALESCE(t.error_code, ''),
+		       COALESCE((SELECT MAX(attempt_count) FROM automation.runs r WHERE r.agent_task_id = t.id), 0),
+		       COALESCE((SELECT r.id::text FROM automation.runs r
+		                 WHERE r.agent_task_id = t.id ORDER BY r.created_at DESC LIMIT 1), ''),
+		       t.created_at, t.completed_at
+                FROM integration.agent_tasks t
+                WHERE t.id = $1::uuid AND t.organization_id = $2::uuid AND t.agent_user_id = $3::uuid
+        `, taskID, principal.OrganizationID, principal.UserID).Scan(&result.ID, &result.Status, &result.Operation, &result.CandidateVersionID, &result.ErrorCode, &result.AttemptCount, &result.RunID, &result.CreatedAt, &result.CompletedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return TaskResult{}, ErrNotFound
 	}
@@ -296,6 +339,23 @@ func hashRequest(input CreateInput) string {
 
 func validOperation(value string) bool {
 	return strings.TrimSpace(value) != ""
+}
+
+// dedupeAssetIDs trims, drops empties and removes duplicates while preserving
+// the first-seen order, so the idempotency hash of a repeated asset list is
+// stable.
+func dedupeAssetIDs(ids []string) []string {
+	seen := make(map[string]bool, len(ids))
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
+	return out
 }
 
 func validIdempotencyKey(value string) bool {

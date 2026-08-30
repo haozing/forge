@@ -234,6 +234,109 @@ CREATE INDEX automation_runs_agent_task_idx
     ON automation.runs (organization_id, agent_task_id, created_at DESC)
     WHERE agent_task_id IS NOT NULL;
 
+-- Phase 4 suggestion flow. automation.runs exists from here on, so the tag
+-- suggestion table finally receives its run provenance column (0006 could not
+-- declare the FK), and the field/summary and relation suggestion tables plus
+-- the processing-result records land beside it.
+ALTER TABLE asset.asset_version_tag_suggestions
+    ADD COLUMN run_id uuid NOT NULL REFERENCES automation.runs(id) ON DELETE CASCADE;
+
+CREATE INDEX tag_suggestions_org_version_idx
+    ON asset.asset_version_tag_suggestions (organization_id, source_version_id, status);
+
+-- Field/summary suggestions: kind='field' carries field_key, kind='summary'
+-- stores the text inside value. Suggestions are side records: accepting one
+-- only mutates the AssetDraft; the source version is never touched.
+CREATE TABLE asset.asset_field_suggestions (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    organization_id uuid NOT NULL REFERENCES organization.organizations(id),
+    workspace_id uuid NOT NULL,
+    source_version_id uuid NOT NULL,
+    run_id uuid NOT NULL REFERENCES automation.runs(id) ON DELETE CASCADE,
+    kind text NOT NULL CHECK (kind IN ('field', 'summary')),
+    field_key text NOT NULL DEFAULT '',
+    value jsonb NOT NULL,
+    previous_value jsonb,
+    confidence numeric(4, 3) NOT NULL CHECK (confidence >= 0 AND confidence <= 1),
+    citation jsonb NOT NULL DEFAULT '{}'::jsonb,
+    status text NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'accepted', 'rejected')),
+    reviewed_by uuid REFERENCES identity.users(id),
+    reviewed_at timestamptz,
+    accepted_into_draft_id uuid,
+    materialized_version_id uuid,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (source_version_id, run_id, kind, field_key),
+    FOREIGN KEY (organization_id, source_version_id)
+        REFERENCES asset.asset_versions (organization_id, id)
+);
+
+CREATE INDEX asset_field_suggestions_version_idx
+    ON asset.asset_field_suggestions (organization_id, source_version_id, status);
+
+-- Relation suggestions: acceptance parks the edge in asset.asset_draft_relations
+-- (source='ai'); commit materializes it against the target asset's current
+-- working version and backfills materialized_relation_id.
+CREATE TABLE asset.asset_relation_suggestions (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    organization_id uuid NOT NULL REFERENCES organization.organizations(id),
+    workspace_id uuid NOT NULL,
+    source_version_id uuid NOT NULL,
+    run_id uuid NOT NULL REFERENCES automation.runs(id) ON DELETE CASCADE,
+    target_asset_id uuid NOT NULL,
+    relation_type text NOT NULL
+        CHECK (relation_type IN ('related_to', 'references', 'derived_from', 'cites', 'continues_from')),
+    confidence numeric(4, 3) NOT NULL CHECK (confidence >= 0 AND confidence <= 1),
+    citation jsonb NOT NULL DEFAULT '{}'::jsonb,
+    status text NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'accepted', 'rejected')),
+    reviewed_by uuid REFERENCES identity.users(id),
+    reviewed_at timestamptz,
+    accepted_into_draft_id uuid,
+    materialized_version_id uuid,
+    materialized_relation_id uuid,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (source_version_id, run_id, target_asset_id, relation_type),
+    FOREIGN KEY (organization_id, source_version_id)
+        REFERENCES asset.asset_versions (organization_id, id),
+    FOREIGN KEY (organization_id, target_asset_id)
+        REFERENCES asset.assets (organization_id, id)
+);
+
+CREATE INDEX asset_relation_suggestions_version_idx
+    ON asset.asset_relation_suggestions (organization_id, source_version_id, status);
+
+-- Processing-result record: the phase 4 carrier for input/output version,
+-- confidence, citations and token usage of one agent run over one asset.
+CREATE TABLE integration.agent_processing_results (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    organization_id uuid NOT NULL REFERENCES organization.organizations(id),
+    workspace_id uuid NOT NULL,
+    run_id uuid NOT NULL REFERENCES automation.runs(id) ON DELETE CASCADE,
+    asset_id uuid NOT NULL,
+    input_version_id uuid NOT NULL,
+    output_version_id uuid,
+    agent_user_id uuid NOT NULL REFERENCES identity.users(id),
+    agent_application_id uuid NOT NULL,
+    rule_version text NOT NULL DEFAULT '',
+    suggestion_summary jsonb NOT NULL DEFAULT '{}'::jsonb,
+    field_diff jsonb NOT NULL DEFAULT '[]'::jsonb,
+    overall_confidence numeric(4, 3),
+    citations jsonb NOT NULL DEFAULT '[]'::jsonb,
+    input_tokens integer NOT NULL DEFAULT 0,
+    output_tokens integer NOT NULL DEFAULT 0,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    completed_at timestamptz,
+    UNIQUE (run_id, asset_id),
+    FOREIGN KEY (organization_id, asset_id)
+        REFERENCES asset.assets (organization_id, id),
+    FOREIGN KEY (organization_id, input_version_id)
+        REFERENCES asset.asset_versions (organization_id, id),
+    FOREIGN KEY (organization_id, output_version_id)
+        REFERENCES asset.asset_versions (organization_id, id)
+);
+
+CREATE INDEX agent_processing_results_asset_idx
+    ON integration.agent_processing_results (organization_id, asset_id, created_at DESC);
+
 CREATE TABLE automation.attempts (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     run_id uuid NOT NULL REFERENCES automation.runs(id) ON DELETE CASCADE,

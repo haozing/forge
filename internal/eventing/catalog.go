@@ -67,6 +67,11 @@ const (
 	EventIdentityPasswordChanged         = "identity.password_changed"
 )
 
+// Agent processing facts (phase 4 suggestion stream).
+const (
+	EventAgentProcessingCompleted = "agent.processing_completed"
+)
+
 // PayloadVersionV1 is the payload schema version for every phase 0 event.
 const PayloadVersionV1 = 1
 
@@ -166,6 +171,16 @@ type SiteBindingChangedPayload struct {
 	Operation string `json:"operation"`
 }
 
+// AgentProcessingCompletedPayload marks an agent prepare run landing its
+// pending suggestion set; counts are keyed by field/summary/tag/relation.
+type AgentProcessingCompletedPayload struct {
+	AssetID            string         `json:"asset_id"`
+	RunID              string         `json:"run_id"`
+	InputVersionID     string         `json:"input_version_id"`
+	ProcessingResultID string         `json:"processing_result_id"`
+	Counts             map[string]int `json:"counts"`
+}
+
 // KnownEvents maps every catalog event to its payload version. The registry
 // refuses to dispatch events absent from this table.
 func KnownEvents() map[string]int {
@@ -188,5 +203,6 @@ func KnownEvents() map[string]int {
 		EventWorkspaceMembershipChanged:   PayloadVersionV1,
 		EventAgentAccessPolicyChanged:     PayloadVersionV1,
 		EventSiteBindingChanged:           PayloadVersionV1,
+		EventAgentProcessingCompleted:     PayloadVersionV1,
 	}
 }

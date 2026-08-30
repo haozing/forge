@@ -159,6 +159,19 @@ func registerV2AssetRoutes(deps Dependencies, mux *http.ServeMux) {
 	mux.HandleFunc("/api/v2/assets/{assetId}/archive", v2ArchiveAsset(deps))
 	mux.HandleFunc("/api/v2/assets/{assetId}/restore", v2RestoreAsset(deps))
 	mux.HandleFunc("/api/v2/asset-versions/{versionId}/confirm", v2ConfirmVersion(deps))
+	registerV2SuggestionRoutes(deps, mux)
+}
+
+// registerV2SuggestionRoutes holds the phase 4 member review surface: the
+// unified suggestion queue, single and batch decisions, agent processing
+// results and member-initiated asset preparation runs.
+func registerV2SuggestionRoutes(deps Dependencies, mux *http.ServeMux) {
+	mux.HandleFunc("/api/v2/workspaces/{workspaceId}/assets/{assetId}/suggestions", v2AssetSuggestions(deps))
+	mux.HandleFunc("/api/v2/workspaces/{workspaceId}/assets/{assetId}/suggestions/accept-batch", v2AssetSuggestionsAcceptBatch(deps))
+	mux.HandleFunc("/api/v2/workspaces/{workspaceId}/assets/{assetId}/processing-results", v2AssetProcessingResults(deps))
+	mux.HandleFunc("/api/v2/workspaces/{workspaceId}/assets/{assetId}/prepare", v2AssetPrepare(deps))
+	mux.HandleFunc("/api/v2/workspaces/{workspaceId}/suggestions/{kind}/{suggestionId}/accept", v2SuggestionAccept(deps))
+	mux.HandleFunc("/api/v2/workspaces/{workspaceId}/suggestions/{kind}/{suggestionId}/reject", v2SuggestionReject(deps))
 }
 
 func registerV2ReviewRoutes(deps Dependencies, mux *http.ServeMux) {
@@ -261,6 +274,10 @@ func registerV2QueryRoutes(deps Dependencies, mux *http.ServeMux) {
 	mux.HandleFunc("/api/v2/organization/query", v2OrganizationQuery(deps))
 	mux.HandleFunc("/api/open/v2/query", v2OpenQuery(deps))
 	mux.HandleFunc("/api/open/v2/references/validate", v2OpenReferenceValidate(deps))
+	// Phase 4 agent tasks: same guard chain as the v1 surface (API-key
+	// principal + capability + idempotency); the v1 routes retire per ledger.
+	mux.HandleFunc("/api/open/v2/agent-tasks", createAgentTask(deps))
+	mux.HandleFunc("/api/open/v2/agent-tasks/{taskId}", getAgentTask(deps))
 
 	mux.HandleFunc("/api/v2/organization/retrieval/profiles", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {

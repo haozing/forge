@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"agentchunzhi/internal/auth"
@@ -18,51 +19,77 @@ import (
 )
 
 var (
-	ErrSuggestionNotFound  = errors.New("tag suggestion not found")
-	ErrSuggestionState     = errors.New("tag suggestion already decided")
-	ErrSuggestionNoTag     = errors.New("suggestion requires a resolved tag")
+	ErrSuggestionNotFound = errors.New("tag suggestion not found")
+	ErrSuggestionState    = errors.New("tag suggestion already decided")
+	ErrSuggestionNoTag    = errors.New("suggestion requires a resolved tag")
 )
 
 type Suggestion struct {
-	ID             string     `json:"id"`
-	SourceVersionID string    `json:"source_version_id"`
-	SuggestedKey   string     `json:"suggested_key"`
-	SuggestedName  string     `json:"suggested_display_name"`
-	ResolvedTagID  *string    `json:"resolved_tag_id,omitempty"`
-	Confidence     float64    `json:"confidence"`
-	Status         string     `json:"status"`
-	ReviewedBy     *string    `json:"reviewed_by,omitempty"`
-	ReviewedAt     *time.Time `json:"reviewed_at,omitempty"`
-	AcceptedDraft  *string    `json:"accepted_into_draft_id,omitempty"`
-	Materialized   *string    `json:"materialized_version_id,omitempty"`
-	CreatedAt      time.Time  `json:"created_at"`
+	ID                 string     `json:"id"`
+	SourceVersionID    string     `json:"source_version_id"`
+	SuggestedKey       string     `json:"suggested_key"`
+	SuggestedName      string     `json:"suggested_display_name"`
+	ResolvedTagID      *string    `json:"resolved_tag_id,omitempty"`
+	Confidence         float64    `json:"confidence"`
+	Status             string     `json:"status"`
+	ReviewedBy         *string    `json:"reviewed_by,omitempty"`
+	ReviewedAt         *time.Time `json:"reviewed_at,omitempty"`
+	AcceptedDraft      *string    `json:"accepted_into_draft_id,omitempty"`
+	Materialized       *string    `json:"materialized_version_id,omitempty"`
+	RunID              string     `json:"run_id"`
+	AgentApplicationID *string    `json:"agent_application_id,omitempty"`
+	Citation           []byte     `json:"citation,omitempty"`
+	IsNew              bool       `json:"is_new"`
+	CreatedAt          time.Time  `json:"created_at"`
 }
 
 type SuggestionService struct {
 	Store *store.Store
 }
 
-// CreatePending records a model suggestion against an immutable version.
-func (s SuggestionService) CreatePending(ctx context.Context, organizationID, workspaceID, sourceVersionID, suggestedKey, suggestedName string, confidence float64) (Suggestion, error) {
+// CreatePendingTx records a model suggestion with its run provenance inside
+// the CALLER'S transaction, so the prepare flow lands the processing result
+// and every suggestion atomically. A pending row from the same run and key is
+// cleared first so run retries stay idempotent; member decisions (accepted
+// rows) are never overwritten.
+func (s SuggestionService) CreatePendingTx(ctx context.Context, tx pgx.Tx, organizationID, workspaceID, sourceVersionID, suggestedKey, suggestedName string, confidence float64, runID, agentApplicationID string, citation []byte, isNew bool) (Suggestion, error) {
 	normalized, err := NormalizeKey(suggestedKey)
 	if err != nil {
 		return Suggestion{}, ErrInvalidInput
 	}
-	if confidence < 0 || confidence > 1 {
+	if confidence < 0 || confidence > 1 || strings.TrimSpace(runID) == "" {
 		return Suggestion{}, ErrInvalidInput
 	}
+	if len(citation) == 0 {
+		citation = []byte("{}")
+	}
+	var applicationID any
+	if strings.TrimSpace(agentApplicationID) != "" {
+		applicationID = agentApplicationID
+	}
+	if _, err := tx.Exec(ctx, `
+		DELETE FROM asset.asset_version_tag_suggestions
+		WHERE source_version_id = $1::uuid AND suggested_key = $2 AND run_id = $3::uuid
+		  AND status = 'pending'
+	`, sourceVersionID, normalized, runID); err != nil {
+		return Suggestion{}, fmt.Errorf("clear pending tag suggestion: %w", err)
+	}
 	var item Suggestion
-	err = s.Store.Pool.QueryRow(ctx, `
+	err = tx.QueryRow(ctx, `
 		INSERT INTO asset.asset_version_tag_suggestions
-			(organization_id, workspace_id, source_version_id, suggested_key, suggested_display_name, confidence)
-		VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6)
+			(organization_id, workspace_id, source_version_id, suggested_key, suggested_display_name,
+			 confidence, run_id, agent_application_id, citation, is_new)
+		VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7::uuid, $8::uuid, $9::jsonb, $10)
 		RETURNING id::text, source_version_id::text, suggested_key, suggested_display_name,
 		          resolved_tag_id::text, confidence, status, reviewed_by::text, reviewed_at,
-		          accepted_into_draft_id::text, materialized_version_id::text, created_at
-	`, organizationID, workspaceID, sourceVersionID, normalized, suggestedName, confidence).Scan(
+		          accepted_into_draft_id::text, materialized_version_id::text, run_id::text,
+		          agent_application_id::text, citation, is_new, created_at
+	`, organizationID, workspaceID, sourceVersionID, normalized, suggestedName, confidence,
+		runID, applicationID, citation, isNew).Scan(
 		&item.ID, &item.SourceVersionID, &item.SuggestedKey, &item.SuggestedName,
 		&item.ResolvedTagID, &item.Confidence, &item.Status, &item.ReviewedBy, &item.ReviewedAt,
-		&item.AcceptedDraft, &item.Materialized, &item.CreatedAt)
+		&item.AcceptedDraft, &item.Materialized, &item.RunID, &item.AgentApplicationID,
+		&item.Citation, &item.IsNew, &item.CreatedAt)
 	if err != nil {
 		return Suggestion{}, fmt.Errorf("insert tag suggestion: %w", err)
 	}

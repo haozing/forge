@@ -90,7 +90,16 @@ func (p OperationProcessor) Process(ctx context.Context, claimed ClaimedRun) err
 				if err != nil {
 					return err
 				}
-				candidateIDs := make([]string, 0, len(versionIDs))
+				// Phase 4: prepare produces a suggestion set per asset, not a
+				// candidate version. The snapshot therefore carries the
+				// processing-result ids and per-kind suggestion counts; the
+				// legacy candidate_version_ids key stays as an empty array so
+				// JSON consumers keyed on it do not see a nil shape (the agent
+				// task sync reads the singular candidate_version_id, whose
+				// absence now clears the column on success — correct, since no
+				// candidate version exists in the suggestion flow).
+				processingResultIDs := make([]string, 0, len(versionIDs))
+				counts := make(map[string]int)
 				inputTokens, outputTokens := 0, 0
 				for _, assetVersionID := range versionIDs {
 					result, prepareErr := p.Preparation.Prepare(ctx, assetservice.PrepareRequest{
@@ -101,15 +110,19 @@ func (p OperationProcessor) Process(ctx context.Context, claimed ClaimedRun) err
 					if prepareErr != nil {
 						return prepareErr
 					}
-					if result.CandidateVersionID != "" {
-						candidateIDs = append(candidateIDs, result.CandidateVersionID)
+					if result.ProcessingResultID != "" {
+						processingResultIDs = append(processingResultIDs, result.ProcessingResultID)
+					}
+					for kind, count := range result.Counts {
+						counts[kind] += count
 					}
 					inputTokens += result.InputTokens
 					outputTokens += result.OutputTokens
 				}
-				output := map[string]any{"candidate_version_ids": candidateIDs}
-				if len(candidateIDs) == 1 {
-					output["candidate_version_id"] = candidateIDs[0]
+				output := map[string]any{
+					"processing_result_ids": processingResultIDs,
+					"counts":                counts,
+					"candidate_version_ids": []string{},
 				}
 				if _, err := p.Store.Pool.Exec(ctx, `
 					UPDATE automation.runs SET output_snapshot = $2::jsonb,

@@ -91,6 +91,12 @@ CREATE TABLE asset.asset_version_tag_suggestions (
     resolved_tag_id uuid,
     confidence numeric(4, 3) NOT NULL CHECK (confidence >= 0 AND confidence <= 1),
     status text NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'accepted', 'rejected')),
+    -- Phase 4 task provenance: run_id arrives in 0008 (automation.runs does not
+    -- exist yet at this point in the baseline, so its FK cannot be declared
+    -- here); agent_application_id/citation/is_new land with the table.
+    agent_application_id uuid,
+    citation jsonb NOT NULL DEFAULT '{}'::jsonb,
+    is_new boolean NOT NULL DEFAULT false,
     reviewed_by uuid,
     reviewed_at timestamptz,
     accepted_into_draft_id uuid,
