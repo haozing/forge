@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"agentchunzhi/internal/store"
 )
@@ -177,9 +178,12 @@ func (s ProfileService) Coverage(ctx context.Context, organizationID, profileID 
 // organization. When no profile exists yet it creates one from the default
 // manifest: activated immediately for a fresh organization without eligible
 // assets, otherwise left warming so the backfill flow can activate it. The
-// wiring into the OrganizationProvisioner is optional (stage 3); the function
-// is idempotent and safe to call on every organization creation.
-func (s ProfileService) EnsureProfilesForOrganization(ctx context.Context, organizationID string) (Profile, bool, error) {
+// projection_profiles activation CHECK requires a non-null activated_by on
+// active rows, so activatedBy (the provisioning actor, e.g. the bootstrap
+// admin) is mandatory whenever immediate activation can happen. The wiring
+// into the OrganizationProvisioner is optional (stage 3); the function is
+// idempotent and safe to call on every organization creation.
+func (s ProfileService) EnsureProfilesForOrganization(ctx context.Context, organizationID, activatedBy string) (Profile, bool, error) {
 	if s.Store == nil || s.Store.Pool == nil {
 		return Profile{}, false, errors.New("database store is not initialized")
 	}
@@ -230,7 +234,10 @@ func (s ProfileService) EnsureProfilesForOrganization(ctx context.Context, organ
 	}
 	activated := false
 	if eligible == 0 {
-		if _, _, err := repo.ActivateProfileTx(ctx, tx, organizationID, profile.ID, ""); err != nil {
+		if strings.TrimSpace(activatedBy) == "" {
+			return Profile{}, false, errors.New("activatedBy is required: a fresh organization activates its profile immediately and the activation CHECK demands an actor")
+		}
+		if _, _, err := repo.ActivateProfileTx(ctx, tx, organizationID, profile.ID, activatedBy); err != nil {
 			return Profile{}, false, err
 		}
 		activated = true

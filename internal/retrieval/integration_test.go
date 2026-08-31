@@ -142,7 +142,9 @@ func TestPGroongaProjectionPipelineV2(t *testing.T) {
 		Manifests:          map[string]retrieval.EmbeddingManifest{"hash-embedding@test": hash.Manifest()},
 		DefaultManifestKey: "hash-embedding@test",
 	}
-	profile, activated, err := profiles.EnsureProfilesForOrganization(ctx, organizationID)
+	// activated_by is a plain uuid column (no FK): a synthetic actor satisfies
+	// the activation metadata CHECK in this fixture.
+	profile, activated, err := profiles.EnsureProfilesForOrganization(ctx, organizationID, "00000000-0000-4000-8000-0000000000a1")
 	if err != nil {
 		t.Fatalf("bootstrap retrieval profile: %v", err)
 	}

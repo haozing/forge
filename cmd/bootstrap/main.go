@@ -75,7 +75,7 @@ func main() {
 				Manifests:          manifests,
 				DefaultManifestKey: registry.ManifestKey,
 			}
-			if _, _, profileErr := profiles.EnsureProfilesForOrganization(ctx, organizationID); profileErr != nil {
+			if _, _, profileErr := profiles.EnsureProfilesForOrganization(ctx, organizationID, userID); profileErr != nil {
 				log.Printf("WARNING: retrieval profile bootstrap failed for organization %s: %v", organizationID, profileErr)
 			} else {
 				fmt.Println("retrieval profile bootstrapped")
