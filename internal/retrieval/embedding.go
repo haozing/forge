@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-// DefaultEmbeddingDimensions is the fixed v2 embedding ABI.
+// DefaultEmbeddingDimensions is the fixed embedding ABI.
 const DefaultEmbeddingDimensions = 1024
 
 // EmbeddingBatchLimit caps one provider document batch.

@@ -18,7 +18,7 @@ import (
 var ErrAgentNotAllowed = errors.New("agent user is not allowed to onboard")
 
 const (
-	onboardingOpenAPIPath    = "/openapi-open-v1.yaml"
+	onboardingOpenAPIPath    = "/openapi.yaml"
 	onboardingAuthFormatTmpl = "Authorization: Bearer <agent-api-key>"
 )
 
@@ -267,5 +267,5 @@ func deriveOnboardingOperations(capabilities []string, models []AgentOnboardingR
 
 func buildOnboardingSampleCurl(baseURL string) string {
 	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
-	return fmt.Sprintf(`curl -X POST %s/api/open/v1/query -H "%s" -H "Content-Type: application/json" -d '{"mode":"hybrid","query":"<your-question>","top_k":10}'`, baseURL, onboardingAuthFormatTmpl)
+	return fmt.Sprintf(`curl -X POST %s/api/open/query -H "%s" -H "Content-Type: application/json" -d '{"mode":"hybrid","query":"<your-question>","top_k":10}'`, baseURL, onboardingAuthFormatTmpl)
 }

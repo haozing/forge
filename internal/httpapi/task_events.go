@@ -13,7 +13,7 @@ import (
 	"agentchunzhi/internal/store"
 )
 
-func taskRunEventsFinal(deps Dependencies) http.HandlerFunc {
+func taskRunEvents(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
@@ -109,7 +109,7 @@ func streamTaskRunEvents(ctx context.Context, deps Dependencies, organizationID,
 	return lastID, rows.Err()
 }
 
-func exportDownloadFinal(deps Dependencies) http.HandlerFunc {
+func exportDownload(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")

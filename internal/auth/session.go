@@ -34,7 +34,7 @@ type Session struct {
 	Token     string
 	ID        string
 	ExpiresAt time.Time
-	// IdleExpires and AbsoluteExpires are the v2 dual session lifetimes;
+	// IdleExpires and AbsoluteExpires are the dual session lifetimes;
 	// ExpiresAt aliases AbsoluteExpires for the legacy cookie writer.
 	IdleExpires     time.Time
 	AbsoluteExpires time.Time
@@ -50,7 +50,7 @@ func (s SessionService) Authenticate(ctx context.Context, r *http.Request) (Prin
 }
 
 // authenticateSession resolves the principal plus the session id behind the
-// cookie and refreshes last_seen_at (throttled). v2 handlers use the session
+// cookie and refreshes last_seen_at (throttled). handlers use the session
 // id for revocation commands and self-identification in session listings.
 func (s SessionService) authenticateSession(ctx context.Context, r *http.Request) (Principal, string, error) {
 	if s.Store == nil || s.Store.Pool == nil {

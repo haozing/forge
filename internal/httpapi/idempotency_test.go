@@ -14,14 +14,15 @@ func TestRequiresHTTPIdempotency(t *testing.T) {
 		path   string
 		want   bool
 	}{
-		{http.MethodPost, "/api/frontend/workspaces/00000000-0000-4000-8000-000000000001/assets", true},
-		{http.MethodPatch, "/api/frontend/assets/00000000-0000-4000-8000-000000000001", true},
-		{http.MethodPost, "/api/frontend/workspaces/00000000-0000-4000-8000-000000000001/query", false},
-		{http.MethodPost, "/api/frontend/agent-sessions/00000000-0000-4000-8000-000000000001/references/validate", false},
-		{http.MethodPost, "/api/frontend/conversations/00000000-0000-4000-8000-000000000001/chat/stream", false},
-		{http.MethodPatch, "/api/frontend/assets/00000000-0000-4000-8000-000000000002", true},
-		{http.MethodPost, "/api/sessions", false},
-		{http.MethodPost, "/api/public/v2/sessions", false},
+		{http.MethodPost, "/api/workspaces/00000000-0000-4000-8000-000000000001/assets", true},
+		{http.MethodPatch, "/api/assets/00000000-0000-4000-8000-000000000001", true},
+		{http.MethodPost, "/api/workspaces/00000000-0000-4000-8000-000000000001/query", false},
+		{http.MethodPost, "/api/agent-sessions/00000000-0000-4000-8000-000000000001/references/validate", false},
+		{http.MethodPost, "/api/conversations/00000000-0000-4000-8000-000000000001/chat/stream", false},
+		{http.MethodPatch, "/api/assets/00000000-0000-4000-8000-000000000002", true},
+		{http.MethodDelete, "/api/sessions/current", true},
+		{http.MethodPost, "/api/public/sessions", false},
+		{http.MethodPost, "/api/admin/agent-users", false},
 	}
 	for _, test := range cases {
 		request := httptest.NewRequest(test.method, test.path, nil)
@@ -32,7 +33,7 @@ func TestRequiresHTTPIdempotency(t *testing.T) {
 }
 
 func TestSnapshotIdempotentRequestPreservesBody(t *testing.T) {
-	request := httptest.NewRequest(http.MethodPost, "/api/frontend/test?b=2", strings.NewReader(`{"value":1}`))
+	request := httptest.NewRequest(http.MethodPost, "/api/test?b=2", strings.NewReader(`{"value":1}`))
 	firstHash, cleanup, err := snapshotIdempotentRequest(request)
 	if err != nil {
 		t.Fatal(err)
@@ -46,7 +47,7 @@ func TestSnapshotIdempotentRequestPreservesBody(t *testing.T) {
 		t.Fatalf("unexpected snapshot body=%q hash=%q", body, firstHash)
 	}
 
-	second := httptest.NewRequest(http.MethodPost, "/api/frontend/test?b=2", strings.NewReader(`{"value":1}`))
+	second := httptest.NewRequest(http.MethodPost, "/api/test?b=2", strings.NewReader(`{"value":1}`))
 	secondHash, secondCleanup, err := snapshotIdempotentRequest(second)
 	if err != nil {
 		t.Fatal(err)

@@ -1,6 +1,6 @@
 package httpapi
 
-// v2_query.go — the phase 3 unified query HTTP surface (doc §11): member and
+// query.go — the phase 3 unified query HTTP surface (doc §11): member and
 // OpenAPI query routes, projection profile/rebuild operations, query execution
 // audit and the readiness probe. Handlers only translate transport into the
 // query contract; every permission decision lives in the service and scope
@@ -28,7 +28,7 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// QueryService is the v2 unified query surface consumed by the handlers. The
+// QueryService is the unified query surface consumed by the handlers. The
 // concrete implementation is agentquery.Service (doc §4.1: exactly one
 // UnifiedQueryService).
 type QueryService interface {
@@ -57,7 +57,7 @@ type RetrievalRebuildService interface {
 // Request/response DTOs
 // ---------------------------------------------------------------------------
 
-type v2QueryRequest struct {
+type QueryRequest struct {
 	Query                string                 `json:"query"`
 	Mode                 string                 `json:"mode"`
 	ResourceModelIDs     []string               `json:"resource_model_ids"`
@@ -74,7 +74,7 @@ type v2QueryRequest struct {
 	Cursor               string                 `json:"cursor"`
 }
 
-func (v v2QueryRequest) toContract() (agentquery.Request, bool) {
+func (v QueryRequest) toContract() (agentquery.Request, bool) {
 	req := agentquery.Request{
 		Query:                v.Query,
 		Mode:                 v.Mode,
@@ -190,8 +190,8 @@ type executionDTO struct {
 // Query routes
 // ---------------------------------------------------------------------------
 
-// v2WorkspaceQuery handles POST /api/v2/workspaces/{workspaceId}/query.
-func v2WorkspaceQuery(deps Dependencies) http.HandlerFunc {
+// WorkspaceQuery handles POST /api/workspaces/{workspaceId}/query.
+func WorkspaceQuery(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
@@ -204,7 +204,7 @@ func v2WorkspaceQuery(deps Dependencies) http.HandlerFunc {
 		if !requirePathUUID(w, r.PathValue("workspaceId")) {
 			return
 		}
-		input, ok := decodeV2QueryRequest(w, r)
+		input, ok := decodeQueryRequest(w, r)
 		if !ok {
 			return
 		}
@@ -213,8 +213,8 @@ func v2WorkspaceQuery(deps Dependencies) http.HandlerFunc {
 	}
 }
 
-// v2OrganizationQuery handles POST /api/v2/organization/query.
-func v2OrganizationQuery(deps Dependencies) http.HandlerFunc {
+// OrganizationQuery handles POST /api/organization/query.
+func OrganizationQuery(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
@@ -224,7 +224,7 @@ func v2OrganizationQuery(deps Dependencies) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		input, ok := decodeV2QueryRequest(w, r)
+		input, ok := decodeQueryRequest(w, r)
 		if !ok {
 			return
 		}
@@ -233,8 +233,8 @@ func v2OrganizationQuery(deps Dependencies) http.HandlerFunc {
 	}
 }
 
-// v2OpenQuery handles POST /api/open/v2/query with the technical API key.
-func v2OpenQuery(deps Dependencies) http.HandlerFunc {
+// OpenQuery handles POST /api/open/query with the technical API key.
+func OpenQuery(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
@@ -245,7 +245,7 @@ func v2OpenQuery(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusUnauthorized, "authentication_required")
 			return
 		}
-		input, ok := decodeV2QueryRequest(w, r)
+		input, ok := decodeQueryRequest(w, r)
 		if !ok {
 			return
 		}
@@ -254,8 +254,8 @@ func v2OpenQuery(deps Dependencies) http.HandlerFunc {
 	}
 }
 
-// v2OpenReferenceValidate handles POST /api/open/v2/references/validate.
-func v2OpenReferenceValidate(deps Dependencies) http.HandlerFunc {
+// OpenReferenceValidate handles POST /api/open/references/validate.
+func OpenReferenceValidate(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
@@ -287,8 +287,8 @@ func v2OpenReferenceValidate(deps Dependencies) http.HandlerFunc {
 	}
 }
 
-func decodeV2QueryRequest(w http.ResponseWriter, r *http.Request) (agentquery.Request, bool) {
-	var input v2QueryRequest
+func decodeQueryRequest(w http.ResponseWriter, r *http.Request) (agentquery.Request, bool) {
+	var input QueryRequest
 	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 256*1024))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&input); err != nil {
@@ -303,7 +303,7 @@ func decodeV2QueryRequest(w http.ResponseWriter, r *http.Request) (agentquery.Re
 	return contract, true
 }
 
-// writeQueryResponse maps the service outcome onto the v2 envelope and the
+// writeQueryResponse maps the service outcome onto the API envelope and the
 // fixed error table (doc §11.5).
 func writeQueryResponse(w http.ResponseWriter, r *http.Request, response agentquery.Response, err error) {
 	if err != nil {
@@ -325,8 +325,8 @@ func writeQueryError(w http.ResponseWriter, err error) {
 // Projection operations routes (doc §11.3)
 // ---------------------------------------------------------------------------
 
-// v2ListRetrievalProfiles handles GET /api/v2/organization/retrieval/profiles.
-func v2ListRetrievalProfiles(deps Dependencies) http.HandlerFunc {
+// ListRetrievalProfiles handles GET /api/organization/retrieval/profiles.
+func ListRetrievalProfiles(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
@@ -352,8 +352,8 @@ func v2ListRetrievalProfiles(deps Dependencies) http.HandlerFunc {
 	}
 }
 
-// v2CreateRetrievalProfile handles POST /api/v2/organization/retrieval/profiles.
-func v2CreateRetrievalProfile(deps Dependencies) http.HandlerFunc {
+// CreateRetrievalProfile handles POST /api/organization/retrieval/profiles.
+func CreateRetrievalProfile(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
@@ -391,8 +391,8 @@ func v2CreateRetrievalProfile(deps Dependencies) http.HandlerFunc {
 	}
 }
 
-// v2ActivateRetrievalProfile handles POST .../profiles/{profileId}/activate.
-func v2ActivateRetrievalProfile(deps Dependencies) http.HandlerFunc {
+// ActivateRetrievalProfile handles POST .../profiles/{profileId}/activate.
+func ActivateRetrievalProfile(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
@@ -434,10 +434,10 @@ func v2ActivateRetrievalProfile(deps Dependencies) http.HandlerFunc {
 	}
 }
 
-// v2WorkspaceRetrievalStatus handles GET /api/v2/workspaces/{workspaceId}/retrieval/status.
+// WorkspaceRetrievalStatus handles GET /api/workspaces/{workspaceId}/retrieval/status.
 // The route only exposes aggregate counters — never chunk content or tenant
 // identifiers beyond the workspace the caller administers.
-func v2WorkspaceRetrievalStatus(deps Dependencies) http.HandlerFunc {
+func WorkspaceRetrievalStatus(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
@@ -504,8 +504,8 @@ func v2WorkspaceRetrievalStatus(deps Dependencies) http.HandlerFunc {
 	}
 }
 
-// v2WorkspaceRetrievalRebuild handles POST /api/v2/workspaces/{workspaceId}/retrieval/rebuilds.
-func v2WorkspaceRetrievalRebuild(deps Dependencies) http.HandlerFunc {
+// WorkspaceRetrievalRebuild handles POST /api/workspaces/{workspaceId}/retrieval/rebuilds.
+func WorkspaceRetrievalRebuild(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
@@ -532,8 +532,8 @@ func v2WorkspaceRetrievalRebuild(deps Dependencies) http.HandlerFunc {
 	}
 }
 
-// v2WorkspaceRebuildGet handles GET /api/v2/workspaces/{workspaceId}/retrieval/rebuilds/{rebuildId}.
-func v2WorkspaceRebuildGet(deps Dependencies) http.HandlerFunc {
+// WorkspaceRebuildGet handles GET /api/workspaces/{workspaceId}/retrieval/rebuilds/{rebuildId}.
+func WorkspaceRebuildGet(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
@@ -564,8 +564,8 @@ func v2WorkspaceRebuildGet(deps Dependencies) http.HandlerFunc {
 	}
 }
 
-// v2OrganizationRetrievalRebuilds handles POST /api/v2/organization/retrieval/rebuilds.
-func v2OrganizationRetrievalRebuilds(deps Dependencies) http.HandlerFunc {
+// OrganizationRetrievalRebuilds handles POST /api/organization/retrieval/rebuilds.
+func OrganizationRetrievalRebuilds(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
@@ -587,9 +587,9 @@ func v2OrganizationRetrievalRebuilds(deps Dependencies) http.HandlerFunc {
 	}
 }
 
-// v2OrganizationRebuildGet handles GET /api/v2/organization/retrieval/rebuilds/{rebuildId}.
+// OrganizationRebuildGet handles GET /api/organization/retrieval/rebuilds/{rebuildId}.
 // Organization admins without workspace membership see aggregate counters only.
-func v2OrganizationRebuildGet(deps Dependencies) http.HandlerFunc {
+func OrganizationRebuildGet(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
@@ -682,10 +682,10 @@ func loadRebuildRow(ctx context.Context, deps Dependencies, organizationID, rebu
 // Query execution audit routes (doc §11.4)
 // ---------------------------------------------------------------------------
 
-// v2WorkspaceQueryExecutions handles GET /api/v2/workspaces/{workspaceId}/query-executions.
+// WorkspaceQueryExecutions handles GET /api/workspaces/{workspaceId}/query-executions.
 // audit.read holders only see executions bound to their workspace; query and
 // filter text are never part of the audit payload.
-func v2WorkspaceQueryExecutions(deps Dependencies) http.HandlerFunc {
+func WorkspaceQueryExecutions(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
@@ -751,8 +751,8 @@ func v2WorkspaceQueryExecutions(deps Dependencies) http.HandlerFunc {
 	}
 }
 
-// v2OrganizationQueryExecutions handles GET /api/v2/organization/query-executions.
-func v2OrganizationQueryExecutions(deps Dependencies) http.HandlerFunc {
+// OrganizationQueryExecutions handles GET /api/organization/query-executions.
+func OrganizationQueryExecutions(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
@@ -811,9 +811,9 @@ func v2OrganizationQueryExecutions(deps Dependencies) http.HandlerFunc {
 	}
 }
 
-// v2QueryExecution handles GET /api/v2/query-executions/{executionId}: org
+// QueryExecution handles GET /api/query-executions/{executionId}: org
 // admins and audit.read holders of one bound workspace may read the detail.
-func v2QueryExecution(deps Dependencies) http.HandlerFunc {
+func QueryExecution(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")

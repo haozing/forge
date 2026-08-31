@@ -1,6 +1,6 @@
 package httpapi
 
-// v2_handlers.go — the /api/v2 vertical slice of phase 0: publication
+// api_handlers.go — the contract-surface vertical slice of phase 0: publication
 // requests (review), asset draft autosave, commit and lifecycle commands.
 // Handlers only authenticate, parse, call domain services and map errors.
 
@@ -18,9 +18,9 @@ import (
 	"agentchunzhi/internal/tag"
 )
 
-// requireIdempotencyKeyV2 enforces the mandatory Idempotency-Key contract on
-// v2 write commands: missing returns 428.
-func requireIdempotencyKeyV2(w http.ResponseWriter, r *http.Request) (string, bool) {
+// requireIdempotencyKey enforces the mandatory Idempotency-Key contract on
+// contract write commands: missing returns 428.
+func requireIdempotencyKey(w http.ResponseWriter, r *http.Request) (string, bool) {
 	key := r.Header.Get("Idempotency-Key")
 	if key == "" {
 		writeError(w, http.StatusPreconditionRequired, "idempotency_key_required")
@@ -33,7 +33,7 @@ func requireIdempotencyKeyV2(w http.ResponseWriter, r *http.Request) (string, bo
 	return key, true
 }
 
-func v2Principal(w http.ResponseWriter, r *http.Request, deps Dependencies) (auth.Principal, bool) {
+func sessionPrincipal(w http.ResponseWriter, r *http.Request, deps Dependencies) (auth.Principal, bool) {
 	principal, err := deps.SessionService.Authenticate(r.Context(), r)
 	if err != nil {
 		writeError(w, http.StatusUnauthorized, "authentication_required")
@@ -46,8 +46,8 @@ func v2Principal(w http.ResponseWriter, r *http.Request, deps Dependencies) (aut
 	return principal, true
 }
 
-// v2ServiceError maps domain errors onto the v2 status/code contract.
-func v2ServiceError(w http.ResponseWriter, err error) {
+// ServiceError maps domain errors onto the HTTP status/code contract.
+func ServiceError(w http.ResponseWriter, err error) {
 	switch {
 	case err == nil:
 		return
@@ -92,7 +92,7 @@ func v2ServiceError(w http.ResponseWriter, err error) {
 	}
 }
 
-func decodeV2Body(w http.ResponseWriter, r *http.Request, target any, maxBytes int64) bool {
+func decodeBody(w http.ResponseWriter, r *http.Request, target any, maxBytes int64) bool {
 	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBytes))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {
@@ -104,15 +104,15 @@ func decodeV2Body(w http.ResponseWriter, r *http.Request, target any, maxBytes i
 
 // ---------- publication requests ----------
 
-type v2SubmitRequest struct {
+type SubmitRequest struct {
 	AssetID       string `json:"asset_id"`
 	DraftRevision string `json:"draft_revision"`
 	Comment       string `json:"comment"`
 }
 
-func v2PublicationRequests(deps Dependencies) http.HandlerFunc {
+func PublicationRequests(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		principal, ok := v2Principal(w, r, deps)
+		principal, ok := sessionPrincipal(w, r, deps)
 		if !ok {
 			return
 		}
@@ -129,7 +129,7 @@ func v2PublicationRequests(deps Dependencies) http.HandlerFunc {
 				Cursor:      r.URL.Query().Get("cursor"),
 			})
 			if err != nil {
-				v2ServiceError(w, err)
+				ServiceError(w, err)
 				return
 			}
 			writeData(w, r, http.StatusOK, map[string]any{
@@ -137,17 +137,17 @@ func v2PublicationRequests(deps Dependencies) http.HandlerFunc {
 				"page":  pageFrom(len(page.Items), atoiDefault(r.URL.Query().Get("limit"), 20), page.NextCursor),
 			})
 		case http.MethodPost:
-			key, ok := requireIdempotencyKeyV2(w, r)
+			key, ok := requireIdempotencyKey(w, r)
 			if !ok {
 				return
 			}
-			var input v2SubmitRequest
-			if !decodeV2Body(w, r, &input, 64*1024) {
+			var input SubmitRequest
+			if !decodeBody(w, r, &input, 64*1024) {
 				return
 			}
 			request, err := deps.ReviewService.Submit(r.Context(), principal, workspaceID, input.AssetID, input.DraftRevision, key, input.Comment)
 			if err != nil {
-				v2ServiceError(w, err)
+				ServiceError(w, err)
 				return
 			}
 			writeData(w, r, http.StatusCreated, request)
@@ -157,9 +157,9 @@ func v2PublicationRequests(deps Dependencies) http.HandlerFunc {
 	}
 }
 
-func v2PublicationRequest(deps Dependencies) http.HandlerFunc {
+func PublicationRequest(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		principal, ok := v2Principal(w, r, deps)
+		principal, ok := sessionPrincipal(w, r, deps)
 		if !ok {
 			return
 		}
@@ -169,7 +169,7 @@ func v2PublicationRequest(deps Dependencies) http.HandlerFunc {
 		}
 		request, err := deps.ReviewService.Get(r.Context(), principal, r.PathValue("workspaceId"), r.PathValue("requestId"))
 		if err != nil {
-			v2ServiceError(w, err)
+			ServiceError(w, err)
 			return
 		}
 		writeETag(w, request.ETag)
@@ -177,13 +177,13 @@ func v2PublicationRequest(deps Dependencies) http.HandlerFunc {
 	}
 }
 
-type v2DecisionBody struct {
+type DecisionBody struct {
 	Comment string `json:"comment"`
 }
 
-func v2PublicationDecide(deps Dependencies, decision string) http.HandlerFunc {
+func PublicationDecide(deps Dependencies, decision string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		principal, ok := v2Principal(w, r, deps)
+		principal, ok := sessionPrincipal(w, r, deps)
 		if !ok {
 			return
 		}
@@ -191,12 +191,12 @@ func v2PublicationDecide(deps Dependencies, decision string) http.HandlerFunc {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
 			return
 		}
-		if _, ok := requireIdempotencyKeyV2(w, r); !ok {
+		if _, ok := requireIdempotencyKey(w, r); !ok {
 			return
 		}
-		var body v2DecisionBody
+		var body DecisionBody
 		if r.ContentLength != 0 {
-			if !decodeV2Body(w, r, &body, 64*1024) {
+			if !decodeBody(w, r, &body, 64*1024) {
 				return
 			}
 		}
@@ -210,7 +210,7 @@ func v2PublicationDecide(deps Dependencies, decision string) http.HandlerFunc {
 			request, err = deps.ReviewService.Reject(r.Context(), principal, r.PathValue("workspaceId"), r.PathValue("requestId"), body.Comment)
 		}
 		if err != nil {
-			v2ServiceError(w, err)
+			ServiceError(w, err)
 			return
 		}
 		writeETag(w, request.ETag)
@@ -218,13 +218,13 @@ func v2PublicationDecide(deps Dependencies, decision string) http.HandlerFunc {
 	}
 }
 
-type v2CancelBody struct {
+type CancelBody struct {
 	Reason string `json:"reason"`
 }
 
-func v2PublicationCancel(deps Dependencies) http.HandlerFunc {
+func PublicationCancel(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		principal, ok := v2Principal(w, r, deps)
+		principal, ok := sessionPrincipal(w, r, deps)
 		if !ok {
 			return
 		}
@@ -232,18 +232,18 @@ func v2PublicationCancel(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
 			return
 		}
-		if _, ok := requireIdempotencyKeyV2(w, r); !ok {
+		if _, ok := requireIdempotencyKey(w, r); !ok {
 			return
 		}
-		var body v2CancelBody
+		var body CancelBody
 		if r.ContentLength != 0 {
-			if !decodeV2Body(w, r, &body, 16*1024) {
+			if !decodeBody(w, r, &body, 16*1024) {
 				return
 			}
 		}
 		request, err := deps.ReviewService.Cancel(r.Context(), principal, r.PathValue("workspaceId"), r.PathValue("requestId"), body.Reason)
 		if err != nil {
-			v2ServiceError(w, err)
+			ServiceError(w, err)
 			return
 		}
 		writeETag(w, request.ETag)
@@ -251,14 +251,14 @@ func v2PublicationCancel(deps Dependencies) http.HandlerFunc {
 	}
 }
 
-type v2BatchBody struct {
+type BatchBody struct {
 	Decision string             `json:"decision"`
 	Items    []review.BatchItem `json:"items"`
 }
 
-func v2PublicationBatch(deps Dependencies) http.HandlerFunc {
+func PublicationBatch(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		principal, ok := v2Principal(w, r, deps)
+		principal, ok := sessionPrincipal(w, r, deps)
 		if !ok {
 			return
 		}
@@ -266,11 +266,11 @@ func v2PublicationBatch(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
 			return
 		}
-		if _, ok := requireIdempotencyKeyV2(w, r); !ok {
+		if _, ok := requireIdempotencyKey(w, r); !ok {
 			return
 		}
-		var body v2BatchBody
-		if !decodeV2Body(w, r, &body, 256*1024) {
+		var body BatchBody
+		if !decodeBody(w, r, &body, 256*1024) {
 			return
 		}
 		if len(body.Items) == 0 || len(body.Items) > 100 {
@@ -279,16 +279,16 @@ func v2PublicationBatch(deps Dependencies) http.HandlerFunc {
 		}
 		result, err := deps.ReviewService.Batch(r.Context(), principal, r.PathValue("workspaceId"), body.Decision, body.Items)
 		if err != nil {
-			v2ServiceError(w, err)
+			ServiceError(w, err)
 			return
 		}
 		writeData(w, r, http.StatusOK, result)
 	}
 }
 
-func v2PublicationComments(deps Dependencies) http.HandlerFunc {
+func PublicationComments(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		principal, ok := v2Principal(w, r, deps)
+		principal, ok := sessionPrincipal(w, r, deps)
 		if !ok {
 			return
 		}
@@ -298,23 +298,23 @@ func v2PublicationComments(deps Dependencies) http.HandlerFunc {
 		case http.MethodGet:
 			comments, _, err := deps.ReviewService.ListComments(r.Context(), principal, workspaceID, requestID, "", 100)
 			if err != nil {
-				v2ServiceError(w, err)
+				ServiceError(w, err)
 				return
 			}
 			writeData(w, r, http.StatusOK, map[string]any{"items": comments, "page": CursorPage{NextCursor: nil, HasMore: false}})
 		case http.MethodPost:
-			if _, ok := requireIdempotencyKeyV2(w, r); !ok {
+			if _, ok := requireIdempotencyKey(w, r); !ok {
 				return
 			}
 			var body struct {
 				Body string `json:"body"`
 			}
-			if !decodeV2Body(w, r, &body, 64*1024) {
+			if !decodeBody(w, r, &body, 64*1024) {
 				return
 			}
 			comment, err := deps.ReviewService.AddComment(r.Context(), principal, workspaceID, requestID, body.Body)
 			if err != nil {
-				v2ServiceError(w, err)
+				ServiceError(w, err)
 				return
 			}
 			writeData(w, r, http.StatusCreated, comment)
@@ -326,24 +326,24 @@ func v2PublicationComments(deps Dependencies) http.HandlerFunc {
 
 // ---------- asset draft + lifecycle ----------
 
-// v2AssetDraftPatchBody extends the draft autosave patch with the phase 2
+// AssetDraftPatchBody extends the draft autosave patch with the phase 2
 // tag_ids replacement set. Omitting tag_ids keeps the current tags; passing a
 // list (possibly empty) reconciles the draft tag set.
-type v2AssetDraftPatchBody struct {
+type AssetDraftPatchBody struct {
 	asset.DraftPatch
 	TagIDs *[]string `json:"tag_ids"`
 }
 
-// v2AssetDraftResponse is the draft representation with its tag summaries
-// attached; the v2 contract never returns bare tag id strings.
-type v2AssetDraftResponse struct {
+// AssetDraftResponse is the draft representation with its tag summaries
+// attached; the contract never returns bare tag id strings.
+type AssetDraftResponse struct {
 	asset.Draft
 	Tags []tag.Summary `json:"tags"`
 }
 
-func v2AssetDraft(deps Dependencies) http.HandlerFunc {
+func AssetDraft(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		principal, ok := v2Principal(w, r, deps)
+		principal, ok := sessionPrincipal(w, r, deps)
 		if !ok {
 			return
 		}
@@ -355,26 +355,26 @@ func v2AssetDraft(deps Dependencies) http.HandlerFunc {
 		case http.MethodGet:
 			draft, err := deps.MemberAssetService.GetDraft(r.Context(), principal, assetID)
 			if err != nil {
-				v2ServiceError(w, err)
+				ServiceError(w, err)
 				return
 			}
 			tags, err := deps.MemberAssetService.DraftTags(r.Context(), principal, assetID)
 			if err != nil {
-				v2ServiceError(w, err)
+				ServiceError(w, err)
 				return
 			}
 			writeETag(w, `"`+itoa(draft.Revision)+`"`)
-			writeData(w, r, http.StatusOK, v2AssetDraftResponse{Draft: draft, Tags: tags})
+			writeData(w, r, http.StatusOK, AssetDraftResponse{Draft: draft, Tags: tags})
 		case http.MethodPatch:
 			// The draft revision contract: a missing If-Match is 428, a stale
 			// revision is 412 (enforced by the draft service).
-			expected, ok := requireIfMatchV2(w, r)
+			expected, ok := requireIfMatch(w, r)
 			if !ok {
 				return
 			}
 			expected = expectedRevisionFromIfMatch(r)
-			var body v2AssetDraftPatchBody
-			if !decodeV2Body(w, r, &body, 4<<20) {
+			var body AssetDraftPatchBody
+			if !decodeBody(w, r, &body, 4<<20) {
 				return
 			}
 			patch := body.DraftPatch
@@ -389,7 +389,7 @@ func v2AssetDraft(deps Dependencies) http.HandlerFunc {
 				// Content-only (or empty) patch: unchanged phase 0 behavior.
 				draft, err = deps.MemberAssetService.AutosaveDraft(r.Context(), principal, assetID, expected, patch)
 				if err != nil {
-					v2ServiceError(w, err)
+					ServiceError(w, err)
 					return
 				}
 			} else {
@@ -401,14 +401,14 @@ func v2AssetDraft(deps Dependencies) http.HandlerFunc {
 				// revision) — hence expectedRevision="" for the mixed case.
 				if hasFields {
 					if _, err = deps.MemberAssetService.AutosaveDraft(r.Context(), principal, assetID, expected, patch); err != nil {
-						v2ServiceError(w, err)
+						ServiceError(w, err)
 						return
 					}
 					expected = ""
 				}
 				target, targetErr := deps.MemberAssetService.Get(r.Context(), principal, assetID)
 				if targetErr != nil {
-					v2ServiceError(w, targetErr)
+					ServiceError(w, targetErr)
 					return
 				}
 				entries := make([]asset.DraftTagEntry, 0, len(*body.TagIDs))
@@ -417,7 +417,7 @@ func v2AssetDraft(deps Dependencies) http.HandlerFunc {
 				}
 				draft, summaries, err = deps.MemberAssetService.SetDraftTags(r.Context(), principal, target.WorkspaceID, assetID, expected, entries)
 				if err != nil {
-					v2ServiceError(w, err)
+					ServiceError(w, err)
 					return
 				}
 			}
@@ -425,26 +425,26 @@ func v2AssetDraft(deps Dependencies) http.HandlerFunc {
 				// An untouched tag set still reports its current summaries.
 				summaries, err = deps.MemberAssetService.DraftTags(r.Context(), principal, assetID)
 				if err != nil {
-					v2ServiceError(w, err)
+					ServiceError(w, err)
 					return
 				}
 			}
 			writeETag(w, `"`+itoa(draft.Revision)+`"`)
-			writeData(w, r, http.StatusOK, v2AssetDraftResponse{Draft: draft, Tags: summaries})
+			writeData(w, r, http.StatusOK, AssetDraftResponse{Draft: draft, Tags: summaries})
 		default:
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
 		}
 	}
 }
 
-type v2CommitBody struct {
-	// draft_revision is an integer in the v2 contract (openapi-v2.yaml).
+type CommitBody struct {
+	// draft_revision is an integer in the contract (openapi.yaml).
 	DraftRevision *int64 `json:"draft_revision"`
 }
 
-func v2CommitDraft(deps Dependencies) http.HandlerFunc {
+func CommitDraft(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		principal, ok := v2Principal(w, r, deps)
+		principal, ok := sessionPrincipal(w, r, deps)
 		if !ok {
 			return
 		}
@@ -452,11 +452,11 @@ func v2CommitDraft(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
 			return
 		}
-		if _, ok := requireIdempotencyKeyV2(w, r); !ok {
+		if _, ok := requireIdempotencyKey(w, r); !ok {
 			return
 		}
-		var body v2CommitBody
-		if !decodeV2Body(w, r, &body, 16*1024) {
+		var body CommitBody
+		if !decodeBody(w, r, &body, 16*1024) {
 			return
 		}
 		if body.DraftRevision == nil {
@@ -466,27 +466,27 @@ func v2CommitDraft(deps Dependencies) http.HandlerFunc {
 		assetID := r.PathValue("assetId")
 		target, err := deps.MemberAssetService.Get(r.Context(), principal, assetID)
 		if err != nil {
-			v2ServiceError(w, err)
+			ServiceError(w, err)
 			return
 		}
 		result, err := deps.MemberAssetService.CommitDraft(r.Context(), principal, target.WorkspaceID, assetID,
 			strconv.FormatInt(*body.DraftRevision, 10))
 		if err != nil {
-			v2ServiceError(w, err)
+			ServiceError(w, err)
 			return
 		}
 		version, err := deps.MemberAssetService.GetVersion(r.Context(), principal, result.VersionID)
 		if err != nil {
-			v2ServiceError(w, err)
+			ServiceError(w, err)
 			return
 		}
 		writeData(w, r, http.StatusCreated, version)
 	}
 }
 
-func v2PublishAsset(deps Dependencies) http.HandlerFunc {
+func memberPublishAsset(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		principal, ok := v2Principal(w, r, deps)
+		principal, ok := sessionPrincipal(w, r, deps)
 		if !ok {
 			return
 		}
@@ -494,26 +494,26 @@ func v2PublishAsset(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
 			return
 		}
-		if _, ok := requireIdempotencyKeyV2(w, r); !ok {
+		if _, ok := requireIdempotencyKey(w, r); !ok {
 			return
 		}
 		var body struct {
 			DraftRevision string `json:"draft_revision"`
 		}
 		if r.ContentLength != 0 {
-			if !decodeV2Body(w, r, &body, 16*1024) {
+			if !decodeBody(w, r, &body, 16*1024) {
 				return
 			}
 		}
 		assetID := r.PathValue("assetId")
 		target, err := deps.MemberAssetService.Get(r.Context(), principal, assetID)
 		if err != nil {
-			v2ServiceError(w, err)
+			ServiceError(w, err)
 			return
 		}
-		result, err := deps.MemberAssetService.Publish(r.Context(), principal, target.WorkspaceID, assetID, body.DraftRevision, requireIdempotencyKeyV2Value(r))
+		result, err := deps.MemberAssetService.Publish(r.Context(), principal, target.WorkspaceID, assetID, body.DraftRevision, requireIdempotencyKeyValue(r))
 		if err != nil {
-			v2ServiceError(w, err)
+			ServiceError(w, err)
 			return
 		}
 		writeETag(w, result.ETag)
@@ -521,13 +521,13 @@ func v2PublishAsset(deps Dependencies) http.HandlerFunc {
 	}
 }
 
-func requireIdempotencyKeyV2Value(r *http.Request) string {
+func requireIdempotencyKeyValue(r *http.Request) string {
 	return r.Header.Get("Idempotency-Key")
 }
 
-func v2ArchiveAsset(deps Dependencies) http.HandlerFunc {
+func memberArchiveAsset(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		principal, ok := v2Principal(w, r, deps)
+		principal, ok := sessionPrincipal(w, r, deps)
 		if !ok {
 			return
 		}
@@ -535,17 +535,17 @@ func v2ArchiveAsset(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
 			return
 		}
-		if _, ok := requireIdempotencyKeyV2(w, r); !ok {
+		if _, ok := requireIdempotencyKey(w, r); !ok {
 			return
 		}
 		assetID := r.PathValue("assetId")
 		if _, err := deps.MemberAssetService.Get(r.Context(), principal, assetID); err != nil {
-			v2ServiceError(w, err)
+			ServiceError(w, err)
 			return
 		}
-		result, err := deps.MemberAssetService.Archive(r.Context(), principal, assetID, requireIdempotencyKeyV2Value(r))
+		result, err := deps.MemberAssetService.Archive(r.Context(), principal, assetID, requireIdempotencyKeyValue(r))
 		if err != nil {
-			v2ServiceError(w, err)
+			ServiceError(w, err)
 			return
 		}
 		writeETag(w, result.ETag)
@@ -553,9 +553,9 @@ func v2ArchiveAsset(deps Dependencies) http.HandlerFunc {
 	}
 }
 
-func v2RestoreAsset(deps Dependencies) http.HandlerFunc {
+func memberRestoreAsset(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		principal, ok := v2Principal(w, r, deps)
+		principal, ok := sessionPrincipal(w, r, deps)
 		if !ok {
 			return
 		}
@@ -563,17 +563,17 @@ func v2RestoreAsset(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
 			return
 		}
-		if _, ok := requireIdempotencyKeyV2(w, r); !ok {
+		if _, ok := requireIdempotencyKey(w, r); !ok {
 			return
 		}
 		assetID := r.PathValue("assetId")
 		if _, err := deps.MemberAssetService.Get(r.Context(), principal, assetID); err != nil {
-			v2ServiceError(w, err)
+			ServiceError(w, err)
 			return
 		}
-		result, err := deps.MemberAssetService.Restore(r.Context(), principal, assetID, requireIdempotencyKeyV2Value(r))
+		result, err := deps.MemberAssetService.Restore(r.Context(), principal, assetID, requireIdempotencyKeyValue(r))
 		if err != nil {
-			v2ServiceError(w, err)
+			ServiceError(w, err)
 			return
 		}
 		writeETag(w, result.ETag)
@@ -581,9 +581,9 @@ func v2RestoreAsset(deps Dependencies) http.HandlerFunc {
 	}
 }
 
-func v2ConfirmVersion(deps Dependencies) http.HandlerFunc {
+func ConfirmVersion(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		principal, ok := v2Principal(w, r, deps)
+		principal, ok := sessionPrincipal(w, r, deps)
 		if !ok {
 			return
 		}
@@ -591,12 +591,12 @@ func v2ConfirmVersion(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
 			return
 		}
-		if _, ok := requireIdempotencyKeyV2(w, r); !ok {
+		if _, ok := requireIdempotencyKey(w, r); !ok {
 			return
 		}
-		version, err := deps.MemberAssetService.ConfirmVersion(r.Context(), principal, r.PathValue("versionId"), requireIdempotencyKeyV2Value(r))
+		version, err := deps.MemberAssetService.ConfirmVersion(r.Context(), principal, r.PathValue("versionId"), requireIdempotencyKeyValue(r))
 		if err != nil {
-			v2ServiceError(w, err)
+			ServiceError(w, err)
 			return
 		}
 		writeData(w, r, http.StatusCreated, version)

@@ -151,7 +151,7 @@ type Response struct {
 	Index              *IndexInfo `json:"index,omitempty"`
 }
 
-// ValidatedReference is the outcome of POST /api/open/v2/references/validate.
+// ValidatedReference is the outcome of POST /api/open/references/validate.
 type ValidatedReference struct {
 	CitationRef    string `json:"citation_ref"`
 	AssetID        string `json:"asset_id"`

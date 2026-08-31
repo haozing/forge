@@ -365,7 +365,7 @@ func collectMemberRecords(ctx context.Context, rows pgx.Rows) ([]memberRecord, e
 }
 
 // resolveMemberRecord supports both addressing schemes of
-// /api/frontend/workspace-members/{memberId}: the internal
+// /api/workspace-members/{memberId}: the internal
 // content.workspace_members.id and the user id that every list endpoint
 // exposes. The caller still has to hold admin rights in exactly the
 // workspace the resolved row belongs to.

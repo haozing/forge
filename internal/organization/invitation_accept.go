@@ -132,7 +132,7 @@ func (s InvitationService) Accept(ctx context.Context, input AcceptInput) (Accep
 		return AcceptResult{}, err
 	}
 	// The email must still be free (accept raced with a direct registration
-	// path; registration only happens through invitations in v2).
+	// path; registration only happens through invitations).
 	var taken bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM identity.users WHERE email = $1)`, email).Scan(&taken); err != nil {
 		return AcceptResult{}, err

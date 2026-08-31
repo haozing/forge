@@ -7,7 +7,7 @@ import (
 	"agentchunzhi/internal/deletion"
 )
 
-func assetResourceFinal(deps Dependencies) http.HandlerFunc {
+func assetResource(deps Dependencies) http.HandlerFunc {
 	get := getMemberAsset(deps)
 	patch := patchMemberAsset(deps)
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -50,7 +50,7 @@ func assetResourceFinal(deps Dependencies) http.HandlerFunc {
 	}
 }
 
-func assetVersionCollectionFinal(deps Dependencies) http.HandlerFunc {
+func assetVersionCollection(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		principal, ok := requireMemberSession(w, r, deps)
 		if !ok {
@@ -70,7 +70,7 @@ func assetVersionCollectionFinal(deps Dependencies) http.HandlerFunc {
 	}
 }
 
-func assetVersionResourceFinal(deps Dependencies) http.HandlerFunc {
+func assetVersionResource(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		principal, ok := requireMemberSession(w, r, deps)
 		if !ok {
@@ -91,44 +91,7 @@ func assetVersionResourceFinal(deps Dependencies) http.HandlerFunc {
 	}
 }
 
-func restoreAssetFinal(deps Dependencies) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
-			return
-		}
-		principal, ok := requireMemberSession(w, r, deps)
-		if !ok {
-			return
-		}
-		if _, ok := requestIdempotencyKey(w, r); !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
-			return
-		}
-		item, err := deps.MemberAssetService.Get(r.Context(), principal, r.PathValue("assetId"))
-		if err != nil {
-			writeMemberAssetError(w, err, "asset_load_failed")
-			return
-		}
-		if _, err := deps.WorkspacePolicy.Require(r.Context(), principal, item.WorkspaceID, item.ResourceModelID, "asset.write"); err != nil {
-			writeError(w, http.StatusForbidden, "permission_denied")
-			return
-		}
-		if _, err := deps.Store.Pool.Exec(r.Context(), `UPDATE asset.assets SET deleted_at = NULL, publication_status = 'draft', updated_at = now() WHERE organization_id = $1::uuid AND id = $2::uuid`, principal.OrganizationID, item.ID); err != nil {
-			writeError(w, http.StatusInternalServerError, "asset_restore_failed")
-			return
-		}
-		result, err := deps.MemberAssetService.Get(r.Context(), principal, item.ID)
-		if err != nil {
-			writeMemberAssetError(w, err, "asset_load_failed")
-			return
-		}
-		writeETag(w, result.ETag)
-		writeJSON(w, http.StatusOK, result)
-	}
-}
-
-func duplicateAssetFinal(deps Dependencies) http.HandlerFunc {
+func duplicateAsset(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")

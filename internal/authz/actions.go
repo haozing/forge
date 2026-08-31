@@ -1,6 +1,6 @@
 package authz
 
-// Phase 0 v2 contract: every permission decision uses one of these action
+// Phase 0 contract: every permission decision uses one of these action
 // constants through WorkspacePolicy / OrganizationPolicy. Handlers, services
 // and repositories must not compare role strings or invent ad-hoc action names.
 const (
@@ -39,7 +39,7 @@ const (
 	ActionAuditRead                 = "audit.read"
 )
 
-// AllActions is the closed catalog of v2 actions. Policy implementations must
+// AllActions is the closed catalog of actions. Policy implementations must
 // deny unknown actions; the catalog exists so tests can enumerate the matrix.
 var AllActions = []string{
 	ActionOrganizationRead, ActionOrganizationManage,

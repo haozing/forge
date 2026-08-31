@@ -84,7 +84,7 @@ func TestGetAgentOnboardingPackageIntegration(t *testing.T) {
 	if pack.RuntimeMode != "workflow" || pack.WorkflowKey != "asset_prepare" {
 		t.Fatalf("runtime block wrong: %s/%s", pack.RuntimeMode, pack.WorkflowKey)
 	}
-	if pack.OpenAPIURL != "/openapi-open-v1.yaml" || pack.Auth.Type != "Bearer" || pack.Auth.Header != "Authorization" {
+	if pack.OpenAPIURL != "/openapi.yaml" || pack.Auth.Type != "Bearer" || pack.Auth.Header != "Authorization" {
 		t.Fatalf("docs/auth block wrong: %s %+v", pack.OpenAPIURL, pack.Auth)
 	}
 	if len(pack.Capabilities) != 2 || pack.Capabilities[0] != "query.read" || pack.Capabilities[1] != "reference.read" {
@@ -103,7 +103,7 @@ func TestGetAgentOnboardingPackageIntegration(t *testing.T) {
 	if allowed["assets.create"] || allowed["assets.update"] || allowed["assets.publish"] || allowed["assets.archive"] || allowed["tasks"] {
 		t.Fatalf("operations beyond grants must stay denied: %#v", allowed)
 	}
-	for _, fragment := range []string{"https://kb.example.com/api/open/v1/query", "Authorization: Bearer"} {
+	for _, fragment := range []string{"https://kb.example.com/api/open/query", "Authorization: Bearer"} {
 		if !strings.Contains(pack.SampleCurl, fragment) {
 			t.Fatalf("sample curl missing %q: %s", fragment, pack.SampleCurl)
 		}

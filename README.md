@@ -25,7 +25,7 @@ Copy-Item .env.example .env
 
 # 首次或基线变化后：从空库重建（破坏性，只作用于显式指定的开发库）
 docker compose up -d postgres
-./scripts/reset-v2-database.ps1 -Database agentchunzhi -ConfirmReset
+./scripts/reset-database.ps1 -Database agentchunzhi -ConfirmReset
 
 # 创建组织与首位组织管理员（bootstrap 只创建数据，不执行迁移）
 $env:ORG_SLUG="acme"; $env:ORG_NAME="Acme"; $env:ADMIN_EMAIL="admin@example.com"
@@ -67,19 +67,19 @@ go test ./...
 curl.exe -X POST `
   -H 'Cookie: agent_session=<member-session-cookie>' `
   -H 'Idempotency-Key: choose-agent-20260826-001' `
-  http://localhost:8080/api/frontend/agent-applications/<application-id>/sessions
+  http://localhost:8080/api/agent-applications/<application-id>/sessions
 ```
 
-RAG 应用可直接调用 `/api/frontend/agent-sessions/{sessionId}/chat` 或 `/chat/stream`。ReAct 应用使用持久化运行接口：
+RAG 应用可直接调用 `/api/agent-sessions/{sessionId}/chat` 或 `/chat/stream`。ReAct 应用使用持久化运行接口：
 
 ```text
-POST /api/frontend/agent-sessions/{sessionId}/runs
-GET  /api/frontend/agent-runs/{runId}/events?after={sequence}
-POST /api/frontend/agent-runs/{runId}/resume
-POST /api/frontend/agent-runs/{runId}/cancel
+POST /api/agent-sessions/{sessionId}/runs
+GET  /api/agent-runs/{runId}/events?after={sequence}
+POST /api/agent-runs/{runId}/resume
+POST /api/agent-runs/{runId}/cancel
 ```
 
-高风险 Tool（发布、归档、删除、导出）会创建审批 Interaction；恢复时重新校验权限、版本、checksum 和模型 revision。普通 Agent 任务通过 `/api/open/v1/agent/tasks` 创建，由 Worker 执行 `asset_prepare` Graph，结果只生成 `internal` candidate，不会自动发布。
+高风险 Tool（发布、归档、删除、导出）会创建审批 Interaction；恢复时重新校验权限、版本、checksum 和模型 revision。普通 Agent 任务通过 `/api/open/agent-tasks` 创建，由 Worker 执行 `asset_prepare` Graph，结果只生成 `internal` candidate，不会自动发布。
 
 ## 外部资源
 
@@ -89,9 +89,7 @@ POST /api/frontend/agent-runs/{runId}/cancel
 
 ## API 文档
 
-- [`openapi-frontend-v1.yaml`](openapi-frontend-v1.yaml)：成员会话、聊天、持久化运行和消息。
-- [`openapi-admin-v1.yaml`](openapi-admin-v1.yaml)：ModelEndpoint、Agent 用户、AgentApplication、密钥和策略。
-- [`openapi-open-v1.yaml`](openapi-open-v1.yaml)：Agent 用户调用的查询、资产和任务业务 API。
+- [`openapi.yaml`](openapi.yaml)：唯一权威契约（87 路径，与路由注册表双向对照测试锁定）。路由为单一无版本树：成员面 `/api`、匿名/公开面 `/api/public`、开放 API 面 `/api/open`、运维面 `/api/admin`。
 - [`docs/Eino内置Agent完整实现方案.md`](docs/Eino内置Agent完整实现方案.md)：最终架构、状态机、工具安全和部署方案。
 
 ## 备份与验收

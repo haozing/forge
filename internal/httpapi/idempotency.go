@@ -61,7 +61,7 @@ func (writer *bufferedResponseWriter) Write(value []byte) (int, error) {
 	return writer.body.Write(value)
 }
 
-func frontendIdempotency(deps Dependencies, next http.Handler) http.Handler {
+func httpIdempotency(deps Dependencies, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !requiresHTTPIdempotency(r) || deps.Store == nil || deps.Store.Pool == nil {
 			next.ServeHTTP(w, r)
@@ -69,12 +69,12 @@ func frontendIdempotency(deps Dependencies, next http.Handler) http.Handler {
 		}
 		principal, err := deps.SessionService.Authenticate(r.Context(), r)
 		if err != nil && strings.HasPrefix(r.URL.Path, "/api/open/") {
-			// Open v2 routes authenticate technical identities with API keys;
+			// Open routes authenticate technical identities with API keys;
 			// they take part in the same replay contract under the key subject.
 			principal, err = deps.Authenticator.Authenticate(r.Context(), r)
 		}
 		if err != nil {
-			// Anonymous surfaces (public v2) and unauthenticated requests are
+			// Anonymous surfaces (public) and unauthenticated requests are
 			// not covered by the shared idempotency table: the anonymous
 			// flows' replay boundary is the one-time token consumption, and
 			// authentication failures belong to the handlers.
@@ -190,13 +190,12 @@ func executeWithRecover(next func(), operation, key string) (panicked bool) {
 
 func requiresHTTPIdempotency(r *http.Request) bool {
 	path := r.URL.Path
-	// Member frontend (legacy), v2 member routes and the open v2 technical
-	// surface share the replay contract. Public v2 stays excluded: anonymous
-	// flows have no subject row, and their one-time tokens are the idempotency
-	// boundary.
+	// The member surface (/api) and the open technical surface (/api/open)
+	// share the replay contract. The anonymous public surface stays excluded:
+	// its flows have no subject row, and their one-time tokens are the
+	// idempotency boundary. Operator admin scripts are excluded as well.
 	//
-	// Webhook double-layer replay semantics (/api/open/v2/hooks/*): when a
-	// retried webhook hits this middleware with the same Idempotency-Key, the
+	// Webhook double-layer replay semantics (/api/open/hooks/*): when a
 	// stored response is replayed verbatim (original status plus the
 	// Idempotency-Replayed: true header). When the request passes through to
 	// the business layer instead (e.g. the middleware reservation was released
@@ -204,9 +203,9 @@ func requiresHTTPIdempotency(r *http.Request) bool {
 	// applies and answers 200 with a "replayed": true field. The two layers
 	// never combine: a middleware replay short-circuits before the business
 	// layer runs, so at most one of the two replay markers is ever produced.
-	covered := strings.HasPrefix(path, "/api/frontend/") ||
-		strings.HasPrefix(path, "/api/v2/") ||
-		strings.HasPrefix(path, "/api/open/v2/")
+	covered := strings.HasPrefix(path, "/api/") &&
+		!strings.HasPrefix(path, "/api/public/") &&
+		!strings.HasPrefix(path, "/api/admin/")
 	if !covered {
 		return false
 	}
@@ -228,12 +227,10 @@ func requiresHTTPIdempotency(r *http.Request) bool {
 // idempotencyOperation namespaces the stored key per surface and request.
 func idempotencyOperation(r *http.Request) string {
 	switch {
-	case strings.HasPrefix(r.URL.Path, "/api/v2/"):
-		return "v2.http:" + r.Method + ":" + r.URL.Path
 	case strings.HasPrefix(r.URL.Path, "/api/open/"):
 		return "open.http:" + r.Method + ":" + r.URL.Path
 	default:
-		return "frontend.http:" + r.Method + ":" + r.URL.Path
+		return "api.http:" + r.Method + ":" + r.URL.Path
 	}
 }
 

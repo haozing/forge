@@ -2,7 +2,7 @@ package authz
 
 import "errors"
 
-// Phase 0 v2 contract: workspace collaboration roles. There is no workspace
+// Phase 0 contract: workspace collaboration roles. There is no workspace
 // owner and no workspace member role; Organization is the owner tier and
 // identity.users.organization_role carries the organization-level identity.
 const (
@@ -30,7 +30,7 @@ var AllWorkspaceRoles = []string{
 	WorkspaceRoleViewer,
 }
 
-// ValidWorkspaceRole reports whether the value is one of the four v2 roles.
+// ValidWorkspaceRole reports whether the value is one of the four roles.
 // Unknown values must be rejected, never downgraded to a read-only role.
 func ValidWorkspaceRole(role string) bool {
 	switch role {
@@ -41,7 +41,7 @@ func ValidWorkspaceRole(role string) bool {
 	}
 }
 
-// ValidOrganizationRole reports whether the value is a v2 organization role.
+// ValidOrganizationRole reports whether the value is a organization role.
 func ValidOrganizationRole(role string) bool {
 	switch role {
 	case OrganizationRoleAdmin, OrganizationRoleMember:
@@ -134,7 +134,7 @@ var memberRoleActions = map[string]map[string]bool{
 // Legacy-domain actions below are used only by routes scheduled for retirement
 // in stages 4-6 (containers, conversations, automation, attachments, stats).
 // They are granted through this same matrix so every role question still has a
-// single source of truth; v2 domains never consult them.
+// single source of truth; domains never consult them.
 const (
 	ActionContainerManage = "container.manage"
 	ActionConversationUse = "conversation.use"

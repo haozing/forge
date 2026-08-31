@@ -22,7 +22,7 @@ import (
 	"github.com/google/uuid"
 )
 
-const idempotencyTestPath = "/api/frontend/workspaces/00000000-0000-4000-8000-00000000000f/assets"
+const idempotencyTestPath = "/api/workspaces/00000000-0000-4000-8000-00000000000f/assets"
 
 // idempotencyTestScope provisions a live member session and removes every
 // idempotency_keys row the test reserved.
@@ -86,7 +86,7 @@ func (s *idempotencyTestScope) trackKey(key string) {
 // handler mirrors the production middleware order: withRequestID is the
 // outermost wrapper, so the replayed response keeps the current request id.
 func (s *idempotencyTestScope) handler(next http.Handler) http.Handler {
-	return withRequestID(frontendIdempotency(s.deps, next))
+	return withRequestID(httpIdempotency(s.deps, next))
 }
 
 func (s *idempotencyTestScope) request(key, body, requestID string) *http.Request {

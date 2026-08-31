@@ -121,7 +121,7 @@ func (s Service) Create(ctx context.Context, principal auth.Principal, workspace
 	if input.Visibility == "" {
 		input.Visibility = "workspace"
 	}
-	// The v2 visibility vocabulary is exactly workspace/organization/public.
+	// The visibility vocabulary is exactly workspace/organization/public.
 	if input.Visibility != "workspace" && input.Visibility != "organization" && input.Visibility != "public" {
 		return Item{}, ErrInvalidInput
 	}

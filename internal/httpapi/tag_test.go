@@ -14,8 +14,8 @@ import (
 	"agentchunzhi/internal/tag"
 )
 
-// TestV2TagErrorMapping pins the tag domain error → status/code contract.
-func TestV2TagErrorMapping(t *testing.T) {
+// TestTagErrorMapping pins the tag domain error → status/code contract.
+func TestTagErrorMapping(t *testing.T) {
 	cases := []struct {
 		name   string
 		err    error
@@ -37,7 +37,7 @@ func TestV2TagErrorMapping(t *testing.T) {
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
 			recorder := httptest.NewRecorder()
-			v2TagError(recorder, fmt.Errorf("wrapped: %w", testCase.err))
+			TagError(recorder, fmt.Errorf("wrapped: %w", testCase.err))
 			if recorder.Code != testCase.status {
 				t.Fatalf("status = %d, want %d", recorder.Code, testCase.status)
 			}
@@ -47,38 +47,35 @@ func TestV2TagErrorMapping(t *testing.T) {
 		})
 	}
 	recorder := httptest.NewRecorder()
-	v2TagError(recorder, nil)
+	TagError(recorder, nil)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("nil error must not write, status = %d", recorder.Code)
 	}
 	recorder = httptest.NewRecorder()
-	v2TagError(recorder, errors.New("boom"))
+	TagError(recorder, errors.New("boom"))
 	if recorder.Code != http.StatusInternalServerError {
 		t.Fatalf("unknown error must map to 500, status = %d", recorder.Code)
 	}
 }
 
-// TestV2TagRoutesRegistered keeps the phase 2 tag surface wired in the single
+// TestTagRoutesRegistered keeps the phase 2 tag surface wired in the single
 // route registry.
-func TestV2TagRoutesRegistered(t *testing.T) {
+func TestTagRoutesRegistered(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join(".", "router_groups.go"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	source := string(raw)
 	for _, required := range []string{
-		`"/api/v2/workspaces/{workspaceId}/tags"`,
-		`"/api/v2/workspaces/{workspaceId}/tags/{tagId}"`,
-		`"/api/v2/workspaces/{workspaceId}/tags/{tagId}/archive"`,
-		`"/api/v2/workspaces/{workspaceId}/tags/{tagId}/restore"`,
-		`"/api/v2/workspaces/{workspaceId}/tag-facets"`,
-		`"/api/open/v2/hooks/assets"`,
+		`"/api/workspaces/{workspaceId}/tags"`,
+		`"/api/workspaces/{workspaceId}/tags/{tagId}"`,
+		`"/api/workspaces/{workspaceId}/tags/{tagId}/archive"`,
+		`"/api/workspaces/{workspaceId}/tags/{tagId}/restore"`,
+		`"/api/workspaces/{workspaceId}/tag-facets"`,
+		`"/api/open/hooks/assets"`,
 	} {
 		if !strings.Contains(source, required) {
-			t.Fatalf("v2 route %s must be registered", required)
+			t.Fatalf("route %s must be registered", required)
 		}
-	}
-	if strings.Contains(source, `"/api/open/v1/hooks/assets"`) {
-		t.Fatal("retired /api/open/v1/hooks/assets must not be registered")
 	}
 }

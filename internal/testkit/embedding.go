@@ -1,4 +1,4 @@
-// Package testkit provides deterministic test doubles for the retrieval v2
+// Package testkit provides deterministic test doubles for the retrieval
 // pipeline: a hash-based embedding provider and fake HTTP embedding/reranker
 // servers. Runtime code (cmd/, internal services) must never import this
 // package; it exists for tests only.

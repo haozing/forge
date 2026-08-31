@@ -106,7 +106,7 @@ func validID(value string) bool {
 
 // require enforces the workspace policy for the action. Policy denials
 // collapse into ErrForbidden (the HTTP layer already distinguished unknown
-// workspace 404 from denial 403 through requireWorkspaceActionV2); every
+// workspace 404 from denial 403 through requireWorkspaceAction); every
 // site method calls it before touching SQL.
 func (s Service) require(ctx context.Context, principal auth.Principal, workspaceID, action string) error {
 	if principal.UserType != auth.UserTypeMember || s.Store == nil || s.Store.Pool == nil {

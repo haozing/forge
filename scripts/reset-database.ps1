@@ -1,4 +1,4 @@
-# reset-v2-database.ps1 — destructive development database rebuild.
+# reset-database.ps1 — destructive development database rebuild.
 # Phase 0-6 only: the v2 baseline is rebuilt from an empty database after every
 # baseline change. Never point this at a shared or production database.
 param(
@@ -55,7 +55,7 @@ if ($LASTEXITCODE -ne 0) { throw "migrate failed" }
 # Schema contract verification: run the contract spot checks and require the
 # all-clear marker with zero fail rows; a missing object or wrong database
 # fails the psql run itself through ON_ERROR_STOP.
-$verifySqlPath = Join-Path $PSScriptRoot "verify-v2-schema.sql"
+$verifySqlPath = Join-Path $PSScriptRoot "verify-schema.sql"
 $verifySql = Get-Content $verifySqlPath -Raw
 $verifyOutput = docker exec $container psql -v ON_ERROR_STOP=1 -U $user -d $Database -c $verifySql
 if ($LASTEXITCODE -ne 0) { throw "schema contract verification failed to run" }

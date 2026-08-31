@@ -1,6 +1,6 @@
 package httpapi
 
-// v2_identity.go — phase 1 member identity surface: email login, session
+// identity.go — phase 1 member identity surface: email login, session
 // management, /me profile and preferences, password change/reset and the
 // anonymous invitation resolve/accept endpoints. Handlers authenticate, parse,
 // call domain services and map errors; there is no direct SQL here.
@@ -23,9 +23,10 @@ import (
 // ---------- shared middleware and helpers ----------
 
 // withOriginPolicy enforces the CSRF Origin allowlist for every unsafe
-// request under /api/v2 and /api/public/v2: cookie-authenticated writes must
-// never succeed from a foreign origin. Missing or non-matching Origin headers
-// are rejected; GET/HEAD/OPTIONS stay open.
+// request on the cookie-authenticated surfaces (/api and /api/public):
+// cookie-authenticated writes must never succeed from a foreign origin.
+// The API-key surfaces (/api/open, /api/admin) are out of scope. Missing or
+// non-matching Origin headers are rejected; GET/HEAD/OPTIONS stay open.
 func withOriginPolicy(allowed []string, next http.Handler) http.Handler {
 	allowedSet := make(map[string]struct{}, len(allowed))
 	for _, origin := range allowed {
@@ -39,7 +40,7 @@ func withOriginPolicy(allowed []string, next http.Handler) http.Handler {
 		return next
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if unsafeOriginCheckedMethod(r.Method) && v2OriginCheckedPath(r.URL.Path) {
+		if unsafeOriginCheckedMethod(r.Method) && OriginCheckedPath(r.URL.Path) {
 			origin := strings.TrimSpace(r.Header.Get("Origin"))
 			if _, ok := allowedSet[origin]; !ok {
 				w.Header().Add("Vary", "Origin")
@@ -60,8 +61,11 @@ func unsafeOriginCheckedMethod(method string) bool {
 	}
 }
 
-func v2OriginCheckedPath(path string) bool {
-	return strings.HasPrefix(path, "/api/v2/") || strings.HasPrefix(path, "/api/public/v2/")
+func OriginCheckedPath(path string) bool {
+	if strings.HasPrefix(path, "/api/open/") || strings.HasPrefix(path, "/api/admin/") {
+		return false
+	}
+	return strings.HasPrefix(path, "/api/")
 }
 
 // effectiveClientAddr derives the address used for rate limiting keys.
@@ -103,10 +107,10 @@ func firstForwardedFor(r *http.Request) string {
 	return first
 }
 
-// v2MemberSession authenticates a member session and resolves the session id
+// requireWorkspaceSession authenticates a member session and resolves the session id
 // behind the cookie (needed by revocation commands and self-identification in
 // the session list). Member routes accept session cookies only.
-func v2MemberSession(w http.ResponseWriter, r *http.Request, deps Dependencies) (auth.Principal, string, bool) {
+func requireWorkspaceSession(w http.ResponseWriter, r *http.Request, deps Dependencies) (auth.Principal, string, bool) {
 	principal, err := deps.SessionService.Authenticate(r.Context(), r)
 	if err != nil {
 		writeError(w, http.StatusUnauthorized, "authentication_required")
@@ -124,10 +128,10 @@ func v2MemberSession(w http.ResponseWriter, r *http.Request, deps Dependencies) 
 	return principal, sessionID, true
 }
 
-// requireIfMatchV2 enforces the If-Match precondition on PATCH/PUT: missing
+// requireIfMatch enforces the If-Match precondition on PATCH/PUT: missing
 // answers 428 precondition_required. The value is returned verbatim (quotes
 // included); comparison sites use ifMatchWildcard to honor the "*" wildcard.
-func requireIfMatchV2(w http.ResponseWriter, r *http.Request) (string, bool) {
+func requireIfMatch(w http.ResponseWriter, r *http.Request) (string, bool) {
 	value := strings.TrimSpace(r.Header.Get("If-Match"))
 	if value == "" {
 		writeError(w, http.StatusPreconditionRequired, "precondition_required")
@@ -156,9 +160,9 @@ func writeRateLimited(w http.ResponseWriter, retryAfter float64) {
 	writeError(w, http.StatusTooManyRequests, "rate_limited")
 }
 
-// v2DomainError maps identity/organization/workspace domain errors onto the
-// v2 status/code contract.
-func v2DomainError(w http.ResponseWriter, err error) {
+// DomainError maps identity/organization/workspace domain errors onto the
+// HTTP status/code contract.
+func DomainError(w http.ResponseWriter, err error) {
 	switch {
 	case err == nil:
 		return
@@ -196,10 +200,10 @@ func v2DomainError(w http.ResponseWriter, err error) {
 	}
 }
 
-// v2AllowedActions lists the organization governance actions implied by the
+// AllowedActions lists the organization governance actions implied by the
 // caller's organization role. Workspace actions require membership and are
 // evaluated per workspace; they are not part of the profile.
-func v2AllowedActions(organizationRole string) []string {
+func AllowedActions(organizationRole string) []string {
 	actions := []string{authz.ActionOrganizationRead}
 	if organizationRole == authz.OrganizationRoleAdmin {
 		actions = append(actions,
@@ -215,26 +219,26 @@ func v2AllowedActions(organizationRole string) []string {
 	return actions
 }
 
-// v2MeResponse is the profile summary used by login, accept, /me and the
+// MeResponse is the profile summary used by login, accept, /me and the
 // invitation acceptance flows.
-type v2MeResponse struct {
+type MeResponse struct {
 	identity.Profile
-	Organization   v2OrganizationRef `json:"organization"`
+	Organization   OrganizationRef `json:"organization"`
 	AllowedActions []string          `json:"allowed_actions"`
 }
 
-type v2OrganizationRef struct {
+type OrganizationRef struct {
 	ID   string `json:"id"`
 	Slug string `json:"slug"`
 	Name string `json:"name"`
 }
 
-func v2OrganizationRefFrom(item organization.Organization) v2OrganizationRef {
-	return v2OrganizationRef{ID: item.ID, Slug: item.Slug, Name: item.Name}
+func OrganizationRefFrom(item organization.Organization) OrganizationRef {
+	return OrganizationRef{ID: item.ID, Slug: item.Slug, Name: item.Name}
 }
 
-// v2MeSummary assembles the authenticated member summary.
-func v2MeSummary(w http.ResponseWriter, r *http.Request, deps Dependencies, principal auth.Principal, status int) {
+// MeSummary assembles the authenticated member summary.
+func MeSummary(w http.ResponseWriter, r *http.Request, deps Dependencies, principal auth.Principal, status int) {
 	if deps.IdentityService == nil || deps.IdentityService.Store == nil || deps.IdentityService.Store.Pool == nil {
 		writeData(w, r, status, map[string]any{
 			"id": principal.UserID, "organization_id": principal.OrganizationID, "user_type": principal.UserType,
@@ -243,13 +247,13 @@ func v2MeSummary(w http.ResponseWriter, r *http.Request, deps Dependencies, prin
 	}
 	profile, err := deps.IdentityService.Me(r.Context(), principal.UserID)
 	if err != nil {
-		v2DomainError(w, err)
+		DomainError(w, err)
 		return
 	}
-	summary := v2MeResponse{Profile: profile, AllowedActions: v2AllowedActions(profile.OrganizationRole)}
+	summary := MeResponse{Profile: profile, AllowedActions: AllowedActions(profile.OrganizationRole)}
 	if deps.OrganizationService.Store != nil && deps.OrganizationService.Store.Pool != nil {
 		if org, orgErr := deps.OrganizationService.Get(r.Context(), principal); orgErr == nil {
-			summary.Organization = v2OrganizationRefFrom(org)
+			summary.Organization = OrganizationRefFrom(org)
 		}
 	}
 	writeETag(w, profile.ETag)
@@ -258,22 +262,22 @@ func v2MeSummary(w http.ResponseWriter, r *http.Request, deps Dependencies, prin
 
 // ---------- sessions ----------
 
-type v2LoginRequest struct {
+type LoginRequest struct {
 	Email    string `json:"email"`
 	Password string `json:"password"`
 }
 
-// v2CreateSession is the anonymous email login. Every attempt consumes both
+// CreateSession is the anonymous email login. Every attempt consumes both
 // the email and the IP throttle buckets before credentials are checked; the
 // email bucket is cleared on success. Failures answer a uniform 401.
-func v2CreateSession(deps Dependencies) http.HandlerFunc {
+func CreateSession(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
 			return
 		}
-		var input v2LoginRequest
-		if !decodeV2Body(w, r, &input, 16*1024) {
+		var input LoginRequest
+		if !decodeBody(w, r, &input, 16*1024) {
 			return
 		}
 		email, err := organization.NormalizeEmail(input.Email)
@@ -311,21 +315,21 @@ func v2CreateSession(deps Dependencies) http.HandlerFunc {
 			_ = deps.LoginThrottle.Clear(r.Context(), auth.BucketLoginEmail, email)
 		}
 		auth.SetSessionCookie(w, r, session)
-		v2MeSummary(w, r, deps, session.Principal, http.StatusOK)
+		MeSummary(w, r, deps, session.Principal, http.StatusOK)
 	}
 }
 
-// v2DeleteCurrentSession logs the caller out; the cookie is always cleared.
-func v2DeleteCurrentSession(deps Dependencies) http.HandlerFunc {
+// DeleteCurrentSession logs the caller out; the cookie is always cleared.
+func DeleteCurrentSession(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodDelete {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
 			return
 		}
-		if _, _, ok := v2MemberSession(w, r, deps); !ok {
+		if _, _, ok := requireWorkspaceSession(w, r, deps); !ok {
 			return
 		}
-		if _, ok := requireIdempotencyKeyV2(w, r); !ok {
+		if _, ok := requireIdempotencyKey(w, r); !ok {
 			return
 		}
 		if err := deps.SessionService.Logout(r.Context(), r); err != nil {
@@ -337,15 +341,15 @@ func v2DeleteCurrentSession(deps Dependencies) http.HandlerFunc {
 	}
 }
 
-// v2ListSessions returns the caller's active sessions with the current one
+// ListSessions returns the caller's active sessions with the current one
 // flagged.
-func v2ListSessions(deps Dependencies) http.HandlerFunc {
+func ListSessions(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
 			return
 		}
-		principal, sessionID, ok := v2MemberSession(w, r, deps)
+		principal, sessionID, ok := requireWorkspaceSession(w, r, deps)
 		if !ok {
 			return
 		}
@@ -361,19 +365,19 @@ func v2ListSessions(deps Dependencies) http.HandlerFunc {
 	}
 }
 
-// v2DeleteSession revokes one of the caller's own sessions. Sessions of other
+// DeleteSession revokes one of the caller's own sessions. Sessions of other
 // users answer 404 without revealing existence.
-func v2DeleteSession(deps Dependencies) http.HandlerFunc {
+func DeleteSession(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodDelete {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
 			return
 		}
-		principal, _, ok := v2MemberSession(w, r, deps)
+		principal, _, ok := requireWorkspaceSession(w, r, deps)
 		if !ok {
 			return
 		}
-		if _, ok := requireIdempotencyKeyV2(w, r); !ok {
+		if _, ok := requireIdempotencyKey(w, r); !ok {
 			return
 		}
 		sessionID := r.PathValue("sessionId")
@@ -395,37 +399,37 @@ func v2DeleteSession(deps Dependencies) http.HandlerFunc {
 
 // ---------- me ----------
 
-// v2GetMe returns the profile, the organization reference and the allowed
+// GetMe returns the profile, the organization reference and the allowed
 // organization governance actions.
-func v2GetMe(deps Dependencies) http.HandlerFunc {
+func GetMe(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
 			return
 		}
-		principal, _, ok := v2MemberSession(w, r, deps)
+		principal, _, ok := requireWorkspaceSession(w, r, deps)
 		if !ok {
 			return
 		}
-		v2MeSummary(w, r, deps, principal, http.StatusOK)
+		MeSummary(w, r, deps, principal, http.StatusOK)
 	}
 }
 
-type v2PatchMeRequest struct {
+type PatchMeRequest struct {
 	DisplayName string `json:"display_name"`
 }
 
-func v2PatchMe(deps Dependencies) http.HandlerFunc {
+func PatchMe(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPatch {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
 			return
 		}
-		principal, _, ok := v2MemberSession(w, r, deps)
+		principal, _, ok := requireWorkspaceSession(w, r, deps)
 		if !ok {
 			return
 		}
-		expected, ok := requireIfMatchV2(w, r)
+		expected, ok := requireIfMatch(w, r)
 		if !ok {
 			return
 		}
@@ -434,18 +438,18 @@ func v2PatchMe(deps Dependencies) http.HandlerFunc {
 			// revision so the optimistic check inside the service passes.
 			current, err := deps.IdentityService.Me(r.Context(), principal.UserID)
 			if err != nil {
-				v2DomainError(w, err)
+				DomainError(w, err)
 				return
 			}
 			expected = current.ETag
 		}
-		var input v2PatchMeRequest
-		if !decodeV2Body(w, r, &input, 16*1024) {
+		var input PatchMeRequest
+		if !decodeBody(w, r, &input, 16*1024) {
 			return
 		}
 		profile, err := deps.IdentityService.UpdateDisplayName(r.Context(), principal.UserID, expected, input.DisplayName)
 		if err != nil {
-			v2DomainError(w, err)
+			DomainError(w, err)
 			return
 		}
 		writeETag(w, profile.ETag)
@@ -453,28 +457,28 @@ func v2PatchMe(deps Dependencies) http.HandlerFunc {
 	}
 }
 
-type v2ChangePasswordRequest struct {
+type ChangePasswordRequest struct {
 	CurrentPassword string `json:"current_password"`
 	NewPassword     string `json:"new_password"`
 }
 
-// v2ChangePassword replaces the password and revokes every session except the
+// ChangePassword replaces the password and revokes every session except the
 // current one.
-func v2ChangePassword(deps Dependencies) http.HandlerFunc {
+func ChangePassword(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPut {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
 			return
 		}
-		principal, sessionID, ok := v2MemberSession(w, r, deps)
+		principal, sessionID, ok := requireWorkspaceSession(w, r, deps)
 		if !ok {
 			return
 		}
-		if _, ok := requireIdempotencyKeyV2(w, r); !ok {
+		if _, ok := requireIdempotencyKey(w, r); !ok {
 			return
 		}
-		var input v2ChangePasswordRequest
-		if !decodeV2Body(w, r, &input, 16*1024) {
+		var input ChangePasswordRequest
+		if !decodeBody(w, r, &input, 16*1024) {
 			return
 		}
 		if err := auth.ValidatePassword(input.NewPassword); err != nil {
@@ -483,26 +487,26 @@ func v2ChangePassword(deps Dependencies) http.HandlerFunc {
 		}
 		revoked, err := deps.IdentityService.ChangePassword(r.Context(), &deps.SessionService, principal.UserID, sessionID, input.CurrentPassword, input.NewPassword)
 		if err != nil {
-			v2DomainError(w, err)
+			DomainError(w, err)
 			return
 		}
 		writeData(w, r, http.StatusOK, map[string]any{"revoked_sessions": revoked})
 	}
 }
 
-func v2GetPreferences(deps Dependencies) http.HandlerFunc {
+func GetPreferences(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
 			return
 		}
-		principal, _, ok := v2MemberSession(w, r, deps)
+		principal, _, ok := requireWorkspaceSession(w, r, deps)
 		if !ok {
 			return
 		}
 		preferences, err := deps.IdentityService.Preferences(r.Context(), principal.UserID)
 		if err != nil {
-			v2DomainError(w, err)
+			DomainError(w, err)
 			return
 		}
 		writeETag(w, strconv.FormatInt(preferences.Revision, 10))
@@ -510,23 +514,23 @@ func v2GetPreferences(deps Dependencies) http.HandlerFunc {
 	}
 }
 
-type v2PatchPreferencesRequest struct {
+type PatchPreferencesRequest struct {
 	DefaultWorkspaceID        *string `json:"default_workspace_id"`
 	Timezone                  *string `json:"timezone"`
 	EmailNotificationsEnabled *bool   `json:"email_notifications_enabled"`
 }
 
-func v2PatchPreferences(deps Dependencies) http.HandlerFunc {
+func PatchPreferences(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPatch {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
 			return
 		}
-		principal, _, ok := v2MemberSession(w, r, deps)
+		principal, _, ok := requireWorkspaceSession(w, r, deps)
 		if !ok {
 			return
 		}
-		expected, ok := requireIfMatchV2(w, r)
+		expected, ok := requireIfMatch(w, r)
 		if !ok {
 			return
 		}
@@ -535,13 +539,13 @@ func v2PatchPreferences(deps Dependencies) http.HandlerFunc {
 			// current revision so the optimistic check inside the service passes.
 			current, err := deps.IdentityService.Preferences(r.Context(), principal.UserID)
 			if err != nil {
-				v2DomainError(w, err)
+				DomainError(w, err)
 				return
 			}
 			expected = strconv.FormatInt(current.Revision, 10)
 		}
-		var input v2PatchPreferencesRequest
-		if !decodeV2Body(w, r, &input, 16*1024) {
+		var input PatchPreferencesRequest
+		if !decodeBody(w, r, &input, 16*1024) {
 			return
 		}
 		patch := identity.PreferencesPatch{
@@ -551,7 +555,7 @@ func v2PatchPreferences(deps Dependencies) http.HandlerFunc {
 		}
 		preferences, err := deps.IdentityService.PatchPreferences(r.Context(), principal.UserID, expected, patch)
 		if err != nil {
-			v2DomainError(w, err)
+			DomainError(w, err)
 			return
 		}
 		writeETag(w, strconv.FormatInt(preferences.Revision, 10))
@@ -561,20 +565,20 @@ func v2PatchPreferences(deps Dependencies) http.HandlerFunc {
 
 // ---------- password reset ----------
 
-type v2PasswordResetRequest struct {
+type PasswordResetRequest struct {
 	Email string `json:"email"`
 }
 
-// v2RequestPasswordReset always answers 202 so the endpoint cannot be used to
+// RequestPasswordReset always answers 202 so the endpoint cannot be used to
 // enumerate accounts; throttling protects the mail pipeline instead.
-func v2RequestPasswordReset(deps Dependencies) http.HandlerFunc {
+func RequestPasswordReset(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
 			return
 		}
-		var input v2PasswordResetRequest
-		if !decodeV2Body(w, r, &input, 16*1024) {
+		var input PasswordResetRequest
+		if !decodeBody(w, r, &input, 16*1024) {
 			return
 		}
 		email, err := organization.NormalizeEmail(input.Email)
@@ -606,48 +610,48 @@ func v2RequestPasswordReset(deps Dependencies) http.HandlerFunc {
 	}
 }
 
-type v2PasswordResetResolveRequest struct {
+type PasswordResetResolveRequest struct {
 	Token string `json:"token"`
 }
 
-func v2ResolvePasswordReset(deps Dependencies) http.HandlerFunc {
+func ResolvePasswordReset(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
 			return
 		}
-		var input v2PasswordResetResolveRequest
-		if !decodeV2Body(w, r, &input, 16*1024) {
+		var input PasswordResetResolveRequest
+		if !decodeBody(w, r, &input, 16*1024) {
 			return
 		}
 		maskedEmail, err := deps.IdentityService.ResolvePasswordReset(r.Context(), strings.TrimSpace(input.Token))
 		if err != nil {
-			v2DomainError(w, err)
+			DomainError(w, err)
 			return
 		}
 		writeData(w, r, http.StatusOK, map[string]any{"email": maskedEmail})
 	}
 }
 
-type v2PasswordResetCompleteRequest struct {
+type PasswordResetCompleteRequest struct {
 	Token       string `json:"token"`
 	NewPassword string `json:"new_password"`
 }
 
-func v2CompletePasswordReset(deps Dependencies) http.HandlerFunc {
+func CompletePasswordReset(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
 			return
 		}
 		// Public one-time-token surface: the reset token is single-use, which
-		// is the replay boundary (idempotency middleware excludes /api/public/v2).
-		var input v2PasswordResetCompleteRequest
-		if !decodeV2Body(w, r, &input, 16*1024) {
+		// is the replay boundary (idempotency middleware excludes /api/public).
+		var input PasswordResetCompleteRequest
+		if !decodeBody(w, r, &input, 16*1024) {
 			return
 		}
 		if err := deps.IdentityService.CompletePasswordReset(r.Context(), &deps.SessionService, strings.TrimSpace(input.Token), input.NewPassword); err != nil {
-			v2DomainError(w, err)
+			DomainError(w, err)
 			return
 		}
 		writeData(w, r, http.StatusOK, map[string]any{"status": "password_reset_completed"})
@@ -656,18 +660,18 @@ func v2CompletePasswordReset(deps Dependencies) http.HandlerFunc {
 
 // ---------- invitation resolve / accept (anonymous) ----------
 
-type v2ResolveInvitationRequest struct {
+type ResolveInvitationRequest struct {
 	Token string `json:"token"`
 }
 
-func v2ResolveInvitation(deps Dependencies) http.HandlerFunc {
+func ResolveInvitation(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
 			return
 		}
-		var input v2ResolveInvitationRequest
-		if !decodeV2Body(w, r, &input, 16*1024) {
+		var input ResolveInvitationRequest
+		if !decodeBody(w, r, &input, 16*1024) {
 			return
 		}
 		ipPrefix := auth.ClientIPPrefix(effectiveClientAddr(r, deps.TrustedProxyCIDRs))
@@ -684,31 +688,31 @@ func v2ResolveInvitation(deps Dependencies) http.HandlerFunc {
 		}
 		resolved, err := deps.InvitationService.Resolve(r.Context(), strings.TrimSpace(input.Token))
 		if err != nil {
-			v2DomainError(w, err)
+			DomainError(w, err)
 			return
 		}
 		writeData(w, r, http.StatusOK, resolved)
 	}
 }
 
-type v2AcceptInvitationRequest struct {
+type AcceptInvitationRequest struct {
 	Token       string `json:"token"`
 	DisplayName string `json:"display_name"`
 	Password    string `json:"password"`
 }
 
-// v2AcceptInvitation activates the invited member and starts the initial
+// AcceptInvitation activates the invited member and starts the initial
 // session in one request.
-func v2AcceptInvitation(deps Dependencies) http.HandlerFunc {
+func AcceptInvitation(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
 			return
 		}
 		// Public one-time-token surface: the invitation token itself is the
-		// replay boundary (idempotency middleware excludes /api/public/v2).
-		var input v2AcceptInvitationRequest
-		if !decodeV2Body(w, r, &input, 16*1024) {
+		// replay boundary (idempotency middleware excludes /api/public).
+		var input AcceptInvitationRequest
+		if !decodeBody(w, r, &input, 16*1024) {
 			return
 		}
 		ipPrefix := auth.ClientIPPrefix(effectiveClientAddr(r, deps.TrustedProxyCIDRs))
@@ -727,7 +731,7 @@ func v2AcceptInvitation(deps Dependencies) http.HandlerFunc {
 			Token: strings.TrimSpace(input.Token), DisplayName: input.DisplayName, Password: input.Password,
 		})
 		if err != nil {
-			v2DomainError(w, err)
+			DomainError(w, err)
 			return
 		}
 		session, err := deps.InvitationService.CreateSessionFor(r.Context(), &deps.SessionService, ipPrefix, r.UserAgent(), result.UserID)

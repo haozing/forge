@@ -11,7 +11,7 @@ import (
 	"agentchunzhi/internal/tag"
 )
 
-// webhookCreateAssetRequest is the envelope of POST /api/open/v2/hooks/assets.
+// webhookCreateAssetRequest is the envelope of POST /api/open/hooks/assets.
 // Source must be "webhook" (or empty); external_ref is an optional caller-side
 // idempotency marker: replaying it returns the first result with
 // replayed=true. workspace_id/resource_model_id are optional and resolved by

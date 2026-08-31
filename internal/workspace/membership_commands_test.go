@@ -22,7 +22,7 @@ func TestMaskedEmail(t *testing.T) {
 }
 
 func TestSummaryCarriesSlugField(t *testing.T) {
-	// The v2 contract exposes the workspace slug on the member summary.
+	// The contract exposes the workspace slug on the member summary.
 	summary := Summary{ID: "w-1", Slug: "ws-demo", Name: "Demo"}
 	if summary.Slug != "ws-demo" {
 		t.Fatalf("slug = %q", summary.Slug)

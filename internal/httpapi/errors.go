@@ -1,8 +1,8 @@
 package httpapi
 
-// errors.go — the single v2 HTTP contract: request ids are injected by
+// errors.go — the single HTTP contract: request ids are injected by
 // middleware, every error uses the stable envelope
-// {"error":{"code","message","request_id","details"}} and every v2 list uses
+// {"error":{"code","message","request_id","details"}} and every list response uses
 // the cursor page envelope. Handlers never generate request ids themselves.
 
 import (
@@ -72,7 +72,7 @@ func writeJSONValue(w http.ResponseWriter, status int, value any) {
 	_ = json.NewEncoder(w).Encode(value)
 }
 
-// errorBody is the fixed v2 error envelope.
+// errorBody is the fixed error envelope.
 type errorBody struct {
 	Error errorDetail `json:"error"`
 }
@@ -84,7 +84,7 @@ type errorDetail struct {
 	Details   map[string]any `json:"details,omitempty"`
 }
 
-// writeError emits the v2 error envelope. Kept compatible with the legacy
+// writeError emits the error envelope. Kept compatible with the old
 // call signature so handlers migrate mechanically.
 func writeError(w http.ResponseWriter, status int, code string) {
 	writeJSONValue(w, status, errorBody{Error: errorDetail{
@@ -104,7 +104,7 @@ func writeErrorDetail(w http.ResponseWriter, status int, code, message string, d
 	}})
 }
 
-// writeData emits the v2 success envelope {"data":..., "request_id":...}.
+// writeData emits the success envelope {"data":..., "request_id":...}.
 func writeData(w http.ResponseWriter, r *http.Request, status int, data any) {
 	writeJSONValue(w, status, map[string]any{
 		"data":       data,
@@ -112,7 +112,7 @@ func writeData(w http.ResponseWriter, r *http.Request, status int, data any) {
 	})
 }
 
-// CursorPage is the only list envelope of the v2 contract.
+// CursorPage is the only list envelope of the API contract.
 type CursorPage struct {
 	NextCursor *string `json:"next_cursor"`
 	HasMore    bool    `json:"has_more"`

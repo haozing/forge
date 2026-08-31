@@ -1,6 +1,6 @@
 package httpapi
 
-// v2_suggestions.go — the phase 4 member review surface: the unified
+// suggestions.go — the phase 4 member review surface: the unified
 // suggestion queue, single and batch accept/reject decisions, agent
 // processing results and member-initiated asset preparation. Handlers only
 // authenticate, parse, call the suggestion review service and map errors.
@@ -91,11 +91,11 @@ func resolveSuggestionAsset(ctx context.Context, deps Dependencies, principal au
 
 // ---------- suggestion queue ----------
 
-// v2AssetSuggestions serves GET /api/v2/workspaces/{workspaceId}/assets/{assetId}/suggestions:
+// AssetSuggestions serves GET /api/workspaces/{workspaceId}/assets/{assetId}/suggestions:
 // the unified pending/decided queue plus the recent processing-result header.
-func v2AssetSuggestions(deps Dependencies) http.HandlerFunc {
+func AssetSuggestions(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		principal, ok := v2Principal(w, r, deps)
+		principal, ok := sessionPrincipal(w, r, deps)
 		if !ok {
 			return
 		}
@@ -115,7 +115,7 @@ func v2AssetSuggestions(deps Dependencies) http.HandlerFunc {
 			r.URL.Query().Get("status"), r.URL.Query().Get("run_id"),
 			r.URL.Query().Get("cursor"), atoiDefault(r.URL.Query().Get("limit"), 50))
 		if err != nil {
-			v2ServiceError(w, err)
+			ServiceError(w, err)
 			return
 		}
 		writeData(w, r, http.StatusOK, map[string]any{
@@ -138,18 +138,18 @@ func cursorPageFrom(hasMore bool, next string) CursorPage {
 
 // ---------- single decisions ----------
 
-// v2SuggestionDecisionBody carries the optional tag resolution of an accept:
+// SuggestionDecisionBody carries the optional tag resolution of an accept:
 // tag_id overrides the suggested key with an explicit workspace tag.
-type v2SuggestionDecisionBody struct {
+type SuggestionDecisionBody struct {
 	TagID string `json:"tag_id"`
 }
 
-// v2SuggestionAccept serves POST /api/v2/workspaces/{workspaceId}/suggestions/{kind}/{suggestionId}/accept.
+// SuggestionAccept serves POST /api/workspaces/{workspaceId}/suggestions/{kind}/{suggestionId}/accept.
 // The kind segment is the wire vocabulary (field/summary/tag/relation); the
 // service maps it onto the suggestion tables.
-func v2SuggestionAccept(deps Dependencies) http.HandlerFunc {
+func SuggestionAccept(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		principal, ok := v2Principal(w, r, deps)
+		principal, ok := sessionPrincipal(w, r, deps)
 		if !ok {
 			return
 		}
@@ -157,7 +157,7 @@ func v2SuggestionAccept(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
 			return
 		}
-		if _, ok := requireIdempotencyKeyV2(w, r); !ok {
+		if _, ok := requireIdempotencyKey(w, r); !ok {
 			return
 		}
 		if !requireSuggestionService(w, deps) {
@@ -173,30 +173,30 @@ func v2SuggestionAccept(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusUnprocessableEntity, "suggestion_kind_invalid")
 			return
 		}
-		var body v2SuggestionDecisionBody
+		var body SuggestionDecisionBody
 		if r.ContentLength != 0 {
-			if !decodeV2Body(w, r, &body, 16*1024) {
+			if !decodeBody(w, r, &body, 16*1024) {
 				return
 			}
 		}
 		assetID, err := resolveSuggestionAsset(r.Context(), deps, principal, workspaceID, kind, suggestionID)
 		if err != nil {
-			v2ServiceError(w, err)
+			ServiceError(w, err)
 			return
 		}
 		outcome, err := deps.SuggestionReviews.Accept(r.Context(), principal, workspaceID, assetID, kind, suggestionID, body.TagID)
 		if err != nil {
-			v2ServiceError(w, err)
+			ServiceError(w, err)
 			return
 		}
 		writeData(w, r, http.StatusOK, outcome)
 	}
 }
 
-// v2SuggestionReject serves POST /api/v2/workspaces/{workspaceId}/suggestions/{kind}/{suggestionId}/reject.
-func v2SuggestionReject(deps Dependencies) http.HandlerFunc {
+// SuggestionReject serves POST /api/workspaces/{workspaceId}/suggestions/{kind}/{suggestionId}/reject.
+func SuggestionReject(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		principal, ok := v2Principal(w, r, deps)
+		principal, ok := sessionPrincipal(w, r, deps)
 		if !ok {
 			return
 		}
@@ -204,7 +204,7 @@ func v2SuggestionReject(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
 			return
 		}
-		if _, ok := requireIdempotencyKeyV2(w, r); !ok {
+		if _, ok := requireIdempotencyKey(w, r); !ok {
 			return
 		}
 		if !requireSuggestionService(w, deps) {
@@ -222,11 +222,11 @@ func v2SuggestionReject(deps Dependencies) http.HandlerFunc {
 		}
 		assetID, err := resolveSuggestionAsset(r.Context(), deps, principal, workspaceID, kind, suggestionID)
 		if err != nil {
-			v2ServiceError(w, err)
+			ServiceError(w, err)
 			return
 		}
 		if err := deps.SuggestionReviews.Reject(r.Context(), principal, workspaceID, assetID, kind, suggestionID); err != nil {
-			v2ServiceError(w, err)
+			ServiceError(w, err)
 			return
 		}
 		writeData(w, r, http.StatusOK, map[string]any{
@@ -239,24 +239,24 @@ func v2SuggestionReject(deps Dependencies) http.HandlerFunc {
 
 // ---------- batch accept ----------
 
-// v2AcceptBatchRef is one wire entry of the explicit-ids batch form. Only the
-// explicit ids variant is implemented; the whole-queue filter form stays with
-// the frontend wave.
-type v2AcceptBatchRef struct {
+// AcceptBatchRef is one wire entry of the explicit-ids batch form. Only the
+// explicit ids variant is implemented; the whole-queue filter form is deferred to a
+// follow-up batch.
+type AcceptBatchRef struct {
 	Kind  string `json:"kind"`
 	ID    string `json:"id"`
 	TagID string `json:"tag_id,omitempty"`
 }
 
-type v2AcceptBatchBody struct {
-	IDs []v2AcceptBatchRef `json:"ids"`
+type AcceptBatchBody struct {
+	IDs []AcceptBatchRef `json:"ids"`
 }
 
-// v2AssetSuggestionsAcceptBatch serves POST /api/v2/workspaces/{workspaceId}/assets/{assetId}/suggestions/accept-batch:
+// AssetSuggestionsAcceptBatch serves POST /api/workspaces/{workspaceId}/assets/{assetId}/suggestions/accept-batch:
 // one transaction, one draft revision for every accepted entry.
-func v2AssetSuggestionsAcceptBatch(deps Dependencies) http.HandlerFunc {
+func AssetSuggestionsAcceptBatch(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		principal, ok := v2Principal(w, r, deps)
+		principal, ok := sessionPrincipal(w, r, deps)
 		if !ok {
 			return
 		}
@@ -264,7 +264,7 @@ func v2AssetSuggestionsAcceptBatch(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
 			return
 		}
-		if _, ok := requireIdempotencyKeyV2(w, r); !ok {
+		if _, ok := requireIdempotencyKey(w, r); !ok {
 			return
 		}
 		if !requireSuggestionService(w, deps) {
@@ -275,8 +275,8 @@ func v2AssetSuggestionsAcceptBatch(deps Dependencies) http.HandlerFunc {
 		if !requirePathUUID(w, workspaceID, assetID) {
 			return
 		}
-		var body v2AcceptBatchBody
-		if !decodeV2Body(w, r, &body, 256*1024) {
+		var body AcceptBatchBody
+		if !decodeBody(w, r, &body, 256*1024) {
 			return
 		}
 		if len(body.IDs) == 0 || len(body.IDs) > asset.MaxAcceptBatchSize {
@@ -293,7 +293,7 @@ func v2AssetSuggestionsAcceptBatch(deps Dependencies) http.HandlerFunc {
 		}
 		outcome, err := deps.SuggestionReviews.AcceptBatch(r.Context(), principal, workspaceID, assetID, refs)
 		if err != nil {
-			v2ServiceError(w, err)
+			ServiceError(w, err)
 			return
 		}
 		writeData(w, r, http.StatusOK, outcome)
@@ -302,10 +302,10 @@ func v2AssetSuggestionsAcceptBatch(deps Dependencies) http.HandlerFunc {
 
 // ---------- processing results ----------
 
-// v2ProcessingResult is one agent run record over the asset: input/output
+// ProcessingResult is one agent run record over the asset: input/output
 // versions, rule version, suggestion summary, field diff, confidence,
 // citations and token usage.
-type v2ProcessingResult struct {
+type ProcessingResult struct {
 	ID                 string          `json:"id"`
 	RunID              string          `json:"run_id"`
 	InputVersionID     string          `json:"input_version_id"`
@@ -330,7 +330,7 @@ type processingResultCursor struct {
 	ID        string `json:"id"`
 }
 
-func encodeProcessingResultCursor(item v2ProcessingResult) string {
+func encodeProcessingResultCursor(item ProcessingResult) string {
 	raw, _ := json.Marshal(processingResultCursor{
 		CreatedAt: item.CreatedAt.UTC().Format(time.RFC3339Nano),
 		ID:        item.ID,
@@ -357,13 +357,13 @@ func decodeProcessingResultCursor(value string) (processingResultCursor, error) 
 	return cursor, nil
 }
 
-// v2AssetProcessingResults serves GET /api/v2/workspaces/{workspaceId}/assets/{assetId}/processing-results.
+// AssetProcessingResults serves GET /api/workspaces/{workspaceId}/assets/{assetId}/processing-results.
 // Ownership follows the two-stage gate of the draft surface: resolve the
 // asset's workspace with asset.read, hide cross-workspace asset ids as 404,
 // then page integration.agent_processing_results by (created_at, id) desc.
-func v2AssetProcessingResults(deps Dependencies) http.HandlerFunc {
+func AssetProcessingResults(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		principal, ok := v2Principal(w, r, deps)
+		principal, ok := sessionPrincipal(w, r, deps)
 		if !ok {
 			return
 		}
@@ -381,7 +381,7 @@ func v2AssetProcessingResults(deps Dependencies) http.HandlerFunc {
 		}
 		target, err := deps.MemberAssetService.Get(r.Context(), principal, assetID)
 		if err != nil {
-			v2ServiceError(w, err)
+			ServiceError(w, err)
 			return
 		}
 		if target.WorkspaceID != workspaceID {
@@ -397,7 +397,7 @@ func v2AssetProcessingResults(deps Dependencies) http.HandlerFunc {
 		if raw := r.URL.Query().Get("cursor"); raw != "" {
 			cursor, err := decodeProcessingResultCursor(raw)
 			if err != nil {
-				v2ServiceError(w, err)
+				ServiceError(w, err)
 				return
 			}
 			parsed, _ := time.Parse(time.RFC3339Nano, cursor.CreatedAt)
@@ -419,19 +419,19 @@ func v2AssetProcessingResults(deps Dependencies) http.HandlerFunc {
 			LIMIT $6::int
 		`, principal.OrganizationID, assetID, workspaceID, cursorTime, cursorID, limit+1)
 		if err != nil {
-			v2ServiceError(w, err)
+			ServiceError(w, err)
 			return
 		}
 		defer rows.Close()
-		items := []v2ProcessingResult{}
+		items := []ProcessingResult{}
 		for rows.Next() {
-			var item v2ProcessingResult
+			var item ProcessingResult
 			var summary, diff, citations []byte
 			if err := rows.Scan(&item.ID, &item.RunID, &item.InputVersionID, &item.OutputVersionID,
 				&item.AgentUserID, &item.AgentApplicationID, &item.RuleVersion,
 				&summary, &diff, &item.OverallConfidence, &citations,
 				&item.InputTokens, &item.OutputTokens, &item.CreatedAt, &item.CompletedAt); err != nil {
-				v2ServiceError(w, err)
+				ServiceError(w, err)
 				return
 			}
 			if summary != nil {
@@ -446,7 +446,7 @@ func v2AssetProcessingResults(deps Dependencies) http.HandlerFunc {
 			items = append(items, item)
 		}
 		if err := rows.Err(); err != nil {
-			v2ServiceError(w, err)
+			ServiceError(w, err)
 			return
 		}
 		page := CursorPage{}
@@ -460,13 +460,13 @@ func v2AssetProcessingResults(deps Dependencies) http.HandlerFunc {
 
 // ---------- member-initiated preparation ----------
 
-// v2PrepareBody pins the input version; omitted means the asset's current
+// PrepareBody pins the input version; omitted means the asset's current
 // working version.
-type v2PrepareBody struct {
+type PrepareBody struct {
 	AssetVersionID string `json:"asset_version_id"`
 }
 
-// v2AssetPrepare serves POST /api/v2/workspaces/{workspaceId}/assets/{assetId}/prepare.
+// AssetPrepare serves POST /api/workspaces/{workspaceId}/assets/{assetId}/prepare.
 // A member-initiated prepare creates the automation.run the worker's
 // asset_prepare branch consumes: source=manual, the workspace-enabled
 // workflow application pinned with its current endpoint revision. The run row
@@ -475,9 +475,9 @@ type v2PrepareBody struct {
 // requires. Idempotency: the HTTP middleware replays full responses, and the
 // run-level unique index on (organization, workspace, created_by,
 // idempotency_key) is the backstop for keys the middleware does not cover.
-func v2AssetPrepare(deps Dependencies) http.HandlerFunc {
+func AssetPrepare(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		principal, ok := v2Principal(w, r, deps)
+		principal, ok := sessionPrincipal(w, r, deps)
 		if !ok {
 			return
 		}
@@ -485,7 +485,7 @@ func v2AssetPrepare(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
 			return
 		}
-		key, ok := requireIdempotencyKeyV2(w, r)
+		key, ok := requireIdempotencyKey(w, r)
 		if !ok {
 			return
 		}
@@ -497,9 +497,9 @@ func v2AssetPrepare(deps Dependencies) http.HandlerFunc {
 		if !requirePathUUID(w, workspaceID, assetID) {
 			return
 		}
-		var body v2PrepareBody
+		var body PrepareBody
 		if r.ContentLength != 0 {
-			if !decodeV2Body(w, r, &body, 16*1024) {
+			if !decodeBody(w, r, &body, 16*1024) {
 				return
 			}
 		}
@@ -508,14 +508,14 @@ func v2AssetPrepare(deps Dependencies) http.HandlerFunc {
 		// asserted here.
 		target, err := deps.MemberAssetService.Get(r.Context(), principal, assetID)
 		if err != nil {
-			v2ServiceError(w, err)
+			ServiceError(w, err)
 			return
 		}
 		if target.WorkspaceID != workspaceID {
 			writeError(w, http.StatusNotFound, "resource_not_found")
 			return
 		}
-		if !requireWorkspaceActionV2(w, r, deps, principal, target.WorkspaceID, authz.ActionAssetWrite) {
+		if !requireWorkspaceAction(w, r, deps, principal, target.WorkspaceID, authz.ActionAssetWrite) {
 			return
 		}
 		versionID := body.AssetVersionID
@@ -534,7 +534,7 @@ func v2AssetPrepare(deps Dependencies) http.HandlerFunc {
 					WHERE organization_id = $1::uuid AND id = $2::uuid AND asset_id = $3::uuid
 				)
 			`, principal.OrganizationID, versionID, assetID).Scan(&belongs); err != nil {
-				v2ServiceError(w, err)
+				ServiceError(w, err)
 				return
 			}
 			if !belongs {
@@ -568,7 +568,7 @@ func v2AssetPrepare(deps Dependencies) http.HandlerFunc {
 			return
 		}
 		if err != nil {
-			v2ServiceError(w, err)
+			ServiceError(w, err)
 			return
 		}
 		// The processor's asset_prepare branch hard-requires the fixed
@@ -610,14 +610,14 @@ func v2AssetPrepare(deps Dependencies) http.HandlerFunc {
 				  AND created_by = $3::uuid AND idempotency_key = $4
 			`, principal.OrganizationID, target.WorkspaceID, principal.UserID, runKey).Scan(&runID, &storedVersionID)
 			if scanErr != nil {
-				v2ServiceError(w, scanErr)
+				ServiceError(w, scanErr)
 				return
 			}
 			if storedVersionID != "" {
 				versionID = storedVersionID
 			}
 		} else if err != nil {
-			v2ServiceError(w, err)
+			ServiceError(w, err)
 			return
 		} else {
 			eventPayload, _ := json.Marshal(map[string]any{
@@ -627,7 +627,7 @@ func v2AssetPrepare(deps Dependencies) http.HandlerFunc {
 				INSERT INTO automation.run_events (organization_id, run_id, event_type, payload)
 				VALUES ($1::uuid, $2::uuid, 'run.queued', $3::jsonb)
 			`, principal.OrganizationID, runID, eventPayload); err != nil {
-				v2ServiceError(w, err)
+				ServiceError(w, err)
 				return
 			}
 		}

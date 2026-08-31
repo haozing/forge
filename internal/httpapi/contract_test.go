@@ -52,10 +52,10 @@ func TestRequestIDMiddlewareEchoesAndPropagates(t *testing.T) {
 	}
 }
 
-// TestV2HandlersNeverTouchStore is the architecture guard: the v2 handler
+// TestHandlersNeverTouchStore is the architecture guard: the contract handler
 // files must depend on domain services only, never on the raw store.
-func TestV2HandlersNeverTouchStore(t *testing.T) {
-	files := []string{"v2_handlers.go", "router_groups.go", "v2_identity.go", "v2_organization.go", "v2_tag.go", "v2_sites.go", "v2_public_sites.go"}
+func TestHandlersNeverTouchStore(t *testing.T) {
+	files := []string{"api_handlers.go", "router_groups.go", "identity.go", "organization.go", "tag.go", "sites.go", "public_sites.go"}
 	for _, name := range files {
 		raw, err := os.ReadFile(filepath.Join(".", name))
 		if err != nil {
@@ -102,20 +102,20 @@ func TestLegacyPublicAssetRoutesAreRetired(t *testing.T) {
 	}
 }
 
-// TestPublicSiteV2RoutesRegistered pins the phase 5 public read face: the
+// TestPublicSiteRoutesRegistered pins the phase 5 public read face: the
 // seven routes exist (an unwired service answers 500, never the mux 404) and
 // a bare GET without a session is not bounced by authentication middleware.
-func TestPublicSiteV2RoutesRegistered(t *testing.T) {
+func TestPublicSiteRoutesRegistered(t *testing.T) {
 	router := newRouter(Dependencies{})
 	for _, path := range []string{
-		"/api/public/v2/sites/blog",
-		"/api/public/v2/sites/blog/posts",
-		"/api/public/v2/sites/blog/posts/some/path",
-		"/api/public/v2/sites/blog/posts/nested/second",
-		"/api/public/v2/sites/blog/sections/news",
-		"/api/public/v2/sites/blog/tags",
-		"/api/public/v2/sites/blog/tags/go",
-		"/api/public/v2/sites/blog/search",
+		"/api/public/sites/blog",
+		"/api/public/sites/blog/posts",
+		"/api/public/sites/blog/posts/some/path",
+		"/api/public/sites/blog/posts/nested/second",
+		"/api/public/sites/blog/sections/news",
+		"/api/public/sites/blog/tags",
+		"/api/public/sites/blog/tags/go",
+		"/api/public/sites/blog/search",
 	} {
 		recorder := httptest.NewRecorder()
 		router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, path, nil))
@@ -132,11 +132,11 @@ func TestPublicSiteV2RoutesRegistered(t *testing.T) {
 // forced through the shared idempotency reservation: every public path,
 // safe or otherwise, bypasses the middleware.
 func TestPublicFaceNeverRequiresIdempotencyKey(t *testing.T) {
-	request := httptest.NewRequest(http.MethodGet, "/api/public/v2/sites/blog/posts", nil)
+	request := httptest.NewRequest(http.MethodGet, "/api/public/sites/blog/posts", nil)
 	if requiresHTTPIdempotency(request) {
 		t.Fatal("public GET must bypass the idempotency middleware")
 	}
-	request = httptest.NewRequest(http.MethodPost, "/api/public/v2/sites/blog/posts", nil)
+	request = httptest.NewRequest(http.MethodPost, "/api/public/sites/blog/posts", nil)
 	request.Header.Set("Idempotency-Key", "0123456789abcdef")
 	if requiresHTTPIdempotency(request) {
 		t.Fatal("public writes (hypothetical) must bypass the idempotency middleware")
@@ -190,7 +190,7 @@ func TestPublicSiteErrorContract(t *testing.T) {
 // kept, no payload), a mismatch falls through to the normal 200 path.
 func TestPublicCacheHeaders304Branch(t *testing.T) {
 	etag := "feedc0de"
-	request := httptest.NewRequest(http.MethodGet, "/api/public/v2/sites/blog", nil)
+	request := httptest.NewRequest(http.MethodGet, "/api/public/sites/blog", nil)
 	request.Header.Set("If-None-Match", `"`+etag+`"`)
 	recorder := httptest.NewRecorder()
 	if publicCacheHeaders(recorder, request, etag) != true {
@@ -209,7 +209,7 @@ func TestPublicCacheHeaders304Branch(t *testing.T) {
 		t.Fatal("a 304 answer must not carry a body")
 	}
 
-	request = httptest.NewRequest(http.MethodGet, "/api/public/v2/sites/blog", nil)
+	request = httptest.NewRequest(http.MethodGet, "/api/public/sites/blog", nil)
 	recorder = httptest.NewRecorder()
 	if publicCacheHeaders(recorder, request, etag) != false {
 		t.Fatal("without If-None-Match the handler must fall through to 200")
@@ -225,7 +225,7 @@ func TestPublicSiteHandlersGuardWiring(t *testing.T) {
 	deps := Dependencies{SessionService: auth.SessionService{}}
 	router := newRouter(deps)
 	recorder := httptest.NewRecorder()
-	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/public/v2/sites/blog", nil))
+	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/public/sites/blog", nil))
 	if recorder.Code != http.StatusInternalServerError {
 		t.Fatalf("unwired public reader = %d, want 500", recorder.Code)
 	}
@@ -238,37 +238,37 @@ func TestLegacyReviewRoutesAreRetired(t *testing.T) {
 	}
 	source := string(raw)
 	for _, legacy := range []string{
-		`"/api/frontend/workspaces/{workspaceId}/reviews"`,
-		`"/api/frontend/reviews/{reviewId}"`,
-		`"/api/frontend/reviews/batch"`,
-		`"/api/frontend/assets/{assetId}/submit-review"`,
+		`"/api/workspaces/{workspaceId}/reviews"`,
+		`"/api/reviews/{reviewId}"`,
+		`"/api/reviews/batch"`,
+		`"/api/assets/{assetId}/submit-review"`,
 	} {
 		if strings.Contains(source, legacy) {
 			t.Fatalf("retired route %s must not be registered", legacy)
 		}
 	}
 	for _, required := range []string{
-		`"/api/v2/workspaces/{workspaceId}/publication-requests"`,
-		`"/api/v2/assets/{assetId}/draft"`,
-		`"/api/v2/assets/{assetId}/commit-draft"`,
-		`"/api/v2/asset-versions/{versionId}/confirm"`,
-		`"/api/v2/workspaces/{workspaceId}/assets/{assetId}/suggestions"`,
-		`"/api/v2/workspaces/{workspaceId}/assets/{assetId}/suggestions/accept-batch"`,
-		`"/api/v2/workspaces/{workspaceId}/assets/{assetId}/processing-results"`,
-		`"/api/v2/workspaces/{workspaceId}/assets/{assetId}/prepare"`,
-		`"/api/v2/workspaces/{workspaceId}/suggestions/{kind}/{suggestionId}/accept"`,
-		`"/api/v2/workspaces/{workspaceId}/suggestions/{kind}/{suggestionId}/reject"`,
+		`"/api/workspaces/{workspaceId}/publication-requests"`,
+		`"/api/assets/{assetId}/draft"`,
+		`"/api/assets/{assetId}/commit-draft"`,
+		`"/api/asset-versions/{versionId}/confirm"`,
+		`"/api/workspaces/{workspaceId}/assets/{assetId}/suggestions"`,
+		`"/api/workspaces/{workspaceId}/assets/{assetId}/suggestions/accept-batch"`,
+		`"/api/workspaces/{workspaceId}/assets/{assetId}/processing-results"`,
+		`"/api/workspaces/{workspaceId}/assets/{assetId}/prepare"`,
+		`"/api/workspaces/{workspaceId}/suggestions/{kind}/{suggestionId}/accept"`,
+		`"/api/workspaces/{workspaceId}/suggestions/{kind}/{suggestionId}/reject"`,
 	} {
 		if !strings.Contains(source, required) {
-			t.Fatalf("v2 route %s must be registered", required)
+			t.Fatalf("route %s must be registered", required)
 		}
 	}
 }
 
-func TestIdempotencyKeyRequiredForV2Writes(t *testing.T) {
+func TestIdempotencyKeyRequiredForContractWrites(t *testing.T) {
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/api/v2/assets/x/publish", nil)
-	if _, ok := requireIdempotencyKeyV2(recorder, request); ok {
+	request := httptest.NewRequest(http.MethodPost, "/api/assets/x/publish", nil)
+	if _, ok := requireIdempotencyKey(recorder, request); ok {
 		t.Fatal("missing Idempotency-Key must be refused")
 	}
 	if recorder.Code != http.StatusPreconditionRequired {
@@ -279,42 +279,42 @@ func TestIdempotencyKeyRequiredForV2Writes(t *testing.T) {
 	}
 }
 
-// TestIdempotencyCoverageMatrix locks the v2 replay-coverage surface: member
-// v2 and open v2 writes are covered, public v2 and safe methods are not.
+// TestIdempotencyCoverageMatrix locks the replay-coverage surface: member
+// and open writes are covered, the public surface and safe methods are not.
 func TestIdempotencyCoverageMatrix(t *testing.T) {
 	cases := []struct {
 		method, path string
 		want         bool
 	}{
-		{http.MethodPost, "/api/v2/workspaces/w/publication-requests", true},
-		{http.MethodPatch, "/api/v2/assets/a/draft", true},
-		{http.MethodPost, "/api/v2/assets/a/publish", true},
-		{http.MethodPost, "/api/open/v2/hooks/assets", true},
-		{http.MethodPost, "/api/open/v2/query", false},
-		{http.MethodGet, "/api/v2/assets/a/draft", false},
-		{http.MethodPost, "/api/public/v2/password-resets/complete", false},
-		{http.MethodPost, "/api/public/v2/organization-invitations/accept", false},
-		{http.MethodPost, "/api/frontend/workspaces", true},
-		{http.MethodPost, "/api/v2/workspaces/w/query", false},
+		{http.MethodPost, "/api/workspaces/w/publication-requests", true},
+		{http.MethodPatch, "/api/assets/a/draft", true},
+		{http.MethodPost, "/api/assets/a/publish", true},
+		{http.MethodPost, "/api/open/hooks/assets", true},
+		{http.MethodPost, "/api/open/query", false},
+		{http.MethodGet, "/api/assets/a/draft", false},
+		{http.MethodPost, "/api/public/password-resets/complete", false},
+		{http.MethodPost, "/api/public/organization-invitations/accept", false},
+		{http.MethodPost, "/api/workspaces", true},
+		{http.MethodPost, "/api/workspaces/w/query", false},
 		// Phase 4 suggestion surface: the four write commands are covered, the
 		// two queue reads are safe methods.
-		{http.MethodPost, "/api/v2/workspaces/w/suggestions/field/s/accept", true},
-		{http.MethodPost, "/api/v2/workspaces/w/suggestions/tag/s/reject", true},
-		{http.MethodPost, "/api/v2/workspaces/w/assets/a/suggestions/accept-batch", true},
-		{http.MethodPost, "/api/v2/workspaces/w/assets/a/prepare", true},
+		{http.MethodPost, "/api/workspaces/w/suggestions/field/s/accept", true},
+		{http.MethodPost, "/api/workspaces/w/suggestions/tag/s/reject", true},
+		{http.MethodPost, "/api/workspaces/w/assets/a/suggestions/accept-batch", true},
+		{http.MethodPost, "/api/workspaces/w/assets/a/prepare", true},
 		// Phase 4 open agent tasks: create is a write command, the detail read
 		// is safe.
-		{http.MethodPost, "/api/open/v2/agent-tasks", true},
-		{http.MethodGet, "/api/open/v2/agent-tasks/t", false},
-		{http.MethodGet, "/api/v2/workspaces/w/assets/a/suggestions", false},
-		{http.MethodGet, "/api/v2/workspaces/w/assets/a/processing-results", false},
+		{http.MethodPost, "/api/open/agent-tasks", true},
+		{http.MethodGet, "/api/open/agent-tasks/t", false},
+		{http.MethodGet, "/api/workspaces/w/assets/a/suggestions", false},
+		{http.MethodGet, "/api/workspaces/w/assets/a/processing-results", false},
 		// Phase 5 public site face: safe reads never take part in the replay
 		// contract — not even a hypothetical write under the public prefix.
-		{http.MethodGet, "/api/public/v2/sites/blog", false},
-		{http.MethodGet, "/api/public/v2/sites/blog/posts", false},
-		{http.MethodGet, "/api/public/v2/sites/blog/posts/some/path", false},
-		{http.MethodGet, "/api/public/v2/sites/blog/search", false},
-		{http.MethodPost, "/api/public/v2/sites/blog/posts", false},
+		{http.MethodGet, "/api/public/sites/blog", false},
+		{http.MethodGet, "/api/public/sites/blog/posts", false},
+		{http.MethodGet, "/api/public/sites/blog/posts/some/path", false},
+		{http.MethodGet, "/api/public/sites/blog/search", false},
+		{http.MethodPost, "/api/public/sites/blog/posts", false},
 	}
 	for _, tc := range cases {
 		request := httptest.NewRequest(tc.method, tc.path, nil)
@@ -328,9 +328,9 @@ func TestIdempotencyCoverageMatrix(t *testing.T) {
 // replay storage cannot collide across API families.
 func TestIdempotencyOperationNamespaces(t *testing.T) {
 	cases := []struct{ path, prefix string }{
-		{"/api/v2/assets/a/publish", "v2.http:"},
-		{"/api/open/v2/hooks/assets", "open.http:"},
-		{"/api/frontend/workspaces", "frontend.http:"},
+		{"/api/assets/a/publish", "api.http:"},
+		{"/api/open/hooks/assets", "open.http:"},
+		{"/api/workspaces", "api.http:"},
 	}
 	for _, tc := range cases {
 		request := httptest.NewRequest(http.MethodPost, tc.path, nil)
@@ -340,12 +340,12 @@ func TestIdempotencyOperationNamespaces(t *testing.T) {
 	}
 }
 
-// TestDraftPatchRequiresIfMatch: the v2 draft autosave refuses a missing
+// TestDraftPatchRequiresIfMatch: the draft autosave refuses a missing
 // If-Match precondition with 428.
 func TestDraftPatchRequiresIfMatch(t *testing.T) {
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPatch, "/api/v2/assets/x/draft", nil)
-	if _, ok := requireIfMatchV2(recorder, request); ok {
+	request := httptest.NewRequest(http.MethodPatch, "/api/assets/x/draft", nil)
+	if _, ok := requireIfMatch(recorder, request); ok {
 		t.Fatal("missing If-Match must be refused")
 	}
 	if recorder.Code != http.StatusPreconditionRequired {

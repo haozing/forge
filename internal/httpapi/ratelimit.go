@@ -128,7 +128,7 @@ func rateLimitMiddleware(next http.Handler) http.Handler {
 	trustXFF := trustForwardedFor()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodPost && (r.URL.Path == "/api/public/v2/sessions" || r.URL.Path == "/api/sessions"):
+		case r.Method == http.MethodPost && r.URL.Path == "/api/public/sessions":
 			addr := socketAddr(r, trustXFF)
 			// Coarse per-address backstop caps total credential traffic; the
 			// fine per-(address, login identifier) bucket stops single-account
@@ -192,7 +192,7 @@ func bearerToken(r *http.Request) string {
 	return ""
 }
 
-// peekLoginIdentifier extracts the login identifier (v2 email or legacy
+// peekLoginIdentifier extracts the login identifier (email or legacy$
 // login_name) from a small JSON login body for bucket keying. The body is
 // read bounded and restored so handlers see it unchanged; malformed bodies
 // simply yield an empty name.

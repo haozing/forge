@@ -43,7 +43,7 @@ type ArchiveResult struct {
 // Publish points the published marker at the asset's current working version.
 // The agent principal must hold asset.publish for the asset's model through
 // its AgentAccessPolicy; version selection by the caller is not part of the
-// v2 contract.
+// contract.
 func (s Service) Publish(ctx context.Context, principal auth.Principal, allowedModelIDs []string, assetID, versionID string) (PublishResult, error) {
 	if !validID(assetID) || len(allowedModelIDs) == 0 {
 		return PublishResult{}, ErrNotFound

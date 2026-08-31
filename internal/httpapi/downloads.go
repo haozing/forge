@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-func presignedAttachmentDownloadFinal(deps Dependencies) http.HandlerFunc {
+func presignedAttachmentDownload(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
@@ -25,6 +25,6 @@ func presignedAttachmentDownloadFinal(deps Dependencies) http.HandlerFunc {
 			return
 		}
 		expires := time.Now().UTC().Add(10 * time.Minute)
-		writeJSON(w, http.StatusOK, map[string]string{"download_url": "/api/frontend/attachments/" + id + "/download", "expires_at": expires.Format(time.RFC3339)})
+		writeJSON(w, http.StatusOK, map[string]string{"download_url": "/api/attachments/" + id + "/download", "expires_at": expires.Format(time.RFC3339)})
 	}
 }

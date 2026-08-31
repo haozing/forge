@@ -1,6 +1,6 @@
 package httpapi
 
-// v2_tag.go — the phase 2 tag domain surface: workspace tag catalog CRUD,
+// tag.go — the phase 2 tag domain surface: workspace tag catalog CRUD,
 // lifecycle (archive/restore) and the facet counts endpoint. Handlers only
 // authenticate, enforce the workspace policy, call the tag services and map
 // domain errors; all SQL lives inside internal/tag.
@@ -17,16 +17,16 @@ import (
 	"agentchunzhi/internal/tag"
 )
 
-// v2TagItem is one catalog entry; include_usage=true attaches the usage block.
-type v2TagItem struct {
+// TagItem is one catalog entry; include_usage=true attaches the usage block.
+type TagItem struct {
 	tag.Tag
 	Usage *tag.Usage `json:"usage,omitempty"`
 }
 
-// requireWorkspaceActionV2 gates a workspace-scoped v2 command through the
+// requireWorkspaceAction gates a workspace-scoped command through the
 // workspace policy. Permission denials answer 403; unknown workspaces stay
 // 404 so probing is distinguishable from denial.
-func requireWorkspaceActionV2(w http.ResponseWriter, r *http.Request, deps Dependencies, principal auth.Principal, workspaceID, action string) bool {
+func requireWorkspaceAction(w http.ResponseWriter, r *http.Request, deps Dependencies, principal auth.Principal, workspaceID, action string) bool {
 	if deps.WorkspacePolicy == nil {
 		writeError(w, http.StatusInternalServerError, "authorization_unconfigured")
 		return false
@@ -42,8 +42,8 @@ func requireWorkspaceActionV2(w http.ResponseWriter, r *http.Request, deps Depen
 	return true
 }
 
-// v2TagError maps tag domain errors onto the v2 status/code contract.
-func v2TagError(w http.ResponseWriter, err error) {
+// TagError maps tag domain errors onto the HTTP status/code contract.
+func TagError(w http.ResponseWriter, err error) {
 	switch {
 	case err == nil:
 		return
@@ -76,16 +76,16 @@ func v2TagError(w http.ResponseWriter, err error) {
 	}
 }
 
-type v2CreateTagRequest struct {
+type CreateTagRequest struct {
 	Key         string `json:"key"`
 	DisplayName string `json:"display_name"`
 }
 
-// v2TagCollection serves GET/POST /api/v2/workspaces/{workspaceId}/tags.
+// TagCollection serves GET/POST /api/workspaces/{workspaceId}/tags.
 // Reads need tag.read; creating needs tag.manage plus an Idempotency-Key.
-func v2TagCollection(deps Dependencies) http.HandlerFunc {
+func TagCollection(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		principal, ok := v2Principal(w, r, deps)
+		principal, ok := sessionPrincipal(w, r, deps)
 		if !ok {
 			return
 		}
@@ -95,7 +95,7 @@ func v2TagCollection(deps Dependencies) http.HandlerFunc {
 		}
 		switch r.Method {
 		case http.MethodGet:
-			if !requireWorkspaceActionV2(w, r, deps, principal, workspaceID, authz.ActionTagRead) {
+			if !requireWorkspaceAction(w, r, deps, principal, workspaceID, authz.ActionTagRead) {
 				return
 			}
 			includeUsage := false
@@ -116,10 +116,10 @@ func v2TagCollection(deps Dependencies) http.HandlerFunc {
 				Cursor:       r.URL.Query().Get("cursor"),
 			})
 			if err != nil {
-				v2TagError(w, err)
+				TagError(w, err)
 				return
 			}
-			items := make([]v2TagItem, 0, len(page.Items))
+			items := make([]TagItem, 0, len(page.Items))
 			// Usage is a representation enrichment only: it never participates
 			// in sort or cursor, so dynamic counts cannot shift the ordering.
 			if includeUsage && len(page.Items) > 0 {
@@ -129,11 +129,11 @@ func v2TagCollection(deps Dependencies) http.HandlerFunc {
 				}
 				usage, usageErr := deps.TagService.Usage(r.Context(), principal, workspaceID, ids)
 				if usageErr != nil {
-					v2TagError(w, usageErr)
+					TagError(w, usageErr)
 					return
 				}
 				for _, item := range page.Items {
-					entry := v2TagItem{Tag: item}
+					entry := TagItem{Tag: item}
 					if value, ok := usage[item.ID]; ok {
 						copied := value
 						entry.Usage = &copied
@@ -142,7 +142,7 @@ func v2TagCollection(deps Dependencies) http.HandlerFunc {
 				}
 			} else {
 				for _, item := range page.Items {
-					items = append(items, v2TagItem{Tag: item})
+					items = append(items, TagItem{Tag: item})
 				}
 			}
 			writeData(w, r, http.StatusOK, map[string]any{
@@ -150,19 +150,19 @@ func v2TagCollection(deps Dependencies) http.HandlerFunc {
 				"page":  pageFrom(len(items), atoiDefault(r.URL.Query().Get("limit"), 20), page.NextCursor),
 			})
 		case http.MethodPost:
-			if !requireWorkspaceActionV2(w, r, deps, principal, workspaceID, authz.ActionTagManage) {
+			if !requireWorkspaceAction(w, r, deps, principal, workspaceID, authz.ActionTagManage) {
 				return
 			}
-			if _, ok := requireIdempotencyKeyV2(w, r); !ok {
+			if _, ok := requireIdempotencyKey(w, r); !ok {
 				return
 			}
-			var input v2CreateTagRequest
-			if !decodeV2Body(w, r, &input, 16*1024) {
+			var input CreateTagRequest
+			if !decodeBody(w, r, &input, 16*1024) {
 				return
 			}
 			item, err := deps.TagService.Create(r.Context(), principal, workspaceID, input.Key, input.DisplayName)
 			if err != nil {
-				v2TagError(w, err)
+				TagError(w, err)
 				return
 			}
 			writeETag(w, item.ETag)
@@ -173,15 +173,15 @@ func v2TagCollection(deps Dependencies) http.HandlerFunc {
 	}
 }
 
-type v2RenameTagRequest struct {
+type RenameTagRequest struct {
 	DisplayName string `json:"display_name"`
 }
 
-// v2TagResource serves GET/PATCH /api/v2/workspaces/{workspaceId}/tags/{tagId}.
+// TagResource serves GET/PATCH /api/workspaces/{workspaceId}/tags/{tagId}.
 // PATCH accepts display_name only and demands the tag revision If-Match.
-func v2TagResource(deps Dependencies) http.HandlerFunc {
+func TagResource(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		principal, ok := v2Principal(w, r, deps)
+		principal, ok := sessionPrincipal(w, r, deps)
 		if !ok {
 			return
 		}
@@ -192,31 +192,31 @@ func v2TagResource(deps Dependencies) http.HandlerFunc {
 		}
 		switch r.Method {
 		case http.MethodGet:
-			if !requireWorkspaceActionV2(w, r, deps, principal, workspaceID, authz.ActionTagRead) {
+			if !requireWorkspaceAction(w, r, deps, principal, workspaceID, authz.ActionTagRead) {
 				return
 			}
 			item, err := deps.TagService.Get(r.Context(), principal, workspaceID, tagID)
 			if err != nil {
-				v2TagError(w, err)
+				TagError(w, err)
 				return
 			}
 			writeETag(w, item.ETag)
 			writeData(w, r, http.StatusOK, item)
 		case http.MethodPatch:
-			if !requireWorkspaceActionV2(w, r, deps, principal, workspaceID, authz.ActionTagManage) {
+			if !requireWorkspaceAction(w, r, deps, principal, workspaceID, authz.ActionTagManage) {
 				return
 			}
-			expected, ok := requireIfMatchV2(w, r)
+			expected, ok := requireIfMatch(w, r)
 			if !ok {
 				return
 			}
-			var input v2RenameTagRequest
-			if !decodeV2Body(w, r, &input, 16*1024) {
+			var input RenameTagRequest
+			if !decodeBody(w, r, &input, 16*1024) {
 				return
 			}
 			item, err := deps.TagService.Rename(r.Context(), principal, workspaceID, tagID, expected, input.DisplayName)
 			if err != nil {
-				v2TagError(w, err)
+				TagError(w, err)
 				return
 			}
 			writeETag(w, item.ETag)
@@ -227,20 +227,20 @@ func v2TagResource(deps Dependencies) http.HandlerFunc {
 	}
 }
 
-// v2TagArchive serves POST .../tags/{tagId}/archive (tag.manage, If-Match +
+// TagArchive serves POST .../tags/{tagId}/archive (tag.manage, If-Match +
 // Idempotency-Key).
-func v2TagArchive(deps Dependencies) http.HandlerFunc {
-	return v2TagLifecycleCommand(deps, deps.TagService.Archive)
+func TagArchive(deps Dependencies) http.HandlerFunc {
+	return TagLifecycleCommand(deps, deps.TagService.Archive)
 }
 
-// v2TagRestore serves POST .../tags/{tagId}/restore with the same guards.
-func v2TagRestore(deps Dependencies) http.HandlerFunc {
-	return v2TagLifecycleCommand(deps, deps.TagService.Restore)
+// TagRestore serves POST .../tags/{tagId}/restore with the same guards.
+func TagRestore(deps Dependencies) http.HandlerFunc {
+	return TagLifecycleCommand(deps, deps.TagService.Restore)
 }
 
-func v2TagLifecycleCommand(deps Dependencies, command func(ctx context.Context, principal auth.Principal, workspaceID, tagID, expectedRevision string) (tag.Tag, error)) http.HandlerFunc {
+func TagLifecycleCommand(deps Dependencies, command func(ctx context.Context, principal auth.Principal, workspaceID, tagID, expectedRevision string) (tag.Tag, error)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		principal, ok := v2Principal(w, r, deps)
+		principal, ok := sessionPrincipal(w, r, deps)
 		if !ok {
 			return
 		}
@@ -253,19 +253,19 @@ func v2TagLifecycleCommand(deps Dependencies, command func(ctx context.Context, 
 		if !requirePathUUID(w, workspaceID, tagID) {
 			return
 		}
-		if !requireWorkspaceActionV2(w, r, deps, principal, workspaceID, authz.ActionTagManage) {
+		if !requireWorkspaceAction(w, r, deps, principal, workspaceID, authz.ActionTagManage) {
 			return
 		}
-		expected, ok := requireIfMatchV2(w, r)
+		expected, ok := requireIfMatch(w, r)
 		if !ok {
 			return
 		}
-		if _, ok := requireIdempotencyKeyV2(w, r); !ok {
+		if _, ok := requireIdempotencyKey(w, r); !ok {
 			return
 		}
 		item, err := command(r.Context(), principal, workspaceID, tagID, expected)
 		if err != nil {
-			v2TagError(w, err)
+			TagError(w, err)
 			return
 		}
 		writeETag(w, item.ETag)
@@ -273,11 +273,11 @@ func v2TagLifecycleCommand(deps Dependencies, command func(ctx context.Context, 
 	}
 }
 
-// v2TagFacets serves GET /api/v2/workspaces/{workspaceId}/tag-facets: per-tag
+// TagFacets serves GET /api/workspaces/{workspaceId}/tag-facets: per-tag
 // distinct asset counts under the working or published scope.
-func v2TagFacets(deps Dependencies) http.HandlerFunc {
+func TagFacets(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		principal, ok := v2Principal(w, r, deps)
+		principal, ok := sessionPrincipal(w, r, deps)
 		if !ok {
 			return
 		}
@@ -290,10 +290,10 @@ func v2TagFacets(deps Dependencies) http.HandlerFunc {
 			return
 		}
 		// Facets read both the catalog and the assets it counts over.
-		if !requireWorkspaceActionV2(w, r, deps, principal, workspaceID, authz.ActionTagRead) {
+		if !requireWorkspaceAction(w, r, deps, principal, workspaceID, authz.ActionTagRead) {
 			return
 		}
-		if !requireWorkspaceActionV2(w, r, deps, principal, workspaceID, authz.ActionAssetRead) {
+		if !requireWorkspaceAction(w, r, deps, principal, workspaceID, authz.ActionAssetRead) {
 			return
 		}
 		query := r.URL.Query()
@@ -327,7 +327,7 @@ func v2TagFacets(deps Dependencies) http.HandlerFunc {
 			None: query["tags_none"],
 		}, tagStatus, atoiDefault(query.Get("limit"), 50))
 		if err != nil {
-			v2TagError(w, err)
+			TagError(w, err)
 			return
 		}
 		writeData(w, r, http.StatusOK, map[string]any{"items": items, "page": CursorPage{NextCursor: nil, HasMore: false}})

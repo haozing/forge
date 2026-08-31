@@ -9,7 +9,7 @@ import (
 	"agentchunzhi/internal/attachment"
 )
 
-func writeFrontendAttachmentError(w http.ResponseWriter, err error, fallback string) {
+func writeAttachmentError(w http.ResponseWriter, err error, fallback string) {
 	switch {
 	case errors.Is(err, attachment.ErrNotFound):
 		writeError(w, http.StatusNotFound, "attachment_not_found")
@@ -20,7 +20,7 @@ func writeFrontendAttachmentError(w http.ResponseWriter, err error, fallback str
 	}
 }
 
-func listFrontendAttachments(deps Dependencies) http.HandlerFunc {
+func listAttachments(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
@@ -32,14 +32,14 @@ func listFrontendAttachments(deps Dependencies) http.HandlerFunc {
 		}
 		items, err := deps.AttachmentService.List(r.Context(), principal, r.PathValue("versionId"))
 		if err != nil {
-			writeFrontendAttachmentError(w, err, "attachment_list_failed")
+			writeAttachmentError(w, err, "attachment_list_failed")
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"items": items, "has_more": false})
 	}
 }
 
-func getFrontendAttachment(deps Dependencies) http.HandlerFunc {
+func getAttachment(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
@@ -51,18 +51,18 @@ func getFrontendAttachment(deps Dependencies) http.HandlerFunc {
 		}
 		item, err := deps.AttachmentService.Status(r.Context(), principal, r.PathValue("attachmentId"))
 		if err != nil {
-			writeFrontendAttachmentError(w, err, "attachment_status_failed")
+			writeAttachmentError(w, err, "attachment_status_failed")
 			return
 		}
 		writeJSON(w, http.StatusOK, item)
 	}
 }
 
-type patchFrontendAttachmentRequest struct {
+type patchAttachmentRequest struct {
 	Filename string `json:"filename"`
 }
 
-func patchFrontendAttachment(deps Dependencies) http.HandlerFunc {
+func patchAttachment(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPatch {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
@@ -76,7 +76,7 @@ func patchFrontendAttachment(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
 			return
 		}
-		var input patchFrontendAttachmentRequest
+		var input patchAttachmentRequest
 		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 32*1024))
 		decoder.DisallowUnknownFields()
 		if err := decoder.Decode(&input); err != nil || strings.TrimSpace(input.Filename) == "" {
@@ -85,14 +85,14 @@ func patchFrontendAttachment(deps Dependencies) http.HandlerFunc {
 		}
 		item, err := deps.AttachmentService.UpdateFilename(r.Context(), principal, r.PathValue("attachmentId"), input.Filename)
 		if err != nil {
-			writeFrontendAttachmentError(w, err, "attachment_update_failed")
+			writeAttachmentError(w, err, "attachment_update_failed")
 			return
 		}
 		writeJSON(w, http.StatusOK, item)
 	}
 }
 
-func deleteFrontendAttachment(deps Dependencies) http.HandlerFunc {
+func deleteAttachment(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodDelete {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
@@ -107,18 +107,18 @@ func deleteFrontendAttachment(deps Dependencies) http.HandlerFunc {
 			return
 		}
 		if err := deps.AttachmentService.Delete(r.Context(), principal, r.PathValue("attachmentId")); err != nil {
-			writeFrontendAttachmentError(w, err, "attachment_delete_failed")
+			writeAttachmentError(w, err, "attachment_delete_failed")
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
 	}
 }
 
-type linkFrontendAttachmentRequest struct {
+type linkAttachmentRequest struct {
 	AssetID string `json:"asset_id"`
 }
 
-func linkFrontendAttachment(deps Dependencies) http.HandlerFunc {
+func linkAttachment(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
@@ -132,7 +132,7 @@ func linkFrontendAttachment(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
 			return
 		}
-		var input linkFrontendAttachmentRequest
+		var input linkAttachmentRequest
 		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 32*1024))
 		decoder.DisallowUnknownFields()
 		if err := decoder.Decode(&input); err != nil || strings.TrimSpace(input.AssetID) == "" {
@@ -140,15 +140,15 @@ func linkFrontendAttachment(deps Dependencies) http.HandlerFunc {
 			return
 		}
 		if err := deps.AttachmentService.Link(r.Context(), principal, r.PathValue("attachmentId"), input.AssetID); err != nil {
-			writeFrontendAttachmentError(w, err, "attachment_link_failed")
+			writeAttachmentError(w, err, "attachment_link_failed")
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	}
 }
 
-func frontendAssetVersionAttachments(deps Dependencies) http.HandlerFunc {
-	list := listFrontendAttachments(deps)
+func assetVersionAttachments(deps Dependencies) http.HandlerFunc {
+	list := listAttachments(deps)
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
@@ -159,10 +159,10 @@ func frontendAssetVersionAttachments(deps Dependencies) http.HandlerFunc {
 	}
 }
 
-func frontendAttachmentResource(deps Dependencies) http.HandlerFunc {
-	get := getFrontendAttachment(deps)
-	patch := patchFrontendAttachment(deps)
-	remove := deleteFrontendAttachment(deps)
+func attachmentResource(deps Dependencies) http.HandlerFunc {
+	get := getAttachment(deps)
+	patch := patchAttachment(deps)
+	remove := deleteAttachment(deps)
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:

@@ -32,7 +32,7 @@ func writeAgentApplicationError(w http.ResponseWriter, err error, fallback strin
 	}
 }
 
-func frontendAgentApplications(deps Dependencies) http.HandlerFunc {
+func agentApplications(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
@@ -51,7 +51,7 @@ func frontendAgentApplications(deps Dependencies) http.HandlerFunc {
 	}
 }
 
-func workspaceAgentApplicationsFinal(deps Dependencies) http.HandlerFunc {
+func workspaceAgentApplications(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
 			listWorkspaceAgentApplications(deps)(w, r)
@@ -152,7 +152,7 @@ func workspaceAgentApplicationsFinal(deps Dependencies) http.HandlerFunc {
 	}
 }
 
-func frontendAgentApplicationResource(deps Dependencies) http.HandlerFunc {
+func agentApplicationResource(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		principal, ok := requireMemberSession(w, r, deps)
 		if !ok {
@@ -206,7 +206,7 @@ func frontendAgentApplicationResource(deps Dependencies) http.HandlerFunc {
 	}
 }
 
-func frontendAgentApplicationStatus(deps Dependencies, status string) http.HandlerFunc {
+func agentApplicationStatus(deps Dependencies, status string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
@@ -230,7 +230,7 @@ func frontendAgentApplicationStatus(deps Dependencies, status string) http.Handl
 	}
 }
 
-func agentSessionResourceFinal(deps Dependencies) http.HandlerFunc {
+func agentSessionResource(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		member, ok := requireMemberSession(w, r, deps)
 		if !ok {
@@ -282,7 +282,7 @@ func agentSessionResourceFinal(deps Dependencies) http.HandlerFunc {
 	}
 }
 
-func cancelAgentSessionFinal(deps Dependencies) http.HandlerFunc {
+func cancelAgentSession(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")

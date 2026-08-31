@@ -105,7 +105,7 @@ func NewHandler() http.Handler {
 }
 
 func NewHandlerWithDeps(deps Dependencies) http.Handler {
-	var handler http.Handler = frontendIdempotency(deps, newRouter(deps))
+	var handler http.Handler = httpIdempotency(deps, newRouter(deps))
 	handler = rateLimitMiddleware(handler)
 	if len(deps.AllowedOrigins) > 0 {
 		handler = withOriginPolicy(deps.AllowedOrigins, handler)
@@ -1493,7 +1493,7 @@ func streamAgentSession(deps Dependencies) http.HandlerFunc {
 		}
 		setSSEHeaders(w)
 		if _, hasLastID := parseLastEventID(r); hasLastID {
-			_ = writeSSE(w, flusher, "reset", map[string]string{"recovery": "/api/frontend/conversations/" + input.ConversationID + "/messages"})
+			_ = writeSSE(w, flusher, "reset", map[string]string{"recovery": "/api/conversations/" + input.ConversationID + "/messages"})
 			return
 		}
 		chatOutcome := "error"
@@ -2018,35 +2018,6 @@ func getAgentTask(deps Dependencies) http.HandlerFunc {
 	}
 }
 
-func attachmentStatus(deps Dependencies) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
-			return
-		}
-		principal, err := deps.SessionService.Authenticate(r.Context(), r)
-		if err != nil {
-			writeError(w, http.StatusUnauthorized, "unauthorized")
-			return
-		}
-		attachmentID := r.PathValue("attachmentId")
-		if !agentquery.ValidUUID(attachmentID) {
-			writeError(w, http.StatusNotFound, "attachment_not_found")
-			return
-		}
-		result, err := deps.AttachmentService.Status(r.Context(), principal, attachmentID)
-		if errors.Is(err, attachment.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "attachment_not_found")
-			return
-		}
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "attachment_status_failed")
-			return
-		}
-		writeJSON(w, http.StatusOK, result)
-	}
-}
-
 func downloadAttachment(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -2141,7 +2112,7 @@ func health(w http.ResponseWriter, r *http.Request) {
 }
 
 // readyRoute adapts the readiness probe for the route registry; the full
-// phase 3 readiness checks live in v2_query.go.
+// phase 3 readiness checks live in query.go.
 func readyRoute(deps Dependencies) http.HandlerFunc {
 	return ready(deps)
 }

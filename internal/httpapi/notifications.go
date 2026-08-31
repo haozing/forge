@@ -23,7 +23,7 @@ type finalNotification struct {
 	CreatedAt   time.Time      `json:"created_at"`
 }
 
-func listNotificationsFinal(deps Dependencies) http.HandlerFunc {
+func listNotifications(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
@@ -76,7 +76,7 @@ func listNotificationsFinal(deps Dependencies) http.HandlerFunc {
 	}
 }
 
-func unreadNotificationCountFinal(deps Dependencies) http.HandlerFunc {
+func unreadNotificationCount(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
@@ -103,7 +103,7 @@ func unreadNotificationCountFinal(deps Dependencies) http.HandlerFunc {
 	}
 }
 
-func markNotificationReadFinal(deps Dependencies) http.HandlerFunc {
+func markNotificationRead(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
@@ -133,7 +133,7 @@ func markNotificationReadFinal(deps Dependencies) http.HandlerFunc {
 	}
 }
 
-func markAllNotificationsReadFinal(deps Dependencies) http.HandlerFunc {
+func markAllNotificationsRead(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
@@ -158,7 +158,7 @@ func markAllNotificationsReadFinal(deps Dependencies) http.HandlerFunc {
 	}
 }
 
-func notificationStreamFinal(deps Dependencies) http.HandlerFunc {
+func notificationStream(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")

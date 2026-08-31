@@ -3,7 +3,7 @@
 // authorization code can share one definition.
 package access
 
-// Visibility values fixed by the v2 contract. The legacy values
+// Visibility values fixed by the contract. The legacy values
 // login/private/internal are retired: login is an authentication method,
 // internal overlapped workspace, and private has no shared ownership model.
 const (
@@ -19,7 +19,7 @@ var AllVisibilities = []string{
 	VisibilityPublic,
 }
 
-// Valid reports whether value is one of the three v2 visibilities.
+// Valid reports whether value is one of the three visibilities.
 func Valid(value string) bool {
 	switch value {
 	case VisibilityWorkspace, VisibilityOrganization, VisibilityPublic:

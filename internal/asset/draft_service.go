@@ -908,7 +908,7 @@ func (s MemberService) GetDraft(ctx context.Context, principal auth.Principal, a
 }
 
 // DraftTags returns the sorted tag summaries currently attached to the shared
-// draft. It backs the v2 draft representation, where tags ride along with the
+// draft. It backs the draft representation, where tags ride along with the
 // draft payload instead of a separate lookup.
 func (s MemberService) DraftTags(ctx context.Context, principal auth.Principal, assetID string) ([]tag.Summary, error) {
 	if !validID(assetID) {

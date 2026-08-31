@@ -1,4 +1,4 @@
--- verify-v2-schema.sql — schema contract spot checks for the v2 baseline.
+-- verify-schema.sql — schema contract spot checks for the baseline.
 -- Run inside the development database after cmd/migrate. Every violation
 -- prints a "fail:" row; a clean database prints only "schema_contract_ok".
 -- The ok marker aggregates ALL checks: any violation (or a missing object)

@@ -182,7 +182,7 @@ func TestWriteAuditEventWithMemorySink(t *testing.T) {
 }
 
 func TestValidMemberRole(t *testing.T) {
-	// v2 contract: the closed workspace role set is admin/editor/reviewer/viewer.
+	// contract: the closed workspace role set is admin/editor/reviewer/viewer.
 	// There is no workspace owner and no workspace member role.
 	valid := []string{"admin", "editor", "reviewer", "viewer"}
 	for _, role := range valid {

@@ -23,21 +23,21 @@ func TestIfMatchWildcardDetection(t *testing.T) {
 	}
 }
 
-// TestRequireIfMatchV2PassesWildcardThrough: the guard only enforces presence;
+// TestRequireIfMatchPassesWildcardThrough: the guard only enforces presence;
 // the wildcard value flows to the comparison sites unchanged.
-func TestRequireIfMatchV2PassesWildcardThrough(t *testing.T) {
-	request := httptest.NewRequest(http.MethodPatch, "/api/v2/me", nil)
+func TestRequireIfMatchPassesWildcardThrough(t *testing.T) {
+	request := httptest.NewRequest(http.MethodPatch, "/api/me", nil)
 	request.Header.Set("If-Match", `"*"`)
-	value, ok := requireIfMatchV2(httptest.NewRecorder(), request)
+	value, ok := requireIfMatch(httptest.NewRecorder(), request)
 	if !ok || value != `"*"` {
 		t.Fatalf("wildcard If-Match must pass through, got %q ok=%v", value, ok)
 	}
 	if !ifMatchWildcard(value) {
 		t.Fatal("the passed-through value must be recognized by ifMatchWildcard")
 	}
-	missing := httptest.NewRequest(http.MethodPatch, "/api/v2/me", nil)
+	missing := httptest.NewRequest(http.MethodPatch, "/api/me", nil)
 	recorder := httptest.NewRecorder()
-	if _, ok := requireIfMatchV2(recorder, missing); ok {
+	if _, ok := requireIfMatch(recorder, missing); ok {
 		t.Fatal("missing If-Match must be refused")
 	}
 	if recorder.Code != http.StatusPreconditionRequired || !strings.Contains(recorder.Body.String(), "precondition_required") {

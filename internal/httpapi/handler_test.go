@@ -31,7 +31,7 @@ func TestHealthRejectsNonGet(t *testing.T) {
 }
 
 func TestLegacyStructuredQueryRouteIsRemoved(t *testing.T) {
-	req := httptest.NewRequest(http.MethodGet, "/api/open/v1/query/structured?model_id=00000000-0000-4000-8000-000000000001", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/open/query/structured?model_id=00000000-0000-4000-8000-000000000001", nil)
 	rec := httptest.NewRecorder()
 
 	NewHandler().ServeHTTP(rec, req)
@@ -42,7 +42,7 @@ func TestLegacyStructuredQueryRouteIsRemoved(t *testing.T) {
 }
 
 func TestLegacyFulltextQueryRouteIsRemoved(t *testing.T) {
-	req := httptest.NewRequest(http.MethodGet, "/api/open/v1/query/fulltext?q=hello", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/open/query/fulltext?q=hello", nil)
 	rec := httptest.NewRecorder()
 
 	NewHandler().ServeHTTP(rec, req)
@@ -52,10 +52,10 @@ func TestLegacyFulltextQueryRouteIsRemoved(t *testing.T) {
 	}
 }
 
-// Phase 3 retired /api/open/v1/query (see docs/route-retirement-ledger.md);
-// the unified surface lives at /api/open/v2/query.
+// Phase 3 retired /api/open/query (see docs/route-retirement-ledger.md);
+// the unified surface lives at /api/open/query.
 func TestUnifiedQueryRequiresAPIKey(t *testing.T) {
-	req := httptest.NewRequest(http.MethodPost, "/api/open/v2/query", strings.NewReader(`{"mode":"hybrid","query":"hello"}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/open/query", strings.NewReader(`{"mode":"hybrid","query":"hello"}`))
 	rec := httptest.NewRecorder()
 
 	NewHandler().ServeHTTP(rec, req)
@@ -66,18 +66,20 @@ func TestUnifiedQueryRequiresAPIKey(t *testing.T) {
 }
 
 func TestLegacyOpenQueryRouteIsRetired(t *testing.T) {
-	req := httptest.NewRequest(http.MethodPost, "/api/open/v1/query", strings.NewReader(`{"mode":"lexical","query":"hello"}`))
-	rec := httptest.NewRecorder()
+	for _, path := range []string{"/api/open/v1/query", "/api/open/v2/query"} {
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"mode":"lexical","query":"hello"}`))
+		rec := httptest.NewRecorder()
 
-	NewHandler().ServeHTTP(rec, req)
+		NewHandler().ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("expected status %d, got %d", http.StatusNotFound, rec.Code)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("%s: expected status %d, got %d", path, http.StatusNotFound, rec.Code)
+		}
 	}
 }
 
 func TestUnifiedQueryRejectsUnavailableMode(t *testing.T) {
-	req := httptest.NewRequest(http.MethodPost, "/api/open/v2/query", strings.NewReader(`{"mode":"semantic","query":"hello"}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/open/query", strings.NewReader(`{"mode":"semantic","query":"hello"}`))
 	rec := httptest.NewRecorder()
 
 	NewHandler().ServeHTTP(rec, req)
@@ -88,7 +90,7 @@ func TestUnifiedQueryRejectsUnavailableMode(t *testing.T) {
 }
 
 func TestMemberQueryRouteRejectsUnknownFields(t *testing.T) {
-	req := httptest.NewRequest(http.MethodPost, "/api/v2/workspaces/00000000-0000-4000-8000-000000000001/query", strings.NewReader(`{"mode":"hybrid","query":"hello","filters":{}}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/workspaces/00000000-0000-4000-8000-000000000001/query", strings.NewReader(`{"mode":"hybrid","query":"hello","filters":{}}`))
 	rec := httptest.NewRecorder()
 
 	NewHandler().ServeHTTP(rec, req)
@@ -99,7 +101,7 @@ func TestMemberQueryRouteRejectsUnknownFields(t *testing.T) {
 }
 
 func TestConversationMessagesListRequiresSession(t *testing.T) {
-	req := httptest.NewRequest(http.MethodGet, "/api/frontend/conversations/00000000-0000-4000-8000-000000000001/messages", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/conversations/00000000-0000-4000-8000-000000000001/messages", nil)
 	rec := httptest.NewRecorder()
 
 	NewHandler().ServeHTTP(rec, req)
@@ -110,7 +112,7 @@ func TestConversationMessagesListRequiresSession(t *testing.T) {
 }
 
 func TestConversationMediaRegisterRequiresSession(t *testing.T) {
-	req := httptest.NewRequest(http.MethodPost, "/api/frontend/conversations/00000000-0000-4000-8000-000000000001/media", strings.NewReader(`{"attachment_id":"00000000-0000-4000-8000-000000000002","media_kind":"audio"}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/conversations/00000000-0000-4000-8000-000000000001/media", strings.NewReader(`{"attachment_id":"00000000-0000-4000-8000-000000000002","media_kind":"audio"}`))
 	req.Header.Set("Idempotency-Key", "conversation-media-register")
 	rec := httptest.NewRecorder()
 
@@ -122,7 +124,7 @@ func TestConversationMediaRegisterRequiresSession(t *testing.T) {
 }
 
 func TestConversationMediaTranscriptionRequiresSession(t *testing.T) {
-	req := httptest.NewRequest(http.MethodPost, "/api/frontend/conversation-media/00000000-0000-4000-8000-000000000001/transcribe", nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/conversation-media/00000000-0000-4000-8000-000000000001/transcribe", nil)
 	req.Header.Set("Idempotency-Key", "conversation-media-transcribe")
 	rec := httptest.NewRecorder()
 
@@ -134,7 +136,7 @@ func TestConversationMediaTranscriptionRequiresSession(t *testing.T) {
 }
 
 func TestSemanticQueryIsNotExposed(t *testing.T) {
-	req := httptest.NewRequest(http.MethodGet, "/api/open/v1/query/semantic?q=hello", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/open/query/semantic?q=hello", nil)
 	rec := httptest.NewRecorder()
 
 	NewHandler().ServeHTTP(rec, req)
@@ -145,7 +147,7 @@ func TestSemanticQueryIsNotExposed(t *testing.T) {
 }
 
 func TestAssetPublishRequiresAPIKey(t *testing.T) {
-	req := httptest.NewRequest(http.MethodPost, "/api/open/v1/assets/00000000-0000-4000-8000-000000000001/publish", strings.NewReader(`{"version_id":"00000000-0000-4000-8000-000000000002"}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/open/assets/00000000-0000-4000-8000-000000000001/publish", strings.NewReader(`{"version_id":"00000000-0000-4000-8000-000000000002"}`))
 	rec := httptest.NewRecorder()
 
 	NewHandler().ServeHTTP(rec, req)
@@ -156,7 +158,7 @@ func TestAssetPublishRequiresAPIKey(t *testing.T) {
 }
 
 func TestAssetCreateRequiresAPIKey(t *testing.T) {
-	req := httptest.NewRequest(http.MethodPost, "/api/open/v1/assets", strings.NewReader(`{"resource_model_id":"00000000-0000-4000-8000-000000000001"}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/open/assets", strings.NewReader(`{"resource_model_id":"00000000-0000-4000-8000-000000000001"}`))
 	rec := httptest.NewRecorder()
 	NewHandler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
@@ -165,7 +167,7 @@ func TestAssetCreateRequiresAPIKey(t *testing.T) {
 }
 
 func TestAssetUpdateRequiresAPIKey(t *testing.T) {
-	req := httptest.NewRequest(http.MethodPatch, "/api/open/v1/assets/00000000-0000-4000-8000-000000000001", strings.NewReader(`{"title":"updated"}`))
+	req := httptest.NewRequest(http.MethodPatch, "/api/open/assets/00000000-0000-4000-8000-000000000001", strings.NewReader(`{"title":"updated"}`))
 	rec := httptest.NewRecorder()
 	NewHandler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
@@ -174,7 +176,7 @@ func TestAssetUpdateRequiresAPIKey(t *testing.T) {
 }
 
 func TestAssetReferencesRequiresAPIKey(t *testing.T) {
-	req := httptest.NewRequest(http.MethodGet, "/api/open/v1/assets/00000000-0000-4000-8000-000000000001/references", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/open/assets/00000000-0000-4000-8000-000000000001/references", nil)
 	rec := httptest.NewRecorder()
 	NewHandler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
@@ -183,7 +185,7 @@ func TestAssetReferencesRequiresAPIKey(t *testing.T) {
 }
 
 func TestAgentTaskCreateRequiresAPIKey(t *testing.T) {
-	req := httptest.NewRequest(http.MethodPost, "/api/open/v1/agent/tasks", strings.NewReader(`{"operation":"prepare_asset"}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/open/agent-tasks", strings.NewReader(`{"operation":"prepare_asset"}`))
 	req.Header.Set("Idempotency-Key", "agent-task-create-idempotency")
 	rec := httptest.NewRecorder()
 	NewHandler().ServeHTTP(rec, req)
@@ -193,7 +195,7 @@ func TestAgentTaskCreateRequiresAPIKey(t *testing.T) {
 }
 
 func TestAgentTaskGetRequiresAPIKey(t *testing.T) {
-	req := httptest.NewRequest(http.MethodGet, "/api/open/v1/agent/tasks/00000000-0000-4000-8000-000000000001", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/open/agent-tasks/00000000-0000-4000-8000-000000000001", nil)
 	rec := httptest.NewRecorder()
 	NewHandler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
@@ -274,7 +276,7 @@ func TestParseOptionalExpiry(t *testing.T) {
 }
 
 func TestAgentApplicationSessionRequiresMemberSession(t *testing.T) {
-	req := httptest.NewRequest(http.MethodPost, "/api/frontend/agent-applications/00000000-0000-4000-8000-000000000001/sessions", nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/agent-applications/00000000-0000-4000-8000-000000000001/sessions", nil)
 	req.Header.Set("Idempotency-Key", "agent-session-idempotency")
 	rec := httptest.NewRecorder()
 	NewHandler().ServeHTTP(rec, req)
@@ -284,7 +286,7 @@ func TestAgentApplicationSessionRequiresMemberSession(t *testing.T) {
 }
 
 func TestAgentSessionReferenceValidationRequiresMemberSession(t *testing.T) {
-	req := httptest.NewRequest(http.MethodPost, "/api/frontend/agent-sessions/00000000-0000-4000-8000-000000000001/references/validate", strings.NewReader(`{"references":[]}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/agent-sessions/00000000-0000-4000-8000-000000000001/references/validate", strings.NewReader(`{"references":[]}`))
 	rec := httptest.NewRecorder()
 	NewHandler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
@@ -293,7 +295,7 @@ func TestAgentSessionReferenceValidationRequiresMemberSession(t *testing.T) {
 }
 
 func TestAgentSessionChatRequiresMemberSession(t *testing.T) {
-	req := httptest.NewRequest(http.MethodPost, "/api/frontend/agent-sessions/00000000-0000-4000-8000-000000000001/chat", strings.NewReader(`{"query":"hello"}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/agent-sessions/00000000-0000-4000-8000-000000000001/chat", strings.NewReader(`{"query":"hello"}`))
 	rec := httptest.NewRecorder()
 	NewHandler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
@@ -302,7 +304,7 @@ func TestAgentSessionChatRequiresMemberSession(t *testing.T) {
 }
 
 func TestAgentSessionChatStreamRequiresMemberSession(t *testing.T) {
-	req := httptest.NewRequest(http.MethodPost, "/api/frontend/agent-sessions/00000000-0000-4000-8000-000000000001/chat/stream", strings.NewReader(`{"query":"hello"}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/agent-sessions/00000000-0000-4000-8000-000000000001/chat/stream", strings.NewReader(`{"query":"hello"}`))
 	rec := httptest.NewRecorder()
 	NewHandler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
@@ -311,7 +313,7 @@ func TestAgentSessionChatStreamRequiresMemberSession(t *testing.T) {
 }
 
 func TestAttachmentDownloadRequiresAPIKey(t *testing.T) {
-	req := httptest.NewRequest(http.MethodGet, "/api/open/v1/attachments/00000000-0000-4000-8000-000000000001/download", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/open/attachments/00000000-0000-4000-8000-000000000001/download", nil)
 	rec := httptest.NewRecorder()
 
 	NewHandler().ServeHTTP(rec, req)
@@ -333,7 +335,7 @@ func TestReadyRequiresDatabase(t *testing.T) {
 }
 
 func TestSessionRejectsMalformedRequest(t *testing.T) {
-	req := httptest.NewRequest(http.MethodPost, "/api/public/v2/sessions", nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/public/sessions", nil)
 	rec := httptest.NewRecorder()
 
 	NewHandler().ServeHTTP(rec, req)
@@ -344,7 +346,7 @@ func TestSessionRejectsMalformedRequest(t *testing.T) {
 }
 
 func TestCurrentUserRequiresSession(t *testing.T) {
-	req := httptest.NewRequest(http.MethodGet, "/api/v2/me", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/me", nil)
 	rec := httptest.NewRecorder()
 
 	NewHandler().ServeHTTP(rec, req)
@@ -354,25 +356,32 @@ func TestCurrentUserRequiresSession(t *testing.T) {
 	}
 }
 
-// TestPhase1LegacyRoutesAreRetired pins the phase 1 route retirement ledger:
-// the legacy identity/workspace paths answer 404 without compatibility
-// redirects once the v2 replacements are registered.
-func TestPhase1LegacyRoutesAreRetired(t *testing.T) {
+// TestVersionedAndLegacyPrefixesAreGone pins the dev-stage route cleanup: the
+// API is a single unversioned tree, so the retired /api/v2, /api/frontend,
+// /api/open/v1, /api/open/v2 and /api/public/v2 prefixes answer 404 without
+// compatibility redirects, as do the legacy sub-paths that were never
+// re-registered.
+func TestVersionedAndLegacyPrefixesAreGone(t *testing.T) {
 	paths := []string{
-		"/api/me",
+		// Retired prefixes must not serve anything.
+		"/api/v2/me",
+		"/api/v2/workspaces/00000000-0000-4000-8000-000000000001/tags",
+		"/api/frontend/workspaces/00000000-0000-4000-8000-000000000001/assets",
+		"/api/frontend/assets/00000000-0000-4000-8000-000000000001",
+		"/api/open/v1/assets",
+		"/api/open/v1/agent/tasks/00000000-0000-4000-8000-000000000001",
+		"/api/open/v2/query",
+		"/api/public/v2/sessions",
+		"/api/public/v2/sites/demo",
+		// Legacy sub-paths that were never re-registered under the clean tree.
 		"/api/me/profile",
-		"/api/sessions",
-		"/api/frontend/me/preferences",
-		"/api/frontend/workspaces",
-		"/api/frontend/workspaces/00000000-0000-4000-8000-000000000001",
-		"/api/frontend/workspaces/00000000-0000-4000-8000-000000000001/members",
-		"/api/frontend/workspaces/00000000-0000-4000-8000-000000000001/member-invitations",
-		"/api/frontend/workspaces/00000000-0000-4000-8000-000000000001/settings",
-		"/api/frontend/workspaces/00000000-0000-4000-8000-000000000001/counts",
-		"/api/frontend/workspaces/00000000-0000-4000-8000-000000000001/stats",
-		"/api/frontend/workspaces/00000000-0000-4000-8000-000000000001/activity",
-		"/api/frontend/workspaces/00000000-0000-4000-8000-000000000001/audit-logs",
-		"/api/frontend/workspace-members/00000000-0000-4000-8000-000000000001",
+		"/api/workspaces/00000000-0000-4000-8000-000000000001/member-invitations",
+		"/api/workspaces/00000000-0000-4000-8000-000000000001/settings",
+		"/api/workspaces/00000000-0000-4000-8000-000000000001/counts",
+		"/api/workspaces/00000000-0000-4000-8000-000000000001/stats",
+		"/api/workspaces/00000000-0000-4000-8000-000000000001/activity",
+		"/api/workspaces/00000000-0000-4000-8000-000000000001/audit-logs",
+		"/api/workspace-members/00000000-0000-4000-8000-000000000001",
 	}
 	handler := NewHandler()
 	for _, path := range paths {
@@ -389,25 +398,25 @@ func TestPhase1LegacyRoutesAreRetired(t *testing.T) {
 	}
 }
 
-// TestV2IdentityRoutesRequireSession covers the member identity surface: all
+// TestIdentityRoutesRequireSession covers the member identity surface: all
 // of them answer 401 without a session cookie.
-func TestV2IdentityRoutesRequireSession(t *testing.T) {
+func TestIdentityRoutesRequireSession(t *testing.T) {
 	cases := []struct {
 		method string
 		path   string
 	}{
-		{http.MethodGet, "/api/v2/me"},
-		{http.MethodPatch, "/api/v2/me"},
-		{http.MethodGet, "/api/v2/me/preferences"},
-		{http.MethodPut, "/api/v2/me/password"},
-		{http.MethodGet, "/api/v2/sessions"},
-		{http.MethodDelete, "/api/v2/sessions/current"},
-		{http.MethodDelete, "/api/v2/sessions/00000000-0000-4000-8000-000000000001"},
-		{http.MethodGet, "/api/v2/organization"},
-		{http.MethodGet, "/api/v2/organization/members"},
-		{http.MethodGet, "/api/v2/organization/invitations"},
-		{http.MethodGet, "/api/v2/workspaces"},
-		{http.MethodGet, "/api/v2/workspaces/00000000-0000-4000-8000-000000000001/members"},
+		{http.MethodGet, "/api/me"},
+		{http.MethodPatch, "/api/me"},
+		{http.MethodGet, "/api/me/preferences"},
+		{http.MethodPut, "/api/me/password"},
+		{http.MethodGet, "/api/sessions"},
+		{http.MethodDelete, "/api/sessions/current"},
+		{http.MethodDelete, "/api/sessions/00000000-0000-4000-8000-000000000001"},
+		{http.MethodGet, "/api/organization"},
+		{http.MethodGet, "/api/organization/members"},
+		{http.MethodGet, "/api/organization/invitations"},
+		{http.MethodGet, "/api/workspaces"},
+		{http.MethodGet, "/api/workspaces/00000000-0000-4000-8000-000000000001/members"},
 	}
 	handler := NewHandler()
 	for _, tc := range cases {
@@ -423,12 +432,12 @@ func TestV2IdentityRoutesRequireSession(t *testing.T) {
 }
 
 // TestOriginPolicyRejectsForeignOrigins covers the CSRF Origin allowlist for
-// unsafe v2 requests.
+// unsafe requests.
 func TestOriginPolicyRejectsForeignOrigins(t *testing.T) {
 	deps := Dependencies{AllowedOrigins: []string{"https://app.example.com"}}
 	handler := NewHandlerWithDeps(deps)
 
-	req := httptest.NewRequest(http.MethodPost, "/api/public/v2/sessions", strings.NewReader(`{"email":"a@b.co","password":"x"}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/public/sessions", strings.NewReader(`{"email":"a@b.co","password":"x"}`))
 	req.Header.Set("Origin", "https://evil.example")
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -441,7 +450,7 @@ func TestOriginPolicyRejectsForeignOrigins(t *testing.T) {
 
 	// Allowed origin passes through to the handler (which then fails on the
 	// unconfigured database with a validation error, not 403).
-	req = httptest.NewRequest(http.MethodPost, "/api/public/v2/sessions", strings.NewReader(`{}`))
+	req = httptest.NewRequest(http.MethodPost, "/api/public/sessions", strings.NewReader(`{}`))
 	req.Header.Set("Origin", "https://app.example.com")
 	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -450,7 +459,7 @@ func TestOriginPolicyRejectsForeignOrigins(t *testing.T) {
 	}
 
 	// GET requests are exempt from the policy.
-	req = httptest.NewRequest(http.MethodGet, "/api/v2/me", nil)
+	req = httptest.NewRequest(http.MethodGet, "/api/me", nil)
 	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code == http.StatusForbidden {
@@ -458,7 +467,7 @@ func TestOriginPolicyRejectsForeignOrigins(t *testing.T) {
 	}
 
 	// Without configuration the policy is a no-op.
-	req = httptest.NewRequest(http.MethodPost, "/api/public/v2/sessions", strings.NewReader(`{}`))
+	req = httptest.NewRequest(http.MethodPost, "/api/public/sessions", strings.NewReader(`{}`))
 	rec = httptest.NewRecorder()
 	NewHandler().ServeHTTP(rec, req)
 	if rec.Code == http.StatusForbidden {

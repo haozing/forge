@@ -28,7 +28,7 @@ const (
 	AttachmentScanConsumer = "attachment.scan"
 )
 
-// EventProcessor is the retrieval v2 fact consumer surface: the coordinator
+// EventProcessor is the retrieval fact consumer surface: the coordinator
 // reacts to domain facts and ensures projection runs/jobs in short
 // transactions.
 type EventProcessor interface {

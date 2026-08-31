@@ -2,7 +2,7 @@ package site
 
 import "errors"
 
-// Sentinel errors of the site domain. Handlers map them onto the v2 status
+// Sentinel errors of the site domain. Handlers map them onto the HTTP status
 // contract; the service never returns HTTP concepts.
 var (
 	// ErrSiteNotFound reports a site id that does not exist inside the

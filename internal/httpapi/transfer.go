@@ -268,7 +268,7 @@ func getImport(deps Dependencies) http.HandlerFunc {
 	}
 }
 
-// listImportJobRows serves GET /api/frontend/import-jobs/{jobId}/rows with the
+// listImportJobRows serves GET /api/import-jobs/{jobId}/rows with the
 // same permission semantics as getImport, adding pagination over the persisted
 // import_rows including rejected-row diagnostics.
 func listImportJobRows(deps Dependencies) http.HandlerFunc {
@@ -317,7 +317,7 @@ func listImportJobRows(deps Dependencies) http.HandlerFunc {
 	}
 }
 
-// downloadImportJobErrorsCsv serves GET /api/frontend/import-jobs/{jobId}/errors.csv
+// downloadImportJobErrorsCsv serves GET /api/import-jobs/{jobId}/errors.csv
 // as a text/csv attachment with columns row_number,errors,data_json describing
 // every rejected row of the batch.
 func downloadImportJobErrorsCsv(deps Dependencies) http.HandlerFunc {

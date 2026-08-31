@@ -1,4 +1,4 @@
-// Package tag implements the v2 tag domain: workspace-scoped definitions with
+// Package tag implements the tag domain: workspace-scoped definitions with
 // stable identity (id, normalized key, slug), lifecycle (active/archived),
 // draft relations and immutable version relations. Tag definitions never
 // leak into ResourceModel dynamic fields and never mutate historical versions.

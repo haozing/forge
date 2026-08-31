@@ -1,7 +1,7 @@
 // Package asset contract values fixed by phase 0. The publication status
 // lives only on Asset; AssetVersion is an immutable snapshot with origin and
 // confirmation as orthogonal facts. These values are mirrored by the database
-// CHECK constraints and openapi-v2.yaml — change all three together.
+// CHECK constraints and openapi.yaml — change all three together.
 package asset
 
 import "errors"
@@ -136,7 +136,7 @@ func ValidConfirmation(value string) bool {
 	}
 }
 
-// CanTransition encodes the v2 publication state machine:
+// CanTransition encodes the publication state machine:
 //
 //	create -> draft; draft --publish--> published; draft/published --archive--> archived;
 //	archived --restore--> draft. There is no archived -> published jump and no

@@ -39,7 +39,7 @@ func ValidatePassword(password string) error {
 	return nil
 }
 
-// Session lifecycle constants (v2 contract).
+// Session lifecycle constants (current contract).
 const (
 	SessionIdleTTL     = 24 * time.Hour
 	SessionAbsoluteTTL = 7 * 24 * time.Hour

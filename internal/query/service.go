@@ -890,7 +890,7 @@ func (s Service) hydrateCitationVersions(ctx context.Context, items []Item) erro
 	return nil
 }
 
-// ValidateCitationRefs implements POST /api/open/v2/references/validate: every
+// ValidateCitationRefs implements POST /api/open/references/validate: every
 // ref must pass HMAC, session subject, snapshot and current published pointer
 // checks; a single failure rejects the whole batch with 404 (doc §11.2).
 func (s Service) ValidateCitationRefs(ctx context.Context, principal auth.Principal, refs []string) ([]ValidatedReference, error) {

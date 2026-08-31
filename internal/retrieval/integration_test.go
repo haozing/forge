@@ -1,4 +1,4 @@
-// Integration test for the v2 projection pipeline against a real
+// Integration test for the projection pipeline against a real
 // PostgreSQL with pgroonga and pgvector. Set RETRIEVAL_INTEGRATION_DATABASE_URL
 // to run (scripts/acceptance.cmd wires a project-locked image).
 package retrieval_test

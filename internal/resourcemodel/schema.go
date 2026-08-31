@@ -67,7 +67,7 @@ type PolicyVisibility struct {
 	Allowed []string `json:"allowed"`
 }
 
-// Policy is the final (phase 0 v2) resource model policy structure. The legacy
+// Policy is the final (phase 0) resource model policy structure. The legacy
 // channel shape is rejected on parse — it is never normalized.
 type Policy struct {
 	Visibility PolicyVisibility         `json:"visibility"`

@@ -1,6 +1,6 @@
 package httpapi
 
-// v2_sites_test.go — the error mapping and guard behavior of the phase 5
+// sites_test.go — the error mapping and guard behavior of the phase 5
 // site management surface at the pure-function level (no database).
 
 import (
@@ -14,7 +14,7 @@ import (
 	"agentchunzhi/internal/site"
 )
 
-func TestV2SiteErrorMapping(t *testing.T) {
+func TestSiteErrorMapping(t *testing.T) {
 	cases := []struct {
 		err  error
 		code string
@@ -30,7 +30,7 @@ func TestV2SiteErrorMapping(t *testing.T) {
 	}
 	for _, tc := range cases {
 		recorder := httptest.NewRecorder()
-		v2SiteError(recorder, tc.err, "slug_conflict")
+		SiteError(recorder, tc.err, "slug_conflict")
 		if recorder.Code == http.StatusInternalServerError {
 			t.Fatalf("error %v must map to a domain status, got 500", tc.err)
 		}
@@ -42,7 +42,7 @@ func TestV2SiteErrorMapping(t *testing.T) {
 	// surfaces, path_conflict on binding surfaces.
 	for _, conflictCode := range []string{"slug_conflict", "path_conflict"} {
 		recorder := httptest.NewRecorder()
-		v2SiteError(recorder, site.ErrConflict, conflictCode)
+		SiteError(recorder, site.ErrConflict, conflictCode)
 		if recorder.Code != http.StatusConflict {
 			t.Fatalf("conflict status = %d, want 409", recorder.Code)
 		}
@@ -52,12 +52,12 @@ func TestV2SiteErrorMapping(t *testing.T) {
 	}
 	// Nil and unknown errors keep the contract: nil is a no-op, unknown is 500.
 	recorder := httptest.NewRecorder()
-	v2SiteError(recorder, nil, "slug_conflict")
+	SiteError(recorder, nil, "slug_conflict")
 	if recorder.Code != http.StatusOK {
 		t.Fatal("nil error must not write anything")
 	}
 	recorder = httptest.NewRecorder()
-	v2SiteError(recorder, errors.New("boom"), "slug_conflict")
+	SiteError(recorder, errors.New("boom"), "slug_conflict")
 	if recorder.Code != http.StatusInternalServerError {
 		t.Fatal("unknown error must map to 500")
 	}
@@ -66,11 +66,11 @@ func TestV2SiteErrorMapping(t *testing.T) {
 func TestSiteRoutesRegistered(t *testing.T) {
 	raw := newRouter(Dependencies{})
 	for _, path := range []string{
-		"/api/v2/workspaces/11111111-1111-1111-1111-111111111111/sites",
-		"/api/v2/workspaces/11111111-1111-1111-1111-111111111111/sites/22222222-2222-2222-2222-222222222222",
-		"/api/v2/workspaces/11111111-1111-1111-1111-111111111111/sites/22222222-2222-2222-2222-222222222222/bindings",
-		"/api/v2/workspaces/11111111-1111-1111-1111-111111111111/sites/22222222-2222-2222-2222-222222222222/bindings/33333333-3333-3333-3333-333333333333",
-		"/api/v2/workspaces/11111111-1111-1111-1111-111111111111/sites/22222222-2222-2222-2222-222222222222/preview",
+		"/api/workspaces/11111111-1111-1111-1111-111111111111/sites",
+		"/api/workspaces/11111111-1111-1111-1111-111111111111/sites/22222222-2222-2222-2222-222222222222",
+		"/api/workspaces/11111111-1111-1111-1111-111111111111/sites/22222222-2222-2222-2222-222222222222/bindings",
+		"/api/workspaces/11111111-1111-1111-1111-111111111111/sites/22222222-2222-2222-2222-222222222222/bindings/33333333-3333-3333-3333-333333333333",
+		"/api/workspaces/11111111-1111-1111-1111-111111111111/sites/22222222-2222-2222-2222-222222222222/preview",
 	} {
 		request := httptest.NewRequest(http.MethodGet, path, nil)
 		recorder := httptest.NewRecorder()

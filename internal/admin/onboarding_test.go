@@ -81,7 +81,7 @@ func TestMergeOnboardingPolicyRowsUnionsDuplicateGrants(t *testing.T) {
 func TestBuildOnboardingSampleCurlTrimsBaseURLOnly(t *testing.T) {
 	curl := buildOnboardingSampleCurl("https://kb.example.com/")
 	for _, fragment := range []string{
-		"https://kb.example.com/api/open/v1/query",
+		"https://kb.example.com/api/open/query",
 		`-H "Authorization: Bearer <agent-api-key>"`,
 		`"mode":"hybrid"`,
 	} {
@@ -113,7 +113,7 @@ func TestAgentOnboardingJSONContractShape(t *testing.T) {
 	text := string(payload)
 	for _, fragment := range []string{
 		`"api_key_prefix":"ak_CANJasK5f"`,
-		`"openapi_url":"/openapi-open-v1.yaml"`,
+		`"openapi_url":"/openapi.yaml"`,
 		`"workflow_key":"asset_prepare"`,
 		`"auth":{"type":"Bearer","header":"Authorization"`,
 		`"allowed_operations":[{"operation":"query","allowed":true}]`,

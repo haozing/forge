@@ -14,7 +14,7 @@ type finalContainerMoveInput struct {
 	SortKey  *string `json:"sort_key"`
 }
 
-func moveContainerFinal(deps Dependencies) http.HandlerFunc {
+func moveContainer(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
@@ -96,7 +96,7 @@ func moveContainerFinal(deps Dependencies) http.HandlerFunc {
 	}
 }
 
-func containerChildrenFinal(deps Dependencies) http.HandlerFunc {
+func containerChildren(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
@@ -137,7 +137,7 @@ func containerChildrenFinal(deps Dependencies) http.HandlerFunc {
 	}
 }
 
-func assetContainersFinal(deps Dependencies) http.HandlerFunc {
+func assetContainers(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		principal, ok := requireMemberSession(w, r, deps)
 		if !ok {
@@ -195,7 +195,7 @@ func assetContainersFinal(deps Dependencies) http.HandlerFunc {
 	}
 }
 
-func documentChildrenFinal(deps Dependencies) http.HandlerFunc {
+func documentChildren(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")

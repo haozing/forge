@@ -859,7 +859,7 @@ func emitAssetVersionCreatedTx(ctx context.Context, tx pgx.Tx, events *eventing.
 }
 
 // ImportPreRowErrorsKey is the reserved source-row key under which the imports
-// endpoint records structural CSV findings (see frontend_transfer.go). Rows
+// endpoint records structural CSV findings (see transfer.go). Rows
 // carrying it are rejected by the worker before field validation so physical
 // parse issues never fail a whole batch.
 const ImportPreRowErrorsKey = "__import_errors"

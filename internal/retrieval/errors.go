@@ -1,4 +1,4 @@
-// Package retrieval implements the v2 projection pipeline: canonicalization,
+// Package retrieval implements the projection pipeline: canonicalization,
 // chunking, projection profiles, the run/head lifecycle and the fact-driven
 // coordinator. Provider HTTP calls never run inside a database transaction
 // and runtime code never falls back to an embedded fake embedding.

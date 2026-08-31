@@ -1,4 +1,4 @@
-// Package attachment implements the v2 standalone attachment model: files are
+// Package attachment implements the standalone attachment model: files are
 // uploaded workspace-scoped first, scanned asynchronously, and only bound to
 // drafts (asset.asset_draft_attachments) and, through a commit transaction, to
 // sealed versions (asset.asset_version_attachments). Attachments never carry

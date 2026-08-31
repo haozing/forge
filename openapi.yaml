@@ -1,19 +1,20 @@
 openapi: 3.0.3
 info:
-  title: AgentChunzhi v2 API
-  version: 2.0.0-phase4
+  title: AgentChunzhi API
+  version: 2.1.0
   description: |
-    唯一 v2 契约。入口族：
-    - /api/v2/... 成员会话和工作区管理 API
-    - /api/open/v2/... Agent 和外部系统 API Key API
-    - /api/public/v2/... 匿名或站点访问 API
+    唯一权威契约（与 router_groups.go 双向对照测试锁定）。路由为单一无版本树，入口族：
+    - /api/... 成员会话和工作区管理 API
+    - /api/open/... Agent 和外部系统 API Key API
+    - /api/public/... 匿名或站点访问 API
+    2026-08-31 开发期清理：退役 /api/v2、/api/public/v2、/api/open/v1|v2、/api/frontend 全部
+    前缀（404，无重定向），openapi-v2.yaml 更名为 openapi.yaml（见 docs/route-retirement-ledger.md）。
     阶段 0 冻结全局组件与核心资源名；未实现的领域只冻结资源命名，不注册假 handler。
     阶段 1 增补 sessions、me、preferences、password-resets、organization 与 workspace 治理/成员/邀请路径。
-    阶段 2 增补 tags、tag-facets 与 /api/open/v2/hooks/assets（tag_keys）；AssetDraft 支持 tag_ids。
+    阶段 2 增补 tags、tag-facets 与 /api/open/hooks/assets（tag_keys）；AssetDraft 支持 tag_ids。
     阶段 3 增补统一查询（成员工作区/组织/OpenAPI query、citation validate）、投影运维
     （profiles/activate、workspace/organization retrieval status 与 rebuilds）与查询执行审计
-    （query-executions）；退役 /api/frontend/.../query|index|query-audit|search/suggestions 与
-    /api/open/v1/query（见 docs/route-retirement-ledger.md）。
+    （query-executions）。
     阶段 4 增补建议流：prepare（成员发起 Agent 整理，202 返回 run_id）、三类建议联合列表、
     accept/reject/accept-batch 与 processing-results；建议只进共享 AssetDraft，版本在用户 commit 时产生
     （origin=ai_assisted），发布审计带 Agent 溯源六要素（见 docs/route-retirement-ledger.md 阶段 4 行）。
@@ -29,7 +30,7 @@ tags:
   - name: query
   - name: sites
 paths:
-  /api/v2/workspaces/{workspaceId}/publication-requests:
+  /api/workspaces/{workspaceId}/publication-requests:
     get:
       tags: [publication-requests]
       operationId: listPublicationRequests
@@ -81,7 +82,7 @@ paths:
                 allOf:
                   - $ref: '#/components/schemas/PublicationRequest'
                   - $ref: '#/components/schemas/Envelope'
-  /api/v2/workspaces/{workspaceId}/publication-requests/{requestId}:
+  /api/workspaces/{workspaceId}/publication-requests/{requestId}:
     get:
       tags: [publication-requests]
       operationId: getPublicationRequest
@@ -121,7 +122,7 @@ paths:
                   - $ref: '#/components/schemas/PublicationRequest'
                   - $ref: '#/components/schemas/Envelope'
         '409': { $ref: '#/components/responses/Error' }
-  /api/v2/workspaces/{workspaceId}/publication-requests/{requestId}/approve:
+  /api/workspaces/{workspaceId}/publication-requests/{requestId}/approve:
     post:
       tags: [publication-requests]
       operationId: approvePublicationRequest
@@ -149,7 +150,7 @@ paths:
                 allOf:
                   - $ref: '#/components/schemas/PublicationRequest'
                   - $ref: '#/components/schemas/Envelope'
-  /api/v2/workspaces/{workspaceId}/publication-requests/{requestId}/reject:
+  /api/workspaces/{workspaceId}/publication-requests/{requestId}/reject:
     post:
       tags: [publication-requests]
       operationId: rejectPublicationRequest
@@ -178,7 +179,7 @@ paths:
                 allOf:
                   - $ref: '#/components/schemas/PublicationRequest'
                   - $ref: '#/components/schemas/Envelope'
-  /api/v2/workspaces/{workspaceId}/publication-requests/{requestId}/cancel:
+  /api/workspaces/{workspaceId}/publication-requests/{requestId}/cancel:
     post:
       tags: [publication-requests]
       operationId: cancelPublicationRequest
@@ -205,7 +206,7 @@ paths:
                 allOf:
                   - $ref: '#/components/schemas/PublicationRequest'
                   - $ref: '#/components/schemas/Envelope'
-  /api/v2/workspaces/{workspaceId}/publication-requests/{requestId}/comments:
+  /api/workspaces/{workspaceId}/publication-requests/{requestId}/comments:
     get:
       tags: [publication-requests]
       operationId: listPublicationComments
@@ -259,7 +260,7 @@ paths:
                 allOf:
                   - $ref: '#/components/schemas/PublicationComment'
                   - $ref: '#/components/schemas/Envelope'
-  /api/v2/workspaces/{workspaceId}/publication-requests/batch:
+  /api/workspaces/{workspaceId}/publication-requests/batch:
     post:
       tags: [publication-requests]
       operationId: batchPublicationRequests
@@ -295,7 +296,7 @@ paths:
                 allOf:
                   - $ref: '#/components/schemas/PublicationBatchResult'
                   - $ref: '#/components/schemas/Envelope'
-  /api/v2/assets/{assetId}/draft:
+  /api/assets/{assetId}/draft:
     get:
       tags: [assets]
       operationId: getAssetDraft
@@ -333,7 +334,7 @@ paths:
                 allOf:
                   - $ref: '#/components/schemas/AssetDraft'
                   - $ref: '#/components/schemas/Envelope'
-  /api/v2/assets/{assetId}/commit-draft:
+  /api/assets/{assetId}/commit-draft:
     post:
       tags: [assets]
       operationId: commitAssetDraft
@@ -358,7 +359,7 @@ paths:
                 allOf:
                   - $ref: '#/components/schemas/AssetVersion'
                   - $ref: '#/components/schemas/Envelope'
-  /api/v2/assets/{assetId}/publish:
+  /api/assets/{assetId}/publish:
     post:
       tags: [assets]
       operationId: publishAsset
@@ -381,7 +382,7 @@ paths:
                 allOf:
                   - $ref: '#/components/schemas/Asset'
                   - $ref: '#/components/schemas/Envelope'
-  /api/v2/assets/{assetId}/archive:
+  /api/assets/{assetId}/archive:
     post:
       tags: [assets]
       operationId: archiveAsset
@@ -397,7 +398,7 @@ paths:
                 allOf:
                   - $ref: '#/components/schemas/Asset'
                   - $ref: '#/components/schemas/Envelope'
-  /api/v2/assets/{assetId}/restore:
+  /api/assets/{assetId}/restore:
     post:
       tags: [assets]
       operationId: restoreAsset
@@ -413,7 +414,7 @@ paths:
                 allOf:
                   - $ref: '#/components/schemas/Asset'
                   - $ref: '#/components/schemas/Envelope'
-  /api/v2/asset-versions/{versionId}/confirm:
+  /api/asset-versions/{versionId}/confirm:
     post:
       tags: [assets]
       operationId: confirmAssetVersion
@@ -433,7 +434,7 @@ paths:
                 allOf:
                   - $ref: '#/components/schemas/AssetVersion'
                   - $ref: '#/components/schemas/Envelope'
-  /api/v2/workspaces/{workspaceId}/assets/{assetId}/prepare:
+  /api/workspaces/{workspaceId}/assets/{assetId}/prepare:
     post:
       tags: [suggestions]
       operationId: prepareAsset
@@ -461,7 +462,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
         '422': { $ref: '#/components/responses/Error' }
-  /api/v2/workspaces/{workspaceId}/assets/{assetId}/suggestions:
+  /api/workspaces/{workspaceId}/assets/{assetId}/suggestions:
     get:
       tags: [suggestions]
       operationId: listSuggestions
@@ -495,7 +496,7 @@ paths:
         '403': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
         '422': { $ref: '#/components/responses/Error' }
-  /api/v2/workspaces/{workspaceId}/suggestions/{kind}/{suggestionId}/accept:
+  /api/workspaces/{workspaceId}/suggestions/{kind}/{suggestionId}/accept:
     post:
       tags: [suggestions]
       operationId: acceptSuggestion
@@ -546,7 +547,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
-  /api/v2/workspaces/{workspaceId}/suggestions/{kind}/{suggestionId}/reject:
+  /api/workspaces/{workspaceId}/suggestions/{kind}/{suggestionId}/reject:
     post:
       tags: [suggestions]
       operationId: rejectSuggestion
@@ -579,7 +580,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
         '422': { $ref: '#/components/responses/Error' }
-  /api/v2/workspaces/{workspaceId}/assets/{assetId}/suggestions/accept-batch:
+  /api/workspaces/{workspaceId}/assets/{assetId}/suggestions/accept-batch:
     post:
       tags: [suggestions]
       operationId: batchAcceptSuggestions
@@ -622,7 +623,7 @@ paths:
         '403': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
         '422': { $ref: '#/components/responses/Error' }
-  /api/v2/workspaces/{workspaceId}/assets/{assetId}/processing-results:
+  /api/workspaces/{workspaceId}/assets/{assetId}/processing-results:
     get:
       tags: [suggestions]
       operationId: listProcessingResults
@@ -646,7 +647,7 @@ paths:
         '401': { $ref: '#/components/responses/Error' }
         '403': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
-  /api/public/v2/sessions:
+  /api/public/sessions:
     post:
       tags: [identity]
       operationId: createSession
@@ -676,7 +677,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
-  /api/v2/sessions:
+  /api/sessions:
     get:
       tags: [identity]
       operationId: listSessions
@@ -694,7 +695,7 @@ paths:
                         items: { $ref: '#/components/schemas/SessionInfo' }
                       page: { $ref: '#/components/schemas/CursorPage' }
                   - $ref: '#/components/schemas/Envelope'
-  /api/v2/sessions/current:
+  /api/sessions/current:
     delete:
       tags: [identity]
       operationId: logout
@@ -703,7 +704,7 @@ paths:
       responses:
         '204': { description: 已登出并清除 cookie }
         '401': { $ref: '#/components/responses/Error' }
-  /api/v2/sessions/{sessionId}:
+  /api/sessions/{sessionId}:
     delete:
       tags: [identity]
       operationId: revokeSession
@@ -716,7 +717,7 @@ paths:
       responses:
         '204': { description: 已撤销 }
         '404': { $ref: '#/components/responses/Error' }
-  /api/v2/me:
+  /api/me:
     get:
       tags: [identity]
       operationId: getMe
@@ -754,7 +755,7 @@ paths:
                   - $ref: '#/components/schemas/Envelope'
         '412': { $ref: '#/components/responses/Error' }
         '428': { $ref: '#/components/responses/Error' }
-  /api/v2/me/password:
+  /api/me/password:
     put:
       tags: [identity]
       operationId: changePassword
@@ -782,7 +783,7 @@ paths:
                     properties:
                       revoked_sessions: { type: integer }
                   - $ref: '#/components/schemas/Envelope'
-  /api/v2/me/preferences:
+  /api/me/preferences:
     get:
       tags: [identity]
       operationId: getPreferences
@@ -816,7 +817,7 @@ paths:
                   - $ref: '#/components/schemas/Envelope'
         '412': { $ref: '#/components/responses/Error' }
         '428': { $ref: '#/components/responses/Error' }
-  /api/public/v2/password-resets:
+  /api/public/password-resets:
     post:
       tags: [identity]
       operationId: requestPasswordReset
@@ -842,7 +843,7 @@ paths:
                       status: { type: string }
                   - $ref: '#/components/schemas/Envelope'
         '429': { $ref: '#/components/responses/Error' }
-  /api/public/v2/password-resets/resolve:
+  /api/public/password-resets/resolve:
     post:
       tags: [identity]
       operationId: resolvePasswordReset
@@ -867,7 +868,7 @@ paths:
                       email: { type: string }
                   - $ref: '#/components/schemas/Envelope'
         '422': { $ref: '#/components/responses/Error' }
-  /api/public/v2/password-resets/complete:
+  /api/public/password-resets/complete:
     post:
       tags: [identity]
       operationId: completePasswordReset
@@ -895,7 +896,7 @@ paths:
                       status: { type: string }
                   - $ref: '#/components/schemas/Envelope'
         '422': { $ref: '#/components/responses/Error' }
-  /api/public/v2/organization-invitations/resolve:
+  /api/public/organization-invitations/resolve:
     post:
       tags: [identity]
       operationId: resolveOrganizationInvitation
@@ -919,7 +920,7 @@ paths:
                   - $ref: '#/components/schemas/ResolvedInvitation'
                   - $ref: '#/components/schemas/Envelope'
         '422': { $ref: '#/components/responses/Error' }
-  /api/public/v2/organization-invitations/accept:
+  /api/public/organization-invitations/accept:
     post:
       tags: [identity]
       operationId: acceptOrganizationInvitation
@@ -947,7 +948,7 @@ paths:
                   - $ref: '#/components/schemas/Envelope'
         '409': { $ref: '#/components/responses/Error' }
         '422': { $ref: '#/components/responses/Error' }
-  /api/v2/organization:
+  /api/organization:
     get:
       tags: [identity]
       operationId: getOrganization
@@ -985,7 +986,7 @@ paths:
                   - $ref: '#/components/schemas/Envelope'
         '412': { $ref: '#/components/responses/Error' }
         '428': { $ref: '#/components/responses/Error' }
-  /api/v2/organization/members:
+  /api/organization/members:
     get:
       tags: [identity]
       operationId: listOrganizationMembers
@@ -1006,7 +1007,7 @@ paths:
                         items: { $ref: '#/components/schemas/OrganizationMember' }
                       page: { $ref: '#/components/schemas/CursorPage' }
                   - $ref: '#/components/schemas/Envelope'
-  /api/v2/organization/members/{userId}:
+  /api/organization/members/{userId}:
     get:
       tags: [identity]
       operationId: getOrganizationMember
@@ -1054,7 +1055,7 @@ paths:
         '409': { $ref: '#/components/responses/Error' }
         '412': { $ref: '#/components/responses/Error' }
         '428': { $ref: '#/components/responses/Error' }
-  /api/v2/organization/invitations:
+  /api/organization/invitations:
     get:
       tags: [identity]
       operationId: listOrganizationInvitations
@@ -1112,7 +1113,7 @@ paths:
                   - $ref: '#/components/schemas/InvitationWithToken'
                   - $ref: '#/components/schemas/Envelope'
         '409': { $ref: '#/components/responses/Error' }
-  /api/v2/organization/invitations/{invitationId}/resend:
+  /api/organization/invitations/{invitationId}/resend:
     post:
       tags: [identity]
       operationId: resendOrganizationInvitation
@@ -1128,7 +1129,7 @@ paths:
                 allOf:
                   - $ref: '#/components/schemas/Invitation'
                   - $ref: '#/components/schemas/Envelope'
-  /api/v2/organization/invitations/{invitationId}/revoke:
+  /api/organization/invitations/{invitationId}/revoke:
     post:
       tags: [identity]
       operationId: revokeOrganizationInvitation
@@ -1138,7 +1139,7 @@ paths:
       responses:
         '204': { description: 已撤销 }
         '409': { $ref: '#/components/responses/Error' }
-  /api/v2/organization/workspaces:
+  /api/organization/workspaces:
     get:
       tags: [workspaces]
       operationId: listOrganizationWorkspaces
@@ -1181,7 +1182,7 @@ paths:
                 allOf:
                   - $ref: '#/components/schemas/GovernanceWorkspace'
                   - $ref: '#/components/schemas/Envelope'
-  /api/v2/organization/workspaces/{workspaceId}:
+  /api/organization/workspaces/{workspaceId}:
     get:
       tags: [workspaces]
       operationId: getOrganizationWorkspace
@@ -1196,7 +1197,7 @@ paths:
                 allOf:
                   - $ref: '#/components/schemas/GovernanceWorkspace'
                   - $ref: '#/components/schemas/Envelope'
-  /api/v2/organization/workspaces/{workspaceId}/archive:
+  /api/organization/workspaces/{workspaceId}/archive:
     post:
       tags: [workspaces]
       operationId: archiveOrganizationWorkspace
@@ -1213,7 +1214,7 @@ paths:
                   - $ref: '#/components/schemas/GovernanceWorkspace'
                   - $ref: '#/components/schemas/Envelope'
         '409': { $ref: '#/components/responses/Error' }
-  /api/v2/organization/workspaces/{workspaceId}/restore:
+  /api/organization/workspaces/{workspaceId}/restore:
     post:
       tags: [workspaces]
       operationId: restoreOrganizationWorkspace
@@ -1230,7 +1231,7 @@ paths:
                   - $ref: '#/components/schemas/GovernanceWorkspace'
                   - $ref: '#/components/schemas/Envelope'
         '409': { $ref: '#/components/responses/Error' }
-  /api/v2/organization/workspaces/{workspaceId}/members:
+  /api/organization/workspaces/{workspaceId}/members:
     post:
       tags: [workspaces]
       operationId: grantOrganizationWorkspaceMembership
@@ -1257,7 +1258,7 @@ paths:
                   - type: object
                   - $ref: '#/components/schemas/Envelope'
         '409': { $ref: '#/components/responses/Error' }
-  /api/v2/organization/workspaces/{workspaceId}/members/{membershipId}:
+  /api/organization/workspaces/{workspaceId}/members/{membershipId}:
     patch:
       tags: [workspaces]
       operationId: patchOrganizationWorkspaceMembership
@@ -1294,7 +1295,7 @@ paths:
       responses:
         '204': { description: 已撤销 }
         '409': { $ref: '#/components/responses/Error' }
-  /api/v2/workspaces:
+  /api/workspaces:
     get:
       tags: [workspaces]
       operationId: listMyWorkspaces
@@ -1312,7 +1313,7 @@ paths:
                         items: { $ref: '#/components/schemas/WorkspaceSummary' }
                       page: { $ref: '#/components/schemas/CursorPage' }
                   - $ref: '#/components/schemas/Envelope'
-  /api/v2/workspaces/{workspaceId}:
+  /api/workspaces/{workspaceId}:
     get:
       tags: [workspaces]
       operationId: getWorkspace
@@ -1353,7 +1354,7 @@ paths:
                 allOf:
                   - $ref: '#/components/schemas/WorkspaceSettings'
                   - $ref: '#/components/schemas/Envelope'
-  /api/v2/workspaces/{workspaceId}/summary:
+  /api/workspaces/{workspaceId}/summary:
     get:
       tags: [workspaces]
       operationId: getWorkspaceSummary
@@ -1371,7 +1372,7 @@ paths:
                       stats: { $ref: '#/components/schemas/WorkspaceStats' }
                       counts: { $ref: '#/components/schemas/WorkspaceCounts' }
                   - $ref: '#/components/schemas/Envelope'
-  /api/v2/workspaces/{workspaceId}/members:
+  /api/workspaces/{workspaceId}/members:
     get:
       tags: [workspaces]
       operationId: listWorkspaceMembers
@@ -1417,7 +1418,7 @@ paths:
                   - $ref: '#/components/schemas/WorkspaceMemberDetail'
                   - $ref: '#/components/schemas/Envelope'
         '409': { $ref: '#/components/responses/Error' }
-  /api/v2/workspaces/{workspaceId}/members/me/leave:
+  /api/workspaces/{workspaceId}/members/me/leave:
     post:
       tags: [workspaces]
       operationId: leaveWorkspace
@@ -1427,7 +1428,7 @@ paths:
       responses:
         '204': { description: 已退出（最后一名 active admin 不能退出） }
         '409': { $ref: '#/components/responses/Error' }
-  /api/v2/workspaces/{workspaceId}/eligible-members:
+  /api/workspaces/{workspaceId}/eligible-members:
     get:
       tags: [workspaces]
       operationId: listEligibleWorkspaceMembers
@@ -1451,7 +1452,7 @@ paths:
                         items: { $ref: '#/components/schemas/EligibleMember' }
                       page: { $ref: '#/components/schemas/CursorPage' }
                   - $ref: '#/components/schemas/Envelope'
-  /api/v2/workspaces/{workspaceId}/members/{membershipId}:
+  /api/workspaces/{workspaceId}/members/{membershipId}:
     patch:
       tags: [workspaces]
       operationId: patchWorkspaceMember
@@ -1488,7 +1489,7 @@ paths:
       responses:
         '204': { description: 已移除 }
         '409': { $ref: '#/components/responses/Error' }
-  /api/v2/workspaces/{workspaceId}/invitations:
+  /api/workspaces/{workspaceId}/invitations:
     get:
       tags: [workspaces]
       operationId: listWorkspaceInvitations
@@ -1537,7 +1538,7 @@ paths:
                   - $ref: '#/components/schemas/InvitationWithToken'
                   - $ref: '#/components/schemas/Envelope'
         '409': { $ref: '#/components/responses/Error' }
-  /api/v2/workspaces/{workspaceId}/invitations/{invitationId}/resend:
+  /api/workspaces/{workspaceId}/invitations/{invitationId}/resend:
     post:
       tags: [workspaces]
       operationId: resendWorkspaceInvitation
@@ -1554,7 +1555,7 @@ paths:
                 allOf:
                   - $ref: '#/components/schemas/Invitation'
                   - $ref: '#/components/schemas/Envelope'
-  /api/v2/workspaces/{workspaceId}/invitations/{invitationId}/revoke:
+  /api/workspaces/{workspaceId}/invitations/{invitationId}/revoke:
     post:
       tags: [workspaces]
       operationId: revokeWorkspaceInvitation
@@ -1565,7 +1566,7 @@ paths:
       responses:
         '204': { description: 已撤销 }
         '409': { $ref: '#/components/responses/Error' }
-  /api/v2/workspaces/{workspaceId}/tags:
+  /api/workspaces/{workspaceId}/tags:
     get:
       tags: [tags]
       operationId: listTags
@@ -1633,7 +1634,7 @@ paths:
                   - $ref: '#/components/schemas/Tag'
                   - $ref: '#/components/schemas/Envelope'
         '409': { $ref: '#/components/responses/Error' }
-  /api/v2/workspaces/{workspaceId}/tags/{tagId}:
+  /api/workspaces/{workspaceId}/tags/{tagId}:
     get:
       tags: [tags]
       operationId: getTag
@@ -1678,7 +1679,7 @@ paths:
                   - $ref: '#/components/schemas/Tag'
                   - $ref: '#/components/schemas/Envelope'
         '412': { $ref: '#/components/responses/Error' }
-  /api/v2/workspaces/{workspaceId}/tags/{tagId}/archive:
+  /api/workspaces/{workspaceId}/tags/{tagId}/archive:
     post:
       tags: [tags]
       operationId: archiveTag
@@ -1697,7 +1698,7 @@ paths:
                   - $ref: '#/components/schemas/Tag'
                   - $ref: '#/components/schemas/Envelope'
         '409': { $ref: '#/components/responses/Error' }
-  /api/v2/workspaces/{workspaceId}/tags/{tagId}/restore:
+  /api/workspaces/{workspaceId}/tags/{tagId}/restore:
     post:
       tags: [tags]
       operationId: restoreTag
@@ -1716,7 +1717,7 @@ paths:
                   - $ref: '#/components/schemas/Tag'
                   - $ref: '#/components/schemas/Envelope'
         '409': { $ref: '#/components/responses/Error' }
-  /api/v2/workspaces/{workspaceId}/tag-facets:
+  /api/workspaces/{workspaceId}/tag-facets:
     get:
       tags: [tags]
       operationId: listTagFacets
@@ -1782,7 +1783,7 @@ paths:
                       page: { $ref: '#/components/schemas/CursorPage' }
                   - $ref: '#/components/schemas/Envelope'
         '422': { $ref: '#/components/responses/Error' }
-  /api/open/v2/hooks/assets:
+  /api/open/hooks/assets:
     post:
       tags: [tags]
       operationId: createWebhookAsset
@@ -1838,7 +1839,7 @@ paths:
                       replayed: { type: boolean }
                   - $ref: '#/components/schemas/Envelope'
         '422': { $ref: '#/components/responses/Error' }
-  /api/v2/workspaces/{workspaceId}/query:
+  /api/workspaces/{workspaceId}/query:
     post:
       tags: [query]
       operationId: executeWorkspaceQuery
@@ -1866,7 +1867,7 @@ paths:
         '410': { $ref: '#/components/responses/Error' }
         '422': { $ref: '#/components/responses/Error' }
         '503': { $ref: '#/components/responses/Error' }
-  /api/v2/organization/query:
+  /api/organization/query:
     post:
       tags: [query]
       operationId: executeOrganizationQuery
@@ -1890,7 +1891,7 @@ paths:
         '403': { $ref: '#/components/responses/Error' }
         '422': { $ref: '#/components/responses/Error' }
         '503': { $ref: '#/components/responses/Error' }
-  /api/open/v2/query:
+  /api/open/query:
     post:
       tags: [query]
       operationId: executeOpenQuery
@@ -1916,7 +1917,7 @@ paths:
         '403': { $ref: '#/components/responses/Error' }
         '422': { $ref: '#/components/responses/Error' }
         '503': { $ref: '#/components/responses/Error' }
-  /api/open/v2/references/validate:
+  /api/open/references/validate:
     post:
       tags: [query]
       operationId: validateReferenceCitations
@@ -1951,7 +1952,7 @@ paths:
                   - $ref: '#/components/schemas/Envelope'
         '401': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
-  /api/v2/organization/retrieval/profiles:
+  /api/organization/retrieval/profiles:
     get:
       tags: [query]
       operationId: listRetrievalProfiles
@@ -1998,7 +1999,7 @@ paths:
         '401': { $ref: '#/components/responses/Error' }
         '403': { $ref: '#/components/responses/Error' }
         '422': { $ref: '#/components/responses/Error' }
-  /api/v2/organization/retrieval/profiles/{profileId}/activate:
+  /api/organization/retrieval/profiles/{profileId}/activate:
     post:
       tags: [query]
       operationId: activateRetrievalProfile
@@ -2022,7 +2023,7 @@ paths:
         '403': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
         '409': { $ref: '#/components/responses/Error' }
-  /api/v2/workspaces/{workspaceId}/retrieval/status:
+  /api/workspaces/{workspaceId}/retrieval/status:
     get:
       tags: [query]
       operationId: getWorkspaceRetrievalStatus
@@ -2048,7 +2049,7 @@ paths:
         '401': { $ref: '#/components/responses/Error' }
         '403': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
-  /api/v2/workspaces/{workspaceId}/retrieval/rebuilds:
+  /api/workspaces/{workspaceId}/retrieval/rebuilds:
     get:
       tags: [query]
       operationId: listWorkspaceRetrievalRebuilds
@@ -2091,7 +2092,7 @@ paths:
         '401': { $ref: '#/components/responses/Error' }
         '403': { $ref: '#/components/responses/Error' }
         '409': { $ref: '#/components/responses/Error' }
-  /api/v2/workspaces/{workspaceId}/retrieval/rebuilds/{rebuildId}:
+  /api/workspaces/{workspaceId}/retrieval/rebuilds/{rebuildId}:
     get:
       tags: [query]
       operationId: getWorkspaceRetrievalRebuild
@@ -2114,7 +2115,7 @@ paths:
         '401': { $ref: '#/components/responses/Error' }
         '403': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
-  /api/v2/organization/retrieval/rebuilds:
+  /api/organization/retrieval/rebuilds:
     post:
       tags: [query]
       operationId: createOrganizationRetrievalRebuild
@@ -2133,7 +2134,7 @@ paths:
         '401': { $ref: '#/components/responses/Error' }
         '403': { $ref: '#/components/responses/Error' }
         '409': { $ref: '#/components/responses/Error' }
-  /api/v2/organization/retrieval/rebuilds/{rebuildId}:
+  /api/organization/retrieval/rebuilds/{rebuildId}:
     get:
       tags: [query]
       operationId: getOrganizationRetrievalRebuild
@@ -2155,7 +2156,7 @@ paths:
         '401': { $ref: '#/components/responses/Error' }
         '403': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
-  /api/v2/workspaces/{workspaceId}/query-executions:
+  /api/workspaces/{workspaceId}/query-executions:
     get:
       tags: [query]
       operationId: listWorkspaceQueryExecutions
@@ -2181,7 +2182,7 @@ paths:
         '401': { $ref: '#/components/responses/Error' }
         '403': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
-  /api/v2/organization/query-executions:
+  /api/organization/query-executions:
     get:
       tags: [query]
       operationId: listOrganizationQueryExecutions
@@ -2205,7 +2206,7 @@ paths:
                   - $ref: '#/components/schemas/Envelope'
         '401': { $ref: '#/components/responses/Error' }
         '403': { $ref: '#/components/responses/Error' }
-  /api/v2/query-executions/{executionId}:
+  /api/query-executions/{executionId}:
     get:
       tags: [query]
       operationId: getQueryExecution
@@ -2229,7 +2230,7 @@ paths:
         '404': { $ref: '#/components/responses/Error' }
 
 
-  /api/v2/workspaces/{workspaceId}/sites:
+  /api/workspaces/{workspaceId}/sites:
     get:
       tags: [sites]
       operationId: listSites
@@ -2271,7 +2272,7 @@ paths:
                   - $ref: '#/components/schemas/Envelope'
         '409': { description: slug/domain 冲突, content: { application/json: { schema: { $ref: '#/components/schemas/Envelope' } } } }
         '422': { $ref: '#/components/responses/Error' }
-  /api/v2/workspaces/{workspaceId}/sites/{siteId}:
+  /api/workspaces/{workspaceId}/sites/{siteId}:
     get:
       tags: [sites]
       operationId: getSite
@@ -2328,7 +2329,7 @@ paths:
                 allOf:
                   - $ref: '#/components/schemas/PublicSite'
                   - $ref: '#/components/schemas/Envelope'
-  /api/v2/workspaces/{workspaceId}/sites/{siteId}/bindings:
+  /api/workspaces/{workspaceId}/sites/{siteId}/bindings:
     get:
       tags: [sites]
       operationId: listSiteBindings
@@ -2378,7 +2379,7 @@ paths:
                   - $ref: '#/components/schemas/Envelope'
         '409': { description: display_path 冲突, content: { application/json: { schema: { $ref: '#/components/schemas/Envelope' } } } }
         '422': { $ref: '#/components/responses/Error' }
-  /api/v2/workspaces/{workspaceId}/sites/{siteId}/bindings/{bindingId}:
+  /api/workspaces/{workspaceId}/sites/{siteId}/bindings/{bindingId}:
     patch:
       tags: [sites]
       operationId: patchSiteBinding
@@ -2416,7 +2417,7 @@ paths:
         - $ref: '#/components/parameters/IdempotencyKey'
       responses:
         '200': { description: 已解绑, content: { application/json: { schema: { $ref: '#/components/schemas/Envelope' } } } }
-  /api/v2/workspaces/{workspaceId}/sites/{siteId}/preview:
+  /api/workspaces/{workspaceId}/sites/{siteId}/preview:
     get:
       tags: [sites]
       operationId: previewSite
@@ -2433,7 +2434,7 @@ paths:
                 allOf:
                   - $ref: '#/components/schemas/SitePreview'
                   - $ref: '#/components/schemas/Envelope'
-  /api/public/v2/sites/{slug}:
+  /api/public/sites/{slug}:
     get:
       tags: [sites-public]
       operationId: publicSiteHome
@@ -2449,7 +2450,7 @@ paths:
         '304': { description: ETag 未变化 }
         '404': { $ref: '#/components/responses/Error' }
         '429': { $ref: '#/components/responses/Error' }
-  /api/public/v2/sites/{slug}/posts:
+  /api/public/sites/{slug}/posts:
     get:
       tags: [sites-public]
       operationId: publicSitePosts
@@ -2474,7 +2475,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/PublicPostPage' }
         '404': { $ref: '#/components/responses/Error' }
-  /api/public/v2/sites/{slug}/posts/{displayPath}:
+  /api/public/sites/{slug}/posts/{displayPath}:
     get:
       tags: [sites-public]
       operationId: publicSitePost
@@ -2493,7 +2494,7 @@ paths:
               schema: { $ref: '#/components/schemas/PublicPostContent' }
         '304': { description: ETag 未变化 }
         '404': { $ref: '#/components/responses/Error' }
-  /api/public/v2/sites/{slug}/sections/{sectionSlug}:
+  /api/public/sites/{slug}/sections/{sectionSlug}:
     get:
       tags: [sites-public]
       operationId: publicSiteSection
@@ -2510,7 +2511,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/PublicPostPage' }
         '404': { $ref: '#/components/responses/Error' }
-  /api/public/v2/sites/{slug}/tags:
+  /api/public/sites/{slug}/tags:
     get:
       tags: [sites-public]
       operationId: publicSiteTags
@@ -2523,7 +2524,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/PublicTagFacets' }
         '404': { $ref: '#/components/responses/Error' }
-  /api/public/v2/sites/{slug}/tags/{key}:
+  /api/public/sites/{slug}/tags/{key}:
     get:
       tags: [sites-public]
       operationId: publicSiteTagPage
@@ -2540,7 +2541,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/PublicPostPage' }
         '404': { $ref: '#/components/responses/Error' }
-  /api/public/v2/sites/{slug}/search:
+  /api/public/sites/{slug}/search:
     get:
       tags: [sites-public]
       operationId: publicSiteSearch
@@ -2561,7 +2562,7 @@ paths:
               schema: { $ref: '#/components/schemas/PublicPostPage' }
         '422': { $ref: '#/components/responses/Error' }
 
-  /api/open/v2/agent-tasks:
+  /api/open/agent-tasks:
     post:
       tags: [agent-tasks]
       operationId: createAgentTask
@@ -2599,7 +2600,7 @@ paths:
         '403': { $ref: '#/components/responses/Error' }
         '409': { $ref: '#/components/responses/Error' }
         '422': { $ref: '#/components/responses/Error' }
-  /api/open/v2/agent-tasks/{taskId}:
+  /api/open/agent-tasks/{taskId}:
     get:
       tags: [agent-tasks]
       operationId: getAgentTask

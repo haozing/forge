@@ -28,7 +28,7 @@ var (
 const PrepareAsset = "prepare_asset"
 
 // MaxTaskAssets caps one prepare task so a single workflow run stays bounded
-// (doc §5: agenttask v2 accepts 1..20 input assets).
+// (doc §5: agenttask accepts 1..20 input assets).
 const MaxTaskAssets = 20
 
 type Service struct {

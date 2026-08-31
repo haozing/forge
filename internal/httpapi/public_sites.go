@@ -1,12 +1,12 @@
 package httpapi
 
-// v2_public_sites.go — the phase 5 public read surface (stage 5 P5-3):
+// public_sites.go — the phase 5 public read surface (stage 5 P5-3):
 // anonymous or optional-member reads of one site slug under
-// /api/public/v2/sites/{slug}/.... Handlers only resolve the optional session
+// /api/public/sites/{slug}/.... Handlers only resolve the optional session
 // cookie, precompute the throttled client address, parse the query envelope
 // and map domain errors; every content decision lives in internal/site and
 // the query service. These endpoints never require an Idempotency-Key (safe
-// reads, and requiresHTTPIdempotency does not cover /api/public/v2).
+// reads, and requiresHTTPIdempotency does not cover /api/public).
 
 import (
 	"errors"
@@ -106,7 +106,7 @@ func publicCacheHeaders(w http.ResponseWriter, r *http.Request, etag string) boo
 	return false
 }
 
-// publicSiteView serves GET /api/public/v2/sites/{slug}: the site header
+// publicSiteView serves GET /api/public/sites/{slug}: the site header
 // plus the homepage sections rendered with live content (plan §4).
 func publicSiteView(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -135,7 +135,7 @@ func publicSiteView(deps Dependencies) http.HandlerFunc {
 	}
 }
 
-// publicSitePosts serves GET /api/public/v2/sites/{slug}/posts with the
+// publicSitePosts serves GET /api/public/sites/{slug}/posts with the
 // query envelope q/tags_any/tags_all/tags_none/cursor/limit (plan §4).
 func publicSitePosts(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -172,7 +172,7 @@ func publicSitePosts(deps Dependencies) http.HandlerFunc {
 	}
 }
 
-// publicSitePost serves GET /api/public/v2/sites/{slug}/posts/{displayPath...}:
+// publicSitePost serves GET /api/public/sites/{slug}/posts/{displayPath...}:
 // the detail projection behind the §3.3 re-check.
 func publicSitePost(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -201,7 +201,7 @@ func publicSitePost(deps Dependencies) http.HandlerFunc {
 	}
 }
 
-// publicSiteSection serves GET /api/public/v2/sites/{slug}/sections/{sectionSlug}.
+// publicSiteSection serves GET /api/public/sites/{slug}/sections/{sectionSlug}.
 func publicSiteSection(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -230,7 +230,7 @@ func publicSiteSection(deps Dependencies) http.HandlerFunc {
 	}
 }
 
-// publicSiteTags serves GET /api/public/v2/sites/{slug}/tags: the (public,
+// publicSiteTags serves GET /api/public/sites/{slug}/tags: the (public,
 // published) facet cloud of the site workspace (plan B4/§5.2).
 func publicSiteTags(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -258,7 +258,7 @@ func publicSiteTags(deps Dependencies) http.HandlerFunc {
 	}
 }
 
-// publicSiteTagPage serves GET /api/public/v2/sites/{slug}/tags/{key}: the
+// publicSiteTagPage serves GET /api/public/sites/{slug}/tags/{key}: the
 // tag archive as the tags_any=[key] list face (plan §4).
 func publicSiteTagPage(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -291,7 +291,7 @@ func publicSiteTagPage(deps Dependencies) http.HandlerFunc {
 	}
 }
 
-// publicSiteSearch serves GET /api/public/v2/sites/{slug}/search with a
+// publicSiteSearch serves GET /api/public/sites/{slug}/search with a
 // mandatory q and mode=fulltext|hybrid (plan §4).
 func publicSiteSearch(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {

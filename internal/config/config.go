@@ -17,7 +17,7 @@ const (
 	MailerProviderCapture = "capture"
 )
 
-// DefaultEmbeddingDimensions is the fixed v2 semantic ABI (doc §13.1).
+// DefaultEmbeddingDimensions is the fixed semantic ABI (doc §13.1).
 const DefaultEmbeddingDimensions = 1024
 
 type Config struct {

@@ -4,83 +4,19 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"strings"
 	"time"
 
 	"agentchunzhi/internal/automation"
 	"agentchunzhi/internal/content"
-	agentquery "agentchunzhi/internal/query"
 	"github.com/jackc/pgx/v5"
 )
-
-func searchSuggestions(deps Dependencies) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
-			return
-		}
-		principal, ok := requireMemberSession(w, r, deps)
-		if !ok {
-			return
-		}
-		q := strings.TrimSpace(r.URL.Query().Get("q"))
-		if q == "" || len(q) > 200 {
-			writeError(w, http.StatusUnprocessableEntity, "invalid_query")
-			return
-		}
-		workspaceID := r.PathValue("workspaceId")
-		if deps.WorkspacePolicy == nil || deps.Store == nil || deps.Store.Pool == nil {
-			writeError(w, http.StatusInternalServerError, "authorization_unconfigured")
-			return
-		}
-		if _, err := deps.WorkspacePolicy.Require(r.Context(), principal, workspaceID, "", "workspace.read"); err != nil {
-			writeError(w, http.StatusForbidden, "workspace_access_denied")
-			return
-		}
-		modelID := strings.TrimSpace(r.URL.Query().Get("resource_model_id"))
-		if modelID != "" && !agentquery.ValidUUID(modelID) {
-			writeError(w, http.StatusUnprocessableEntity, "invalid_resource_model_id")
-			return
-		}
-		rows, err := deps.Store.Pool.Query(r.Context(), `
-			SELECT v.title AS value, 'title'::text AS kind, count(*)::bigint AS item_count
-			FROM asset.assets a
-			JOIN asset.asset_versions v ON v.id = a.current_working_version_id
-			WHERE a.organization_id = $1::uuid AND a.workspace_id = $2::uuid
-                          AND ($3 = '' OR a.resource_model_id = NULLIF($3, '')::uuid)
-			  AND v.title IS NOT NULL AND v.title ILIKE '%' || $4 || '%'
-			GROUP BY v.title
-			ORDER BY item_count DESC, kind, value LIMIT 20`,
-			principal.OrganizationID, workspaceID, modelID, q)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "search_suggestions_failed")
-			return
-		}
-		defer rows.Close()
-		items := make([]map[string]any, 0)
-		for rows.Next() {
-			var value, kind string
-			var count int64
-			if err := rows.Scan(&value, &kind, &count); err != nil {
-				writeError(w, http.StatusInternalServerError, "search_suggestions_failed")
-				return
-			}
-			items = append(items, map[string]any{"value": value, "label": value, "kind": kind, "count": count})
-		}
-		if err := rows.Err(); err != nil {
-			writeError(w, http.StatusInternalServerError, "search_suggestions_failed")
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"items": items, "has_more": false})
-	}
-}
 
 type conversationPatchRequest struct {
 	Title      *string `json:"title"`
 	Visibility *string `json:"visibility"`
 }
 
-func conversationResourceFinal(deps Dependencies) http.HandlerFunc {
+func conversationResource(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		principal, ok := requireMemberSession(w, r, deps)
 		if !ok {
@@ -140,7 +76,7 @@ func conversationResourceFinal(deps Dependencies) http.HandlerFunc {
 	}
 }
 
-func archiveConversationFinal(deps Dependencies) http.HandlerFunc {
+func archiveConversation(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
@@ -179,7 +115,7 @@ func archiveConversationFinal(deps Dependencies) http.HandlerFunc {
 	}
 }
 
-func conversationBlocksFinal(deps Dependencies) http.HandlerFunc {
+func conversationBlocks(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
@@ -206,7 +142,7 @@ func conversationBlocksFinal(deps Dependencies) http.HandlerFunc {
 	}
 }
 
-func conversationNoteFinal(deps Dependencies) http.HandlerFunc {
+func conversationNote(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
@@ -259,7 +195,7 @@ func conversationNoteFinal(deps Dependencies) http.HandlerFunc {
 	}
 }
 
-func conversationTranscriptFinal(deps Dependencies) http.HandlerFunc {
+func conversationTranscript(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
@@ -304,7 +240,7 @@ func conversationTranscriptFinal(deps Dependencies) http.HandlerFunc {
 	}
 }
 
-func deleteAutomationJobFinal(deps Dependencies) http.HandlerFunc {
+func deleteAutomationJob(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodDelete {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
