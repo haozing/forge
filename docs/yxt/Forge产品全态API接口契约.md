@@ -519,7 +519,7 @@ Agent 应用：`{id,name,provider,status,capabilities,description,config_summary
 | 方法 | 路径 |
 | --- | --- |
 | GET/POST | `/api/workspaces/{workspaceId}/conversations` |
-| GET/PATCH | `/api/conversations/{conversationId}` |
+| GET/PATCH/DELETE | `/api/conversations/{conversationId}` |
 | GET | `/api/conversations/{conversationId}/children` |
 | POST | `/api/conversations/{conversationId}/archive` |
 | GET/POST | `/api/conversations/{conversationId}/messages` |
@@ -532,6 +532,13 @@ Agent 应用：`{id,name,provider,status,capabilities,description,config_summary
 派生关系：`parent_conversation_id` 为来源思考 ID，`origin_derivation_id` 为产生本思考的派生记录 ID；根思考两者均为空字符串。会话列表、会话详情和 children 列表统一返回这两个字段，前端据此组装主干/派生树。
 
 `GET /api/conversations/{conversationId}/children` 返回 `{items:[会话摘要...]}`：列出以该思考为父的全部派生思考（按创建时间升序，不含 archived），每项同会话摘要结构。父思考不存在时 404 `conversation_not_found`，无工作区访问权 403 `workspace_access_denied`。
+
+删除思考：`DELETE /api/conversations/{conversationId}`（需幂等键）。思考是过程数据，删除为事务性硬删，与 archive（可逆归档）语义分层。
+
+- 派生分支处理：存在子思考时默认拒绝 409 `conversation_has_children`（与容器"非空不可删"一致），前端应提示"该思考有 N 个派生思考"；带 `?cascade_children=true` 时级联删除整棵子树，返回 `{conversation_id, deleted_children:[...]}`。
+- 级联删除范围：子树内全部会话、消息块及其块修订、笔记绑定、媒体登记、派生记录（derivation_sources 一并删除）。
+- 保留数据：笔记资产及其版本（沉淀层不随过程层删除，仅解除会话绑定）、附件、资产关联（asset_relations 保留，其 derivation_id 置 NULL 断开死链）。
+- 权限：成员且工作区角色非 viewer；可见性规则同读取。错误：404 `conversation_not_found` / 403 `workspace_access_denied` / 422 `invalid_conversation_id`。
 
 消息写入：
 

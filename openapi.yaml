@@ -2705,6 +2705,29 @@ paths:
                   - $ref: '#/components/schemas/Envelope'
         '404': { $ref: '#/components/responses/Error' }
         '422': { $ref: '#/components/responses/Error' }
+    delete:
+      tags: [conversations]
+      operationId: deleteConversation
+      description: 删除思考（硬删，事务性）。存在派生子思考时拒绝（409 conversation_has_children），需 ?cascade_children=true 显式级联删除整棵子树；笔记资产与资产血缘保留
+      parameters:
+        - $ref: '#/components/parameters/ConversationId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - name: cascade_children
+          in: query
+          schema: { type: string, enum: ["true", "false"] }
+      responses:
+        '200':
+          description: 已删除，返回删除的子思考列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ConversationDeleteResult'
+                  - $ref: '#/components/schemas/Envelope'
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
   /api/conversations/{conversationId}/children:
     get:
       tags: [conversations]
@@ -3098,6 +3121,14 @@ components:
       properties:
         title: { type: string }
         visibility: { type: string, enum: [private, workspace] }
+    ConversationDeleteResult:
+      type: object
+      properties:
+        conversation_id: { type: string, format: uuid }
+        deleted_children:
+          type: array
+          description: 级联删除的派生思考 ID；未级联时为空数组
+          items: { type: string, format: uuid }
     Message:
       type: object
       properties:

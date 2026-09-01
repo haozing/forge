@@ -8,6 +8,7 @@ import (
 
 	"agentchunzhi/internal/automation"
 	"agentchunzhi/internal/content"
+	"agentchunzhi/internal/conversation"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -17,13 +18,19 @@ type conversationPatchRequest struct {
 }
 
 func conversationResource(deps Dependencies) http.HandlerFunc {
+	get := getConversation(deps)
+	remove := deleteConversation(deps)
 	return func(w http.ResponseWriter, r *http.Request) {
 		principal, ok := requireMemberSession(w, r, deps)
 		if !ok {
 			return
 		}
 		if r.Method == http.MethodGet {
-			getConversation(deps)(w, r)
+			get(w, r)
+			return
+		}
+		if r.Method == http.MethodDelete {
+			remove(w, r)
 			return
 		}
 		if r.Method != http.MethodPatch {
@@ -112,6 +119,47 @@ func archiveConversation(deps Dependencies) http.HandlerFunc {
 			return
 		}
 		writeJSON(w, http.StatusOK, item)
+	}
+}
+
+// deleteConversation removes a thought. Derived thoughts block the delete
+// with 409 unless ?cascade_children=true opts into subtree deletion.
+func deleteConversation(deps Dependencies) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
+			return
+		}
+		principal, ok := requireMemberSession(w, r, deps)
+		if !ok {
+			return
+		}
+		if _, ok := requestIdempotencyKey(w, r); !ok {
+			return
+		}
+		cascade := r.URL.Query().Get("cascade_children") == "true"
+		result, err := deps.ConversationService.Delete(r.Context(), principal, r.PathValue("conversationId"), cascade)
+		if errors.Is(err, conversation.ErrInvalidID) {
+			writeError(w, http.StatusUnprocessableEntity, "invalid_conversation_id")
+			return
+		}
+		if errors.Is(err, conversation.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "conversation_not_found")
+			return
+		}
+		if errors.Is(err, conversation.ErrForbidden) {
+			writeError(w, http.StatusForbidden, "workspace_access_denied")
+			return
+		}
+		if errors.Is(err, conversation.ErrHasChildren) {
+			writeError(w, http.StatusConflict, "conversation_has_children")
+			return
+		}
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "conversation_delete_failed")
+			return
+		}
+		writeJSON(w, http.StatusOK, result)
 	}
 }
 

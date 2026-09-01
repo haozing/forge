@@ -102,7 +102,7 @@ var routerTruth = map[string][]string{
 	"/api/workspaces/{workspaceId}/suggestions/{kind}/{suggestionId}/accept": {"post"},
 	"/api/workspaces/{workspaceId}/suggestions/{kind}/{suggestionId}/reject":  {"post"},
 	"/api/workspaces/{workspaceId}/conversations":                      {"get", "post"},
-	"/api/conversations/{conversationId}":                              {"get", "patch"},
+	"/api/conversations/{conversationId}":                              {"get", "patch", "delete"},
 	"/api/conversations/{conversationId}/children":                     {"get"},
 	"/api/conversations/{conversationId}/archive":                      {"post"},
 	"/api/conversations/{conversationId}/messages":                     {"get", "post"},
