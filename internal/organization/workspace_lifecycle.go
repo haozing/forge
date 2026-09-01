@@ -34,7 +34,10 @@ type Workspace struct {
 
 // CreateWorkspace is reserved to organization admins (organization.create
 // governance action); content permissions still require explicit membership,
-// which the creator receives as workspace admin.
+// which the creator receives as workspace admin. An omitted default model
+// falls back to the organization-wide builtin_note seed, so agent
+// applications registered on the workspace can be granted retrieval scope
+// out of the box.
 func (s Service) CreateWorkspace(ctx context.Context, principal auth.Principal, name, description, defaultResourceModelID string) (Workspace, error) {
 	if err := s.RequireOrganizationAction(ctx, principal, authz.ActionWorkspaceCreate); err != nil {
 		return Workspace{}, err
@@ -42,6 +45,34 @@ func (s Service) CreateWorkspace(ctx context.Context, principal auth.Principal, 
 	name = strings.TrimSpace(name)
 	if name == "" || len([]rune(name)) > 100 {
 		return Workspace{}, ErrInvalidInput
+	}
+	defaultResourceModelID = strings.TrimSpace(defaultResourceModelID)
+	if defaultResourceModelID == "" {
+		if err := s.Store.Pool.QueryRow(ctx, `
+			SELECT id::text FROM model.resource_models
+			WHERE organization_id = $1::uuid AND workspace_id IS NULL
+			  AND model_key = 'builtin_note' AND status = 'active'
+			  AND current_version_id IS NOT NULL
+			LIMIT 1
+		`, principal.OrganizationID).Scan(&defaultResourceModelID); errors.Is(err, pgx.ErrNoRows) {
+			return Workspace{}, ErrInvalidInput
+		} else if err != nil {
+			return Workspace{}, fmt.Errorf("resolve default resource model: %w", err)
+		}
+	} else {
+		var ok bool
+		if err := s.Store.Pool.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM model.resource_models
+				WHERE organization_id = $1::uuid AND id = $2::uuid
+				  AND status = 'active' AND current_version_id IS NOT NULL
+			)
+		`, principal.OrganizationID, defaultResourceModelID).Scan(&ok); err != nil {
+			return Workspace{}, fmt.Errorf("check default resource model: %w", err)
+		}
+		if !ok {
+			return Workspace{}, ErrInvalidInput
+		}
 	}
 	tx, err := s.Store.Pool.Begin(ctx)
 	if err != nil {

@@ -3171,6 +3171,10 @@ components:
       required: [query]
       properties:
         query: { type: string }
+        response_mode:
+          type: string
+          enum: [answer, answer_with_sources]
+          description: answer 跟随应用默认回答姿态；answer_with_sources 强制问答姿态；draft_note 规划中
         reference_ids:
           type: array
           items: { type: string, format: uuid }
@@ -3180,6 +3184,9 @@ components:
       type: object
       properties:
         answer: { type: string }
+        grounded:
+          type: boolean
+          description: true=问答姿态（依据已发布资产并引用）；false=共创姿态（草稿性质，references 恒空）
         conversation_id: { type: string, format: uuid }
         message_id: { type: string, format: uuid }
         references:

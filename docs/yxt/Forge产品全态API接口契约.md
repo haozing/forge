@@ -207,7 +207,9 @@ Cookie: Forge_session=<opaque>
 - `POST /api/frontend/agent-applications/{applicationId}/enable`
 - `POST /api/frontend/agent-applications/{applicationId}/disable`
 
-Agent 应用：`{id,name,provider,status,capabilities,description,config_summary,bound_agent_user_id,created_at,updated_at}`。浏览器永远不能读取 provider secret；配置只返回脱敏摘要。
+Agent 应用：`{id,name,provider,status,capabilities,answer_posture,description,config_summary,bound_agent_user_id,created_at,updated_at}`。`answer_posture`：`co_create|grounded_qa`，默认 `co_create`（语义见 §11.2 回答姿态）。注册与 PATCH 均可设置。浏览器永远不能读取 provider secret；配置只返回脱敏摘要。
+
+工作区注册应用时系统自动写入一条 workspace 级 agent 授权（该工作区默认资源模型，actions=`read,query.execute`），保证注册后开箱即可问答；管理员可随后收窄。
 
 ## 5. 动态资源模型
 
@@ -554,16 +556,23 @@ Agent 应用：`{id,name,provider,status,capabilities,description,config_summary
 
 ### 11.2 普通和流式聊天
 
-- `POST /api/frontend/conversations/{conversationId}/chat`
-- `POST /api/frontend/conversations/{conversationId}/chat/stream`
+- `POST /api/conversations/{conversationId}/chat`
+- `POST /api/conversations/{conversationId}/chat/stream`
 
-请求：`{query,reference_ids?,model_context?,response_mode?}`。`response_mode`：`answer|answer_with_sources|draft_note`。
+请求：`{query,reference_ids?,model_context?,response_mode?}`。
+
+回答姿态（answer posture）：会话聊天存在两种姿态——
+
+- `co_create`（共创，应用默认）：人机共创入口。模型可用通用知识与参考材料帮用户思考、结构化、起草；检索命中仅作参考、不强制引用；空知识库不影响对话。响应 `grounded=false`、`references` 恒为空数组。
+- `grounded_qa`（问答）：回答只依据知识库已发布资产，引用 [S#] 纪律生效；知识不足时用提问语言明确说明"未找到相关已发布内容"并给出可行动建议，不得编造。响应 `grounded=true`。
+
+姿态解析：应用级默认取 `AgentApplication.answer_posture`（注册/更新可配，枚举 `co_create|grounded_qa`，默认 `co_create`）；请求级 `response_mode` 可覆盖——`answer` 跟随应用默认、`answer_with_sources` 强制问答、`draft_note` 规划中（传 422）。治理闸门不变：共创产出仅是草稿，须经笔记同步、人工确认与发布流程才成为可引用知识（§8.3/§12.1）。
 
 普通响应：
 
 ```json
 {
-  "answer":"...", "conversation_id":"uuid", "message_id":"uuid",
+  "answer":"...", "grounded":false, "conversation_id":"uuid", "message_id":"uuid",
   "references":[{"asset_id":"uuid","asset_version_id":"uuid","title":"...","snippet":"..."}],
   "rejected_reference_count":0, "usage":{"input_tokens":0,"output_tokens":0}
 }

@@ -28,6 +28,8 @@ type ChatRequest struct {
 	ConversationID     string
 	MessageID          string
 	RuntimeMode        string
+	AnswerPosture      string
+	ResponseMode       string
 	AgentPrincipal     auth.Principal
 	Query              string
 	History            []ChatMessage
@@ -43,6 +45,7 @@ type Usage struct {
 
 type ChatResult struct {
 	Answer                 string                      `json:"answer"`
+	Grounded               bool                        `json:"grounded"`
 	ConversationID         string                      `json:"conversation_id,omitempty"`
 	MessageID              string                      `json:"message_id"`
 	References             []agentquery.AssetReference `json:"references"`

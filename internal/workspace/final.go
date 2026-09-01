@@ -49,7 +49,9 @@ type InviteInput struct {
 }
 
 // Create is reserved to organization admins. The creator receives an explicit
-// workspace admin membership; there is no workspace owner role.
+// workspace admin membership; there is no workspace owner role. An omitted
+// default model falls back to the organization-wide builtin_note seed so the
+// workspace is agent-ready from birth.
 func (s Service) Create(ctx context.Context, principal auth.Principal, input CreateInput) (Summary, error) {
 	if err := s.validatePrincipal(principal); err != nil {
 		return Summary{}, ErrForbidden
@@ -57,6 +59,34 @@ func (s Service) Create(ctx context.Context, principal auth.Principal, input Cre
 	input.Name = strings.TrimSpace(input.Name)
 	if input.Name == "" {
 		return Summary{}, ErrInvalidInput
+	}
+	input.DefaultResourceModelID = strings.TrimSpace(input.DefaultResourceModelID)
+	if input.DefaultResourceModelID == "" {
+		if err := s.Store.Pool.QueryRow(ctx, `
+			SELECT id::text FROM model.resource_models
+			WHERE organization_id = $1::uuid AND workspace_id IS NULL
+			  AND model_key = 'builtin_note' AND status = 'active'
+			  AND current_version_id IS NOT NULL
+			LIMIT 1
+		`, principal.OrganizationID).Scan(&input.DefaultResourceModelID); errors.Is(err, pgx.ErrNoRows) {
+			return Summary{}, ErrInvalidInput
+		} else if err != nil {
+			return Summary{}, fmt.Errorf("resolve default resource model: %w", err)
+		}
+	} else {
+		var ok bool
+		if err := s.Store.Pool.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM model.resource_models
+				WHERE organization_id = $1::uuid AND id = $2::uuid
+				  AND status = 'active' AND current_version_id IS NOT NULL
+			)
+		`, principal.OrganizationID, input.DefaultResourceModelID).Scan(&ok); err != nil {
+			return Summary{}, fmt.Errorf("check default resource model: %w", err)
+		}
+		if !ok {
+			return Summary{}, ErrInvalidInput
+		}
 	}
 	var admin bool
 	if err := s.Store.Pool.QueryRow(ctx, `

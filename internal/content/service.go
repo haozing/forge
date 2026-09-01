@@ -1223,7 +1223,8 @@ func (s Service) CreateConversation(ctx context.Context, principal auth.Principa
 	if err := tx.QueryRow(ctx, `
 			SELECT COALESCE(current_version_id::text, '')
 			FROM model.resource_models
-			WHERE organization_id = $1::uuid AND workspace_id = $3::uuid AND id = $2::uuid AND status = 'active'
+			WHERE organization_id = $1::uuid AND id = $2::uuid AND status = 'active'
+			  AND (workspace_id = $3::uuid OR workspace_id IS NULL)
 		`, principal.OrganizationID, defaultModel, input.WorkspaceID).Scan(&modelVersion); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ConversationResult{}, ErrConflict

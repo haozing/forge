@@ -29,6 +29,7 @@ type AgentApplicationSummary struct {
 	ModelName         string    `json:"model_name"`
 	RuntimeMode       string    `json:"runtime_mode"`
 	WorkflowKey       string    `json:"workflow_key,omitempty"`
+	AnswerPosture     string    `json:"answer_posture"`
 	Name              string    `json:"name"`
 	Status            string    `json:"status"`
 	Capabilities      []string  `json:"capabilities"`
@@ -62,6 +63,7 @@ func (s Service) ListAgentApplications(ctx context.Context, principal auth.Princ
 		       mer.model_name,
 		       aa.runtime_mode,
 		       COALESCE(aa.workflow_key, ''),
+		       aa.answer_posture,
 		       aa.name,
 		       aa.status,
 		       aa.capabilities,
@@ -111,6 +113,7 @@ func (s Service) ListAgentApplications(ctx context.Context, principal auth.Princ
 			&item.ModelName,
 			&item.RuntimeMode,
 			&item.WorkflowKey,
+			&item.AnswerPosture,
 			&item.Name,
 			&item.Status,
 			&capabilities,
@@ -156,6 +159,7 @@ func (s Service) GetAgentApplication(ctx context.Context, principal auth.Princip
 		       mer.model_name,
 		       aa.runtime_mode,
 		       COALESCE(aa.workflow_key, ''),
+		       aa.answer_posture,
 		       aa.name,
 		       aa.status,
 		       aa.capabilities,
@@ -195,6 +199,7 @@ func (s Service) GetAgentApplication(ctx context.Context, principal auth.Princip
 		&item.ModelName,
 		&item.RuntimeMode,
 		&item.WorkflowKey,
+		&item.AnswerPosture,
 		&item.Name,
 		&item.Status,
 		&capabilities,

@@ -73,6 +73,7 @@ func validRAGRequest() ChatRequest {
 	return ChatRequest{
 		OrganizationID: "organization-a", AgentApplicationID: "application-a", SessionID: "session-a",
 		ConversationID: "conversation-a", RuntimeMode: "rag", Query: "What is the policy?",
+		AnswerPosture:  "grounded_qa",
 		AgentPrincipal: auth.Principal{OrganizationID: "organization-a", UserID: "agent-a", UserType: "agent"},
 	}
 }
@@ -110,7 +111,7 @@ func TestRAGRuntimeGenerateFiltersReferencesAndSeparatesUntrustedContext(t *test
 	if result.Usage.TotalTokens != 28 || result.Usage.ReasoningTokens != 2 || result.ModelRequestID != "request-123" {
 		t.Fatalf("model metadata was not captured: %+v request=%q", result.Usage, result.ModelRequestID)
 	}
-	if len(chatModel.input) != 4 || chatModel.input[0].Content != fixedRAGInstruction {
+	if len(chatModel.input) != 4 || chatModel.input[0].Content != groundedQAInstruction {
 		t.Fatalf("unexpected model messages: %+v", chatModel.input)
 	}
 	if strings.Contains(chatModel.input[0].Content, "IGNORE ALL") || !strings.Contains(chatModel.input[len(chatModel.input)-1].Content, "IGNORE ALL") {

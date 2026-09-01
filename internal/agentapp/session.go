@@ -35,6 +35,7 @@ type SessionBinding struct {
 	ModelEndpointID    string
 	ModelRevision      int64
 	RuntimeMode        string
+	AnswerPosture      string
 }
 
 func (s Service) Start(ctx context.Context, principal auth.Principal, allowedApplicationIDs []string, applicationID, idempotencyKey string) (SessionResult, error) {
@@ -135,11 +136,11 @@ func (s Service) ResolveActiveSession(ctx context.Context, member auth.Principal
 	if s.Store == nil || s.Store.Pool == nil {
 		return SessionBinding{}, errors.New("database store is not initialized")
 	}
-	var agentUserID, applicationID, modelEndpointID, runtimeMode string
+	var agentUserID, applicationID, modelEndpointID, runtimeMode, answerPosture string
 	var modelRevision int64
 	err := s.Store.Pool.QueryRow(ctx, `
 		SELECT s.bound_agent_user_id::text, s.agent_application_id::text,
-		       aa.model_endpoint_id::text, me.current_revision, aa.runtime_mode
+		       aa.model_endpoint_id::text, me.current_revision, aa.runtime_mode, aa.answer_posture
 		FROM integration.agent_sessions s
 		JOIN integration.agent_applications aa ON aa.id = s.agent_application_id
 		JOIN identity.users au ON au.id = s.bound_agent_user_id
@@ -158,7 +159,7 @@ func (s Service) ResolveActiveSession(ctx context.Context, member auth.Principal
 		  AND au.organization_id = s.organization_id
 		  AND au.user_type = 'agent'
 		  AND au.status = 'active'
-	`, sessionID, member.OrganizationID, member.UserID).Scan(&agentUserID, &applicationID, &modelEndpointID, &modelRevision, &runtimeMode)
+	`, sessionID, member.OrganizationID, member.UserID).Scan(&agentUserID, &applicationID, &modelEndpointID, &modelRevision, &runtimeMode, &answerPosture)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return SessionBinding{}, ErrNotFound
 	}
@@ -170,6 +171,7 @@ func (s Service) ResolveActiveSession(ctx context.Context, member auth.Principal
 		ModelEndpointID:    modelEndpointID,
 		ModelRevision:      modelRevision,
 		RuntimeMode:        runtimeMode,
+		AnswerPosture:      answerPosture,
 		AgentPrincipal: auth.Principal{
 			UserID:         agentUserID,
 			OrganizationID: member.OrganizationID,

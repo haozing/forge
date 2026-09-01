@@ -93,7 +93,7 @@ func workspaceAgentApplications(deps Dependencies) http.HandlerFunc {
 		created, err := deps.AdminService.RegisterAgent(r.Context(), principal, adminservice.RegisterAgentInput{
 			DisplayName: input.DisplayName, ApiKeyName: input.ApiKeyName, ApplicationName: input.ApplicationName,
 			ModelEndpointID: input.ModelEndpointID, RuntimeMode: input.RuntimeMode, WorkflowKey: input.WorkflowKey,
-			Capabilities: input.Capabilities,
+			Capabilities: input.Capabilities, AnswerPosture: input.AnswerPosture,
 			ExpiresAt:    expiresAt, IdempotencyKey: key,
 		})
 		if err != nil {
@@ -109,18 +109,21 @@ func workspaceAgentApplications(deps Dependencies) http.HandlerFunc {
 			return
 		}
 		// A workspace-created application must be usable immediately. Grant its
-		// bound identity read access to the workspace's default resource model;
-		// owners can still narrow or replace this policy through admin controls.
+		// bound identity read AND query.execute on the workspace's default
+		// resource model, scoped to the workspace itself (never org-wide): the
+		// RAG retrieval scope requires query.execute, so a read-only grant
+		// would make every chat fail with query_scope_forbidden. Owners can
+		// still narrow or replace this policy through admin controls.
 		if _, err := deps.Store.Pool.Exec(r.Context(), `
                         INSERT INTO content.agent_access_policies
                                 (organization_id, workspace_id, agent_user_id, resource_model_id, actions, created_by)
-                        SELECT w.organization_id, NULL, $3::uuid, w.default_resource_model_id,
-                               ARRAY['read']::text[], $4::uuid
+                        SELECT w.organization_id, w.id, $3::uuid, w.default_resource_model_id,
+                               ARRAY['read', 'query.execute']::text[], $4::uuid
                         FROM content.workspaces w
                         WHERE w.organization_id = $1::uuid AND w.id = $2::uuid
                           AND w.default_resource_model_id IS NOT NULL
                         ON CONFLICT (organization_id, agent_user_id, workspace_id, resource_model_id)
-                        DO UPDATE SET actions = ARRAY['read']::text[], updated_at = now()
+                        DO UPDATE SET actions = ARRAY['read', 'query.execute']::text[], updated_at = now()
 		`, principal.OrganizationID, r.PathValue("workspaceId"), created.AgentUserID, principal.UserID); err != nil {
 			writeError(w, http.StatusInternalServerError, "workspace_agent_application_policy_failed")
 			return
@@ -182,17 +185,18 @@ func agentApplicationResource(deps Dependencies) http.HandlerFunc {
 			RuntimeMode     *string   `json:"runtime_mode"`
 			WorkflowKey     *string   `json:"workflow_key"`
 			Capabilities    *[]string `json:"capabilities"`
+			AnswerPosture   *string   `json:"answer_posture"`
 		}
 		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 32*1024))
 		decoder.DisallowUnknownFields()
-		if err := decoder.Decode(&patch); err != nil || (patch.Name == nil && patch.ModelEndpointID == nil && patch.RuntimeMode == nil && patch.WorkflowKey == nil && patch.Capabilities == nil) {
+		if err := decoder.Decode(&patch); err != nil || (patch.Name == nil && patch.ModelEndpointID == nil && patch.RuntimeMode == nil && patch.WorkflowKey == nil && patch.Capabilities == nil && patch.AnswerPosture == nil) {
 			writeError(w, http.StatusUnprocessableEntity, "validation_failed")
 			return
 		}
 		if _, err := deps.AdminService.UpdateAgentApplication(r.Context(), principal, adminservice.UpdateAgentApplicationInput{
 			ApplicationID: item.ID, Name: patch.Name, ModelEndpointID: patch.ModelEndpointID,
 			RuntimeMode: patch.RuntimeMode, WorkflowKey: patch.WorkflowKey,
-			Capabilities: patch.Capabilities, IdempotencyKey: key,
+			Capabilities: patch.Capabilities, AnswerPosture: patch.AnswerPosture, IdempotencyKey: key,
 		}); err != nil {
 			writeAgentApplicationError(w, err, "agent_application_update_failed")
 			return

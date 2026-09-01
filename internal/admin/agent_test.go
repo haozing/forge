@@ -36,6 +36,7 @@ func TestValidInputRequiresAllRegistrationNames(t *testing.T) {
 		ModelEndpointID: "00000000-0000-4000-8000-000000000001",
 		RuntimeMode:     "rag",
 		Capabilities:    []string{"query.read", "reference.read"},
+		AnswerPosture:   "co_create",
 		IdempotencyKey:  "register-agent-idempotency",
 	}
 	if !validInput(valid) {

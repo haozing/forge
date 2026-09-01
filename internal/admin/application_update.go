@@ -24,6 +24,7 @@ type UpdateAgentApplicationInput struct {
 	RuntimeMode     *string
 	WorkflowKey     *string
 	Capabilities    *[]string
+	AnswerPosture   *string
 	IdempotencyKey  string
 }
 
@@ -32,6 +33,7 @@ type UpdateAgentApplicationResult struct {
 	ModelEndpointID string    `json:"model_endpoint_id"`
 	RuntimeMode     string    `json:"runtime_mode"`
 	WorkflowKey     string    `json:"workflow_key,omitempty"`
+	AnswerPosture   string    `json:"answer_posture"`
 	UpdatedAt       time.Time `json:"updated_at"`
 }
 
@@ -67,15 +69,15 @@ func (s Service) UpdateAgentApplication(ctx context.Context, principal auth.Prin
 		return UpdateAgentApplicationResult{}, ErrConflict
 	}
 
-	var currentName, currentEndpointID, currentRuntimeMode, currentWorkflowKey string
+	var currentName, currentEndpointID, currentRuntimeMode, currentWorkflowKey, currentAnswerPosture string
 	var currentCapabilitiesJSON []byte
 	err = tx.QueryRow(ctx, `
-		SELECT name, model_endpoint_id::text, runtime_mode, COALESCE(workflow_key, ''), capabilities
+		SELECT name, model_endpoint_id::text, runtime_mode, COALESCE(workflow_key, ''), capabilities, answer_posture
 		FROM integration.agent_applications
 		WHERE id = $1::uuid AND organization_id = $2::uuid
 		FOR UPDATE
 	`, input.ApplicationID, principal.OrganizationID).Scan(
-		&currentName, &currentEndpointID, &currentRuntimeMode, &currentWorkflowKey, &currentCapabilitiesJSON,
+		&currentName, &currentEndpointID, &currentRuntimeMode, &currentWorkflowKey, &currentCapabilitiesJSON, &currentAnswerPosture,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return UpdateAgentApplicationResult{}, ErrApplicationNotFound
@@ -113,6 +115,14 @@ func (s Service) UpdateAgentApplication(ctx context.Context, principal auth.Prin
 		return UpdateAgentApplicationResult{}, ErrApplicationUpdateInvalidInput
 	}
 
+	answerPosture := currentAnswerPosture
+	if input.AnswerPosture != nil {
+		answerPosture = strings.TrimSpace(*input.AnswerPosture)
+		if !validAnswerPosture(answerPosture) {
+			return UpdateAgentApplicationResult{}, ErrApplicationUpdateInvalidInput
+		}
+	}
+
 	capabilities := make([]string, 0)
 	if err := json.Unmarshal(currentCapabilitiesJSON, &capabilities); err != nil {
 		return UpdateAgentApplicationResult{}, fmt.Errorf("decode current agent capabilities: %w", err)
@@ -142,11 +152,12 @@ func (s Service) UpdateAgentApplication(ctx context.Context, principal auth.Prin
 		    runtime_mode = $5,
 		    workflow_key = $6,
 		    capabilities = $7::jsonb,
+		    answer_posture = $8,
 		    updated_at = now()
 		WHERE id = $1::uuid AND organization_id = $2::uuid
-		RETURNING id::text, model_endpoint_id::text, runtime_mode, COALESCE(workflow_key, ''), updated_at
-	`, input.ApplicationID, principal.OrganizationID, name, endpointID, runtimeMode, nullableText(workflowKey), string(capabilitiesJSON)).Scan(
-		&result.ApplicationID, &result.ModelEndpointID, &result.RuntimeMode, &result.WorkflowKey, &result.UpdatedAt,
+		RETURNING id::text, model_endpoint_id::text, runtime_mode, COALESCE(workflow_key, ''), answer_posture, updated_at
+	`, input.ApplicationID, principal.OrganizationID, name, endpointID, runtimeMode, nullableText(workflowKey), string(capabilitiesJSON), answerPosture).Scan(
+		&result.ApplicationID, &result.ModelEndpointID, &result.RuntimeMode, &result.WorkflowKey, &result.AnswerPosture, &result.UpdatedAt,
 	)
 	if err != nil {
 		return UpdateAgentApplicationResult{}, fmt.Errorf("update agent application: %w", err)
@@ -183,7 +194,7 @@ func (s Service) UpdateAgentApplication(ctx context.Context, principal auth.Prin
 }
 
 func hasApplicationPatch(input UpdateAgentApplicationInput) bool {
-	return input.Name != nil || input.ModelEndpointID != nil || input.RuntimeMode != nil || input.WorkflowKey != nil || input.Capabilities != nil
+	return input.Name != nil || input.ModelEndpointID != nil || input.RuntimeMode != nil || input.WorkflowKey != nil || input.Capabilities != nil || input.AnswerPosture != nil
 }
 
 func applicationUpdateRequestHash(input UpdateAgentApplicationInput) (string, error) {

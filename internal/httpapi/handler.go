@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"mime"
 	"net/http"
 	"strconv"
@@ -136,6 +137,7 @@ type registerAgentRequest struct {
 	RuntimeMode     string   `json:"runtime_mode"`
 	WorkflowKey     string   `json:"workflow_key,omitempty"`
 	Capabilities    []string `json:"capabilities"`
+	AnswerPosture   string   `json:"answer_posture"`
 	ExpiresAt       *string  `json:"expires_at"`
 }
 
@@ -176,10 +178,12 @@ type validateAgentReferencesResponse struct {
 type agentChatRequest struct {
 	Query          string `json:"query"`
 	ConversationID string `json:"conversation_id"`
+	ResponseMode   string `json:"response_mode"`
 }
 
 type agentChatResponse struct {
 	Answer                 string                      `json:"answer"`
+	Grounded               bool                        `json:"grounded"`
 	ConversationID         string                      `json:"conversation_id,omitempty"`
 	MessageID              string                      `json:"message_id,omitempty"`
 	References             []agentquery.AssetReference `json:"references"`
@@ -1295,11 +1299,19 @@ func chatAgentSession(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusInternalServerError, "agent_session_resolution_failed")
 			return
 		}
+		switch input.ResponseMode {
+		case "", "answer", "answer_with_sources":
+		default:
+			writeError(w, http.StatusUnprocessableEntity, "invalid_agent_chat_request")
+			return
+		}
 		chatOutcome := "error"
 		chatAuditMetadata := map[string]any{
 			"query_hash":      hashQuery(input.Query),
 			"conversation_id": input.ConversationID,
 			"runtime_mode":    binding.RuntimeMode,
+			"answer_posture":  binding.AnswerPosture,
+			"response_mode":   input.ResponseMode,
 		}
 		defer func() {
 			if deps.Store != nil {
@@ -1326,6 +1338,7 @@ func chatAgentSession(deps Dependencies) http.HandlerFunc {
 		result, err := deps.AgentRuntime.Chat(r.Context(), agentruntime.ChatRequest{
 			OrganizationID: binding.AgentPrincipal.OrganizationID, AgentApplicationID: binding.AgentApplicationID,
 			SessionID: sessionID, ConversationID: input.ConversationID, RuntimeMode: binding.RuntimeMode,
+			AnswerPosture: binding.AnswerPosture, ResponseMode: input.ResponseMode,
 			AgentPrincipal: binding.AgentPrincipal, Query: input.Query, History: history,
 		})
 		if err != nil {
@@ -1342,7 +1355,7 @@ func chatAgentSession(deps Dependencies) http.HandlerFunc {
 		chatOutcome = "allowed"
 		addAgentRuntimeAuditMetadata(chatAuditMetadata, result)
 		writeJSON(w, http.StatusOK, agentChatResponse{
-			Answer: result.Answer, ConversationID: result.ConversationID, MessageID: result.MessageID,
+			Answer: result.Answer, Grounded: result.Grounded, ConversationID: result.ConversationID, MessageID: result.MessageID,
 			References: result.References, RejectedReferenceCount: result.RejectedReferenceCount,
 		})
 	}
@@ -1378,6 +1391,7 @@ func loadAgentChatHistory(ctx context.Context, deps Dependencies, principal auth
 }
 
 func writeAgentRuntimeError(w http.ResponseWriter, err error) {
+	log.Printf("agent runtime error: %v", err)
 	code := agentRuntimeErrorCode(err)
 	switch code {
 	case "invalid_agent_chat_request":
@@ -1402,6 +1416,10 @@ func agentRuntimeErrorCode(err error) string {
 	case errors.Is(err, agentruntime.ErrModelScopeMismatch):
 		return "agent_model_scope_mismatch"
 	case errors.Is(err, agentquery.ErrModelAccessDenied):
+		return "agent_data_access_denied"
+	case errors.Is(err, agentquery.ErrQueryScopeForbidden):
+		// A scope compilation failure is a permission/configuration problem,
+		// not a model fault; surfacing it as 502 model_failed misled everyone.
 		return "agent_data_access_denied"
 	case errors.Is(err, modelendpoint.ErrUnavailable):
 		return "agent_model_unavailable"
@@ -1496,12 +1514,20 @@ func streamAgentSession(deps Dependencies) http.HandlerFunc {
 			_ = writeSSE(w, flusher, "reset", map[string]string{"recovery": "/api/conversations/" + input.ConversationID + "/messages"})
 			return
 		}
+		switch input.ResponseMode {
+		case "", "answer", "answer_with_sources":
+		default:
+			_ = writeSSE(w, flusher, "error", map[string]string{"code": "invalid_agent_chat_request", "message": "invalid agent chat request"})
+			return
+		}
 		chatOutcome := "error"
 		chatAuditMetadata := map[string]any{
 			"query_hash":      hashQuery(input.Query),
 			"conversation_id": input.ConversationID,
 			"stream":          true,
 			"runtime_mode":    binding.RuntimeMode,
+			"answer_posture":  binding.AnswerPosture,
+			"response_mode":   input.ResponseMode,
 		}
 		defer func() {
 			if deps.Store != nil {
@@ -1532,7 +1558,8 @@ func streamAgentSession(deps Dependencies) http.HandlerFunc {
 			err := deps.AgentRuntime.StreamChat(r.Context(), agentruntime.ChatRequest{
 				OrganizationID: binding.AgentPrincipal.OrganizationID, AgentApplicationID: binding.AgentApplicationID,
 				SessionID: sessionID, ConversationID: input.ConversationID, MessageID: streamMessageID,
-				RuntimeMode: binding.RuntimeMode, AgentPrincipal: binding.AgentPrincipal, Query: input.Query, History: history,
+				RuntimeMode: binding.RuntimeMode, AnswerPosture: binding.AnswerPosture, ResponseMode: input.ResponseMode,
+				AgentPrincipal: binding.AgentPrincipal, Query: input.Query, History: history,
 			}, func(event agentruntime.StreamEvent) error {
 				if event.Result != nil {
 					final = *event.Result
@@ -1595,6 +1622,7 @@ func streamAgentSession(deps Dependencies) http.HandlerFunc {
 		eventID++
 		if err := writeSSEWithID(w, flusher, eventID, "message.complete", map[string]any{
 			"message_id": streamMessageID, "conversation_id": final.ConversationID,
+			"grounded": final.Grounded,
 			"rejected_reference_count": final.RejectedReferenceCount, "usage": final.Usage,
 		}); err != nil {
 			return

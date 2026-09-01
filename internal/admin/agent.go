@@ -36,6 +36,7 @@ type RegisterAgentInput struct {
 	RuntimeMode     string
 	WorkflowKey     string
 	Capabilities    []string
+	AnswerPosture   string
 	ExpiresAt       *time.Time
 	IdempotencyKey  string
 }
@@ -61,6 +62,12 @@ func (s Service) RegisterAgent(ctx context.Context, principal auth.Principal, in
 	input.ModelEndpointID = strings.TrimSpace(input.ModelEndpointID)
 	input.RuntimeMode = strings.TrimSpace(input.RuntimeMode)
 	input.WorkflowKey = strings.TrimSpace(input.WorkflowKey)
+	input.AnswerPosture = strings.TrimSpace(input.AnswerPosture)
+	if input.AnswerPosture == "" {
+		// The co-creation posture is the product default: conversations are
+		// the knowledge entry point, not just a retrieval exit.
+		input.AnswerPosture = "co_create"
+	}
 	input.IdempotencyKey = strings.TrimSpace(input.IdempotencyKey)
 	if principal.UserType != "member" || !validInput(input) || !validExpiry(input.ExpiresAt) || !validIdempotencyKey(input.IdempotencyKey) {
 		return RegisterAgentResult{}, ErrInvalidInput
@@ -129,10 +136,10 @@ func (s Service) RegisterAgent(ctx context.Context, principal auth.Principal, in
 	}
 	if err := tx.QueryRow(ctx, `
 		INSERT INTO integration.agent_applications
-				(organization_id, bound_agent_user_id, model_endpoint_id, runtime_mode, workflow_key, name, capabilities)
-			VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7::jsonb)
+				(organization_id, bound_agent_user_id, model_endpoint_id, runtime_mode, workflow_key, name, capabilities, answer_posture)
+			VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7::jsonb, $8)
 			RETURNING id::text
-		`, principal.OrganizationID, agentUserID, input.ModelEndpointID, input.RuntimeMode, nullableText(input.WorkflowKey), input.ApplicationName, string(capabilitiesJSON)).Scan(&applicationID); err != nil {
+		`, principal.OrganizationID, agentUserID, input.ModelEndpointID, input.RuntimeMode, nullableText(input.WorkflowKey), input.ApplicationName, string(capabilitiesJSON), input.AnswerPosture).Scan(&applicationID); err != nil {
 		return RegisterAgentResult{}, fmt.Errorf("create agent application: %w", err)
 	}
 	metadataBytes, _ := json.Marshal(map[string]any{
@@ -190,7 +197,12 @@ func validInput(input RegisterAgentInput) bool {
 		validText(input.ApiKeyName, 1, 100) &&
 		validText(input.ApplicationName, 1, 200) &&
 		validUUID(input.ModelEndpointID) &&
-		validRuntimeMode(input.RuntimeMode, input.WorkflowKey)
+		validRuntimeMode(input.RuntimeMode, input.WorkflowKey) &&
+		validAnswerPosture(input.AnswerPosture)
+}
+
+func validAnswerPosture(value string) bool {
+	return value == "co_create" || value == "grounded_qa"
 }
 
 type modelEndpointQuerier interface {

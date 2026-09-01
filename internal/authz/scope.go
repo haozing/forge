@@ -45,10 +45,13 @@ func (r ScopeResolver) AllowedModelIDs(ctx context.Context, principal auth.Princ
 	}
 	if principal.UserType == auth.UserTypeAgent {
 		action = strings.TrimPrefix(strings.TrimSpace(action), "asset.")
+		// Workspace-scoped grants (the ones workspace agent-app registration
+		// writes) and org-wide grants both count; the retrieval funnel then
+		// intersects them with the channel policy in ForAgent.
 		rows, err := r.Store.Pool.Query(ctx, `
 			SELECT DISTINCT resource_model_id::text FROM content.agent_access_policies
 			WHERE organization_id = $1::uuid AND agent_user_id = $2::uuid
-			  AND workspace_id IS NULL AND $3 = ANY(actions)
+			  AND $3 = ANY(actions)
 		`, principal.OrganizationID, principal.UserID, action)
 		if err != nil {
 			return nil, fmt.Errorf("resolve agent access policy: %w", err)

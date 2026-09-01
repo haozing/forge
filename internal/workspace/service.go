@@ -330,6 +330,22 @@ func (s Service) UpdateSettings(ctx context.Context, principal auth.Principal, w
 	if input.Name == "" {
 		return Settings{}, ErrInvalidInput
 	}
+	input.DefaultResourceModelID = strings.TrimSpace(input.DefaultResourceModelID)
+	if input.DefaultResourceModelID != "" {
+		var ok bool
+		if err := s.Store.Pool.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM model.resource_models
+				WHERE organization_id = $1::uuid AND id = $2::uuid
+				  AND status = 'active' AND current_version_id IS NOT NULL
+			)
+		`, principal.OrganizationID, input.DefaultResourceModelID).Scan(&ok); err != nil {
+			return Settings{}, fmt.Errorf("check default resource model: %w", err)
+		}
+		if !ok {
+			return Settings{}, ErrInvalidInput
+		}
+	}
 	tx, err := s.Store.Pool.Begin(ctx)
 	if err != nil {
 		return Settings{}, fmt.Errorf("begin workspace settings update: %w", err)
