@@ -2619,8 +2619,630 @@ paths:
                   - type: object
                   - $ref: '#/components/schemas/Envelope'
         '404': { $ref: '#/components/responses/Error' }
+  /api/workspaces/{workspaceId}/conversations:
+    get:
+      tags: [conversations]
+      operationId: listConversations
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - name: q
+          in: query
+          schema: { type: string }
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: 会话列表（含派生关系字段）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ConversationList'
+                  - $ref: '#/components/schemas/Envelope'
+        '403': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+    post:
+      tags: [conversations]
+      operationId: createConversation
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ConversationCreate' }
+      responses:
+        '201':
+          description: 已创建
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ConversationResult'
+                  - $ref: '#/components/schemas/Envelope'
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+  /api/conversations/{conversationId}:
+    get:
+      tags: [conversations]
+      operationId: getConversation
+      description: 会话详情；parent_conversation_id/origin_derivation_id 标识派生来源，根思考为空字符串
+      parameters:
+        - $ref: '#/components/parameters/ConversationId'
+      responses:
+        '200':
+          description: 会话详情
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Conversation'
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+    patch:
+      tags: [conversations]
+      operationId: patchConversation
+      parameters:
+        - $ref: '#/components/parameters/ConversationId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ConversationPatch' }
+      responses:
+        '200':
+          description: 已更新
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Conversation'
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+  /api/conversations/{conversationId}/children:
+    get:
+      tags: [conversations]
+      operationId: listConversationChildren
+      description: 列出以该思考为父的全部派生思考，按创建时间升序，不含 archived
+      parameters:
+        - $ref: '#/components/parameters/ConversationId'
+      responses:
+        '200':
+          description: 子思考列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ConversationList'
+                  - $ref: '#/components/schemas/Envelope'
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+  /api/conversations/{conversationId}/archive:
+    post:
+      tags: [conversations]
+      operationId: archiveConversation
+      parameters:
+        - $ref: '#/components/parameters/ConversationId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: 已归档
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
+  /api/conversations/{conversationId}/messages:
+    get:
+      tags: [conversations]
+      operationId: listConversationMessages
+      parameters:
+        - $ref: '#/components/parameters/ConversationId'
+      responses:
+        '200':
+          description: 消息块列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/Message' }
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
+    post:
+      tags: [conversations]
+      operationId: appendConversationMessage
+      description: 消息不可编辑，只能追加修订块
+      parameters:
+        - $ref: '#/components/parameters/ConversationId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MessageAppend' }
+      responses:
+        '201':
+          description: 已追加
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/MessageAppendResult'
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+  /api/conversations/{conversationId}/blocks:
+    get:
+      tags: [conversations]
+      operationId: listConversationBlocks
+      parameters:
+        - $ref: '#/components/parameters/ConversationId'
+      responses:
+        '200':
+          description: 消息块列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/Message' }
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
+  /api/conversations/{conversationId}/chat:
+    post:
+      tags: [conversations]
+      operationId: conversationChat
+      parameters:
+        - $ref: '#/components/parameters/ConversationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ChatRequest' }
+      responses:
+        '200':
+          description: 问答结果
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ChatResult'
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+  /api/conversations/{conversationId}/chat/stream:
+    post:
+      tags: [conversations]
+      operationId: conversationChatStream
+      description: SSE 流式问答，事件结构见契约 §11.2
+      parameters:
+        - $ref: '#/components/parameters/ConversationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ChatRequest' }
+      responses:
+        '200':
+          description: text/event-stream
+          content:
+            text/event-stream:
+              schema: { type: string }
+        '404': { $ref: '#/components/responses/Error' }
+  /api/conversations/{conversationId}/note/sync:
+    post:
+      tags: [conversations]
+      operationId: syncConversationNote
+      parameters:
+        - $ref: '#/components/parameters/ConversationId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: 笔记同步结果
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/NoteSyncResult'
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
+  /api/conversations/{conversationId}/note:
+    get:
+      tags: [conversations]
+      operationId: getConversationNote
+      parameters:
+        - $ref: '#/components/parameters/ConversationId'
+      responses:
+        '200':
+          description: 会话笔记
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
+  /api/conversations/{conversationId}/note/publish:
+    post:
+      tags: [conversations]
+      operationId: publishConversationNote
+      parameters:
+        - $ref: '#/components/parameters/ConversationId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/IfMatch'
+      responses:
+        '200':
+          description: 笔记发布结果
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/NotePublishResult'
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
+        '412': { $ref: '#/components/responses/Error' }
+  /api/conversations/{conversationId}/derivations:
+    post:
+      tags: [conversations]
+      operationId: createDerivation
+      parameters:
+        - $ref: '#/components/parameters/ConversationId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DerivationCreate' }
+      responses:
+        '201':
+          description: 派生已创建，target_conversation_id 即派生思考
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Derivation'
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+  /api/derivations/{derivationId}:
+    get:
+      tags: [conversations]
+      operationId: getDerivation
+      parameters:
+        - $ref: '#/components/parameters/DerivationId'
+      responses:
+        '200':
+          description: 派生详情
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Derivation'
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+  /api/derivations/{derivationId}/finalize:
+    post:
+      tags: [conversations]
+      operationId: finalizeDerivation
+      parameters:
+        - $ref: '#/components/parameters/DerivationId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DerivationFinalize' }
+      responses:
+        '200':
+          description: 派生落库结果
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/DerivationFinalizeResult'
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+  /api/conversations/{conversationId}/media:
+    post:
+      tags: [conversations]
+      operationId: registerConversationMedia
+      parameters:
+        - $ref: '#/components/parameters/ConversationId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MediaRegister' }
+      responses:
+        '201':
+          description: 媒体已登记
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/MediaResult'
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+  /api/conversation-media/{mediaId}:
+    get:
+      tags: [conversations]
+      operationId: getConversationMedia
+      parameters:
+        - $ref: '#/components/parameters/MediaId'
+      responses:
+        '200':
+          description: 媒体状态
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/MediaResult'
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
+  /api/conversation-media/{mediaId}/transcribe:
+    post:
+      tags: [conversations]
+      operationId: transcribeConversationMedia
+      parameters:
+        - $ref: '#/components/parameters/MediaId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '202':
+          description: 转写任务已受理
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/MediaResult'
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
+  /api/conversation-media/{mediaId}/transcript:
+    get:
+      tags: [conversations]
+      operationId: getConversationTranscript
+      parameters:
+        - $ref: '#/components/parameters/MediaId'
+      responses:
+        '200':
+          description: 转写文本
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
 components:
   schemas:
+    ConversationList:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/ConversationSummary' }
+        has_more: { type: boolean }
+        next_cursor: { type: string }
+    ConversationSummary:
+      type: object
+      properties:
+        conversation_id: { type: string, format: uuid }
+        workspace_id: { type: string, format: uuid }
+        title: { type: string }
+        source: { type: string, enum: [chat_interface, document, asset, automation] }
+        visibility: { type: string, enum: [private, workspace] }
+        status: { type: string, enum: [active, completed, archived, failed] }
+        container_id: { type: string, format: uuid }
+        note_asset_id: { type: string }
+        parent_conversation_id: { type: string, description: 来源思考 ID，根思考为空字符串 }
+        origin_derivation_id: { type: string, description: 产生本思考的派生记录 ID，根思考为空字符串 }
+        last_message_preview: { type: string }
+        message_count: { type: integer }
+        updated_at: { type: string, format: date-time }
+    ConversationCreate:
+      type: object
+      required: [agent_application_id, title, source, visibility]
+      properties:
+        agent_application_id: { type: string, format: uuid }
+        title: { type: string }
+        source: { type: string, enum: [chat_interface, document, asset, automation] }
+        visibility: { type: string, enum: [private, workspace] }
+        container_id: { type: string, format: uuid }
+    ConversationResult:
+      type: object
+      properties:
+        conversation_id: { type: string, format: uuid }
+        workspace_id: { type: string, format: uuid }
+        container_id: { type: string, format: uuid }
+        note_container_id: { type: string, format: uuid }
+        note_asset_id: { type: string, format: uuid }
+        agent_application_id: { type: string, format: uuid }
+        bound_agent_user_id: { type: string, format: uuid }
+        status: { type: string }
+    Conversation:
+      allOf:
+        - $ref: '#/components/schemas/ConversationResult'
+        - type: object
+          properties:
+            title: { type: string }
+            source: { type: string, enum: [chat_interface, document, asset, automation] }
+            visibility: { type: string, enum: [private, workspace] }
+            parent_conversation_id: { type: string, description: 来源思考 ID，根思考为空字符串 }
+            origin_derivation_id: { type: string, description: 产生本思考的派生记录 ID，根思考为空字符串 }
+            created_at: { type: string }
+            updated_at: { type: string }
+    ConversationPatch:
+      type: object
+      properties:
+        title: { type: string }
+        visibility: { type: string, enum: [private, workspace] }
+    Message:
+      type: object
+      properties:
+        block_revision_id: { type: string, format: uuid }
+        block_id: { type: string, format: uuid }
+        conversation_id: { type: string, format: uuid }
+        role: { type: string, enum: [user, assistant, system, tool, transcription] }
+        content: { type: string }
+        content_format: { type: string }
+        status: { type: string, enum: [pending, completed, failed, cancelled] }
+        provider_conversation_id: { type: string }
+        provider_message_id: { type: string }
+        sequence_no: { type: integer }
+        created_at: { type: string }
+        references:
+          type: array
+          items: { type: object }
+    MessageAppend:
+      type: object
+      required: [role, content, content_format, status]
+      properties:
+        role: { type: string, enum: [user, assistant, system, tool, transcription] }
+        content: { type: string }
+        content_format: { type: string }
+        provider_conversation_id: { type: string, nullable: true }
+        provider_message_id: { type: string, nullable: true }
+        status: { type: string, enum: [pending, completed, failed, cancelled] }
+        reply_to_block_id: { type: string, format: uuid, nullable: true }
+    MessageAppendResult:
+      type: object
+      properties:
+        block_revision_id: { type: string, format: uuid }
+        block_id: { type: string, format: uuid }
+        conversation_id: { type: string, format: uuid }
+        sequence_no: { type: integer }
+        role: { type: string }
+        status: { type: string }
+    ChatRequest:
+      type: object
+      required: [query]
+      properties:
+        query: { type: string }
+        reference_ids:
+          type: array
+          items: { type: string, format: uuid }
+        model_context: { type: object }
+        response_mode: { type: string, enum: [answer, answer_with_sources, draft_note] }
+    ChatResult:
+      type: object
+      properties:
+        answer: { type: string }
+        conversation_id: { type: string, format: uuid }
+        message_id: { type: string, format: uuid }
+        references:
+          type: array
+          items:
+            type: object
+            properties:
+              asset_id: { type: string, format: uuid }
+              asset_version_id: { type: string, format: uuid }
+              title: { type: string }
+              snippet: { type: string }
+        rejected_reference_count: { type: integer }
+        usage:
+          type: object
+          properties:
+            input_tokens: { type: integer }
+            output_tokens: { type: integer }
+    NoteSyncResult:
+      type: object
+      properties:
+        conversation_id: { type: string, format: uuid }
+        note_asset_id: { type: string, format: uuid }
+        asset_version_id: { type: string, format: uuid }
+        message_count: { type: integer }
+        status: { type: string }
+    NotePublishResult:
+      type: object
+      properties:
+        conversation_id: { type: string, format: uuid }
+        note_asset_id: { type: string, format: uuid }
+        asset_version_id: { type: string, format: uuid }
+        publication_status: { type: string }
+    Derivation:
+      type: object
+      properties:
+        derivation_id: { type: string, format: uuid }
+        source_conversation_id: { type: string, format: uuid }
+        target_conversation_id: { type: string, format: uuid }
+        target_note_asset_id: { type: string, format: uuid }
+        operation: { type: string, enum: [create_chat, link, merge] }
+        context_policy: { type: string, enum: [summary_only, selected_only, full] }
+        status: { type: string, enum: [requested, discussing, result_ready, finalizing, completed, failed, cancelled] }
+        created_at: { type: string, format: date-time }
+        completed_at: { type: string, format: date-time, description: 未完成时为空字符串 }
+    DerivationCreate:
+      type: object
+      required: [source_block_revision_ids, context_policy, title]
+      properties:
+        source_block_revision_ids:
+          type: array
+          items: { type: string, format: uuid }
+          minItems: 1
+          maxItems: 50
+        context_policy: { type: string, enum: [summary_only, selected_only, full] }
+        title: { type: string }
+    DerivationFinalize:
+      type: object
+      required: [disposition]
+      properties:
+        disposition: { type: string, enum: [independent, reference, merge] }
+        target_asset_id: { type: string, format: uuid, nullable: true }
+        target_block_id: { type: string, format: uuid, nullable: true }
+        expected_source_asset_version_id: { type: string, format: uuid, nullable: true }
+        expected_target_asset_version_id: { type: string, format: uuid, nullable: true }
+        expected_container_version_id: { type: string, format: uuid, nullable: true }
+        merge_mode: { type: string }
+    DerivationFinalizeResult:
+      type: object
+      properties:
+        derivation_id: { type: string, format: uuid }
+        disposition: { type: string }
+        asset_id: { type: string, format: uuid }
+        asset_version_id: { type: string, format: uuid }
+        relation_id: { type: string, format: uuid }
+        status: { type: string }
+    MediaRegister:
+      type: object
+      required: [attachment_id, media_kind]
+      properties:
+        attachment_id: { type: string, format: uuid }
+        media_kind: { type: string, enum: [audio, video] }
+        language: { type: string }
+        duration_ms: { type: integer, nullable: true }
+    MediaResult:
+      type: object
+      properties:
+        media_id: { type: string, format: uuid }
+        conversation_id: { type: string, format: uuid }
+        attachment_id: { type: string, format: uuid }
+        media_kind: { type: string }
+        status: { type: string }
+        language: { type: string }
+        duration_ms: { type: integer }
+        transcription_job_id: { type: string }
     PublicSite:
       type: object
       properties:
@@ -2785,6 +3407,9 @@ components:
   parameters:
     WorkspaceId:
       name: workspaceId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
     PublicSiteSlug:
       name: slug
       in: path
@@ -2795,11 +3420,23 @@ components:
       in: path
       required: true
       schema: { type: string, format: uuid }
+    AssetId:
+      name: assetId
       in: path
       required: true
       schema: { type: string, format: uuid }
-    AssetId:
-      name: assetId
+    ConversationId:
+      name: conversationId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    DerivationId:
+      name: derivationId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    MediaId:
+      name: mediaId
       in: path
       required: true
       schema: { type: string, format: uuid }

@@ -514,17 +514,24 @@ Agent 应用：`{id,name,provider,status,capabilities,description,config_summary
 
 ### 11.1 会话
 
+> 注：路由已收敛为无版本单树，本节及 §12 的 `/api/frontend/...` 一律按 `/api/...` 访问，旧前缀已 404。
+
 | 方法 | 路径 |
 | --- | --- |
-| GET/POST | `/api/frontend/workspaces/{workspaceId}/conversations` |
-| GET/PATCH | `/api/frontend/conversations/{conversationId}` |
-| POST | `/api/frontend/conversations/{conversationId}/archive` |
-| GET/POST | `/api/frontend/conversations/{conversationId}/messages` |
-| GET | `/api/frontend/conversations/{conversationId}/blocks` |
+| GET/POST | `/api/workspaces/{workspaceId}/conversations` |
+| GET/PATCH | `/api/conversations/{conversationId}` |
+| GET | `/api/conversations/{conversationId}/children` |
+| POST | `/api/conversations/{conversationId}/archive` |
+| GET/POST | `/api/conversations/{conversationId}/messages` |
+| GET | `/api/conversations/{conversationId}/blocks` |
 
 创建：`{agent_application_id,title,source,visibility,container_id?}`。`source`：`chat_interface|document|asset|automation`；`visibility`：`private|workspace`。
 
-会话摘要：`{conversation_id,workspace_id,title,source,visibility,status,container_id,note_asset_id,last_message_preview,message_count,updated_at}`。状态：`active|archived|completed`。
+会话摘要：`{conversation_id,workspace_id,title,source,visibility,status,container_id,note_asset_id,parent_conversation_id,origin_derivation_id,last_message_preview,message_count,updated_at}`。状态：`active|archived|completed`。
+
+派生关系：`parent_conversation_id` 为来源思考 ID，`origin_derivation_id` 为产生本思考的派生记录 ID；根思考两者均为空字符串。会话列表、会话详情和 children 列表统一返回这两个字段，前端据此组装主干/派生树。
+
+`GET /api/conversations/{conversationId}/children` 返回 `{items:[会话摘要...]}`：列出以该思考为父的全部派生思考（按创建时间升序，不含 archived），每项同会话摘要结构。父思考不存在时 404 `conversation_not_found`，无工作区访问权 403 `workspace_access_denied`。
 
 消息写入：
 
@@ -579,9 +586,11 @@ sync 无 body，生成/更新 note asset，返回 `{conversation_id,note_asset_i
 
 ### 12.2 派生内容
 
-- `POST /api/frontend/conversations/{conversationId}/derivations`
-- `GET /api/frontend/derivations/{derivationId}`
-- `POST /api/frontend/derivations/{derivationId}/finalize`
+- `POST /api/conversations/{conversationId}/derivations`
+- `GET /api/derivations/{derivationId}`
+- `POST /api/derivations/{derivationId}/finalize`
+
+派生思考创建后，来源思考的全部派生可通过 `GET /api/conversations/{sourceConversationId}/children` 查询（见 §11.1）。
 
 创建：
 

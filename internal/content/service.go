@@ -52,11 +52,13 @@ type ConversationResult struct {
 
 type Conversation struct {
 	ConversationResult
-	Title      string `json:"title"`
-	Source     string `json:"source"`
-	Visibility string `json:"visibility"`
-	CreatedAt  string `json:"created_at"`
-	UpdatedAt  string `json:"updated_at"`
+	Title                string `json:"title"`
+	Source               string `json:"source"`
+	Visibility           string `json:"visibility"`
+	ParentConversationID string `json:"parent_conversation_id"`
+	OriginDerivationID   string `json:"origin_derivation_id"`
+	CreatedAt            string `json:"created_at"`
+	UpdatedAt            string `json:"updated_at"`
 }
 
 type RegisterMediaInput struct {
@@ -165,6 +167,8 @@ type DerivationResult struct {
 	Operation            string `json:"operation"`
 	ContextPolicy        string `json:"context_policy"`
 	Status               string `json:"status"`
+	CreatedAt            string `json:"created_at"`
+	CompletedAt          string `json:"completed_at"`
 }
 
 func (s Service) CreateDerivation(ctx context.Context, principal auth.Principal, idempotencyKey string, input CreateDerivationInput) (DerivationResult, error) {
@@ -284,13 +288,13 @@ func (s Service) CreateDerivation(ctx context.Context, principal auth.Principal,
 		"source_block_revision_ids":   input.SourceBlockRevisionIDs,
 		"blocks":                      contextItems,
 	})
-	var derivationID string
+	var derivationID, derivationCreatedAt string
 	if err := tx.QueryRow(ctx, `
 		INSERT INTO content.derivations
 			(organization_id, workspace_id, source_conversation_id, operation, context_policy, context_snapshot, created_by, status)
 		VALUES ($1::uuid, $2::uuid, $3::uuid, 'create_chat', $4, $5::jsonb, $6::uuid, 'requested')
-		RETURNING id::text
-	`, principal.OrganizationID, workspaceID, input.SourceConversationID, input.ContextPolicy, string(contextSnapshot), principal.UserID).Scan(&derivationID); err != nil {
+		RETURNING id::text, created_at::text
+	`, principal.OrganizationID, workspaceID, input.SourceConversationID, input.ContextPolicy, string(contextSnapshot), principal.UserID).Scan(&derivationID, &derivationCreatedAt); err != nil {
 		return DerivationResult{}, fmt.Errorf("create derivation: %w", err)
 	}
 	var chatContainer, noteContainer string
@@ -350,7 +354,7 @@ func (s Service) CreateDerivation(ctx context.Context, principal auth.Principal,
 	if _, err := tx.Exec(ctx, `UPDATE content.derivations SET target_conversation_id = $2::uuid, status = 'discussing', updated_at = now() WHERE id = $1::uuid`, derivationID, targetConversation); err != nil {
 		return DerivationResult{}, fmt.Errorf("advance derivation status: %w", err)
 	}
-	result := DerivationResult{DerivationID: derivationID, SourceConversationID: input.SourceConversationID, TargetConversationID: targetConversation, TargetNoteAssetID: noteAsset, Operation: "create_chat", ContextPolicy: input.ContextPolicy, Status: "discussing"}
+	result := DerivationResult{DerivationID: derivationID, SourceConversationID: input.SourceConversationID, TargetConversationID: targetConversation, TargetNoteAssetID: noteAsset, Operation: "create_chat", ContextPolicy: input.ContextPolicy, Status: "discussing", CreatedAt: derivationCreatedAt}
 	body, _ := json.Marshal(result)
 	if err := saveIdempotency(ctx, tx, principal, "conversation.derivation.create", idempotencyKey, body); err != nil {
 		return DerivationResult{}, err
@@ -371,14 +375,16 @@ func (s Service) GetDerivation(ctx context.Context, principal auth.Principal, de
 	var result DerivationResult
 	err := s.Store.Pool.QueryRow(ctx, `
 		SELECT d.id::text, d.source_conversation_id::text, d.target_conversation_id::text,
-		       COALESCE(nb.note_asset_id::text, ''), d.operation, d.context_policy, d.status
+		       COALESCE(nb.note_asset_id::text, ''), d.operation, d.context_policy, d.status,
+		       d.created_at::text, COALESCE(d.completed_at::text, '')
 		FROM content.derivations d
 		JOIN content.workspace_members wm ON wm.workspace_id = d.workspace_id AND wm.user_id = $3::uuid
 		LEFT JOIN content.note_bindings nb ON nb.conversation_id = d.target_conversation_id
 		WHERE d.organization_id = $1::uuid AND d.id = $2::uuid
 	`, principal.OrganizationID, derivationID, principal.UserID).Scan(
 		&result.DerivationID, &result.SourceConversationID, &result.TargetConversationID,
-		&result.TargetNoteAssetID, &result.Operation, &result.ContextPolicy, &result.Status)
+		&result.TargetNoteAssetID, &result.Operation, &result.ContextPolicy, &result.Status,
+		&result.CreatedAt, &result.CompletedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return DerivationResult{}, ErrNotFound
 	}
@@ -609,7 +615,7 @@ func (s Service) FinalizeDerivation(ctx context.Context, principal auth.Principa
 			}
 		}
 	}
-	if _, err := tx.Exec(ctx, `UPDATE content.derivations SET status = 'completed', updated_at = now() WHERE organization_id = $1::uuid AND id = $2::uuid`, principal.OrganizationID, derivationID); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE content.derivations SET status = 'completed', completed_at = now(), updated_at = now() WHERE organization_id = $1::uuid AND id = $2::uuid`, principal.OrganizationID, derivationID); err != nil {
 		return FinalizeResult{}, fmt.Errorf("complete derivation: %w", err)
 	}
 	body, _ := json.Marshal(result)
@@ -1309,7 +1315,9 @@ func (s Service) GetConversation(ctx context.Context, principal auth.Principal, 
 	err := s.Store.Pool.QueryRow(ctx, `
 		SELECT c.id::text, c.workspace_id::text, c.container_id::text, nb.note_container_id::text,
 		       nb.note_asset_id::text, c.agent_application_id::text, c.bound_agent_user_id::text,
-		       c.status, c.title, c.source, c.visibility, c.created_at::text, c.updated_at::text
+		       c.status, c.title, c.source, c.visibility,
+		       COALESCE(c.parent_conversation_id::text, ''), COALESCE(c.origin_derivation_id::text, ''),
+		       c.created_at::text, c.updated_at::text
 		FROM content.conversations c
 		JOIN content.note_bindings nb ON nb.conversation_id = c.id
 		JOIN content.workspace_members wm ON wm.workspace_id = c.workspace_id AND wm.user_id = $3::uuid
@@ -1318,7 +1326,8 @@ func (s Service) GetConversation(ctx context.Context, principal auth.Principal, 
 	`, principal.OrganizationID, conversationID, principal.UserID).Scan(
 		&result.ConversationID, &result.WorkspaceID, &result.ContainerID, &result.NoteContainerID,
 		&result.NoteAssetID, &result.AgentApplicationID, &result.BoundAgentUserID, &result.Status,
-		&result.Title, &result.Source, &result.Visibility, &result.CreatedAt, &result.UpdatedAt)
+		&result.Title, &result.Source, &result.Visibility, &result.ParentConversationID,
+		&result.OriginDerivationID, &result.CreatedAt, &result.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Conversation{}, ErrNotFound
 	}

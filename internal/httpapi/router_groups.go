@@ -300,6 +300,7 @@ func registerConversationRoutes(deps Dependencies, mux *http.ServeMux) {
 	mux.HandleFunc("/api/conversations/{conversationId}/note", conversationNote(deps))
 	mux.HandleFunc("/api/conversations/{conversationId}/note/publish", publishConversationNote(deps))
 	mux.HandleFunc("/api/conversations/{conversationId}/derivations", createDerivation(deps))
+	mux.HandleFunc("/api/conversations/{conversationId}/children", conversationChildren(deps))
 	mux.HandleFunc("/api/conversations/{conversationId}/media", registerConversationMedia(deps))
 	mux.HandleFunc("/api/derivations/{derivationId}", getDerivation(deps))
 	mux.HandleFunc("/api/derivations/{derivationId}/finalize", finalizeDerivation(deps))

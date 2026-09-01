@@ -21,6 +21,7 @@ var (
 	ErrForbidden     = errors.New("conversation access denied")
 	ErrNotFound      = errors.New("conversation not found")
 	ErrInvalidCursor = errors.New("invalid conversation cursor")
+	ErrInvalidID     = errors.New("invalid conversation id")
 )
 
 type Service struct {
@@ -78,17 +79,19 @@ func (s Service) RequestTranscription(ctx context.Context, principal auth.Princi
 }
 
 type Summary struct {
-	ConversationID     string    `json:"conversation_id"`
-	WorkspaceID        string    `json:"workspace_id"`
-	Title              string    `json:"title"`
-	Source             string    `json:"source"`
-	Visibility         string    `json:"visibility"`
-	Status             string    `json:"status"`
-	ContainerID        string    `json:"container_id"`
-	NoteAssetID        string    `json:"note_asset_id"`
-	LastMessagePreview string    `json:"last_message_preview"`
-	MessageCount       int64     `json:"message_count"`
-	UpdatedAt          time.Time `json:"updated_at"`
+	ConversationID       string    `json:"conversation_id"`
+	WorkspaceID          string    `json:"workspace_id"`
+	Title                string    `json:"title"`
+	Source               string    `json:"source"`
+	Visibility           string    `json:"visibility"`
+	Status               string    `json:"status"`
+	ContainerID          string    `json:"container_id"`
+	NoteAssetID          string    `json:"note_asset_id"`
+	ParentConversationID string    `json:"parent_conversation_id"`
+	OriginDerivationID   string    `json:"origin_derivation_id"`
+	LastMessagePreview   string    `json:"last_message_preview"`
+	MessageCount         int64     `json:"message_count"`
+	UpdatedAt            time.Time `json:"updated_at"`
 }
 
 func (s Service) require(ctx context.Context, principal auth.Principal, workspaceID string) error {
@@ -122,6 +125,7 @@ func (s Service) ListPage(ctx context.Context, principal auth.Principal, workspa
 	rows, err := s.Store.Pool.Query(ctx, `
 		SELECT c.id::text, c.workspace_id::text, c.title, c.source, c.visibility, c.status,
 		       c.container_id::text, COALESCE(nb.note_asset_id::text, ''),
+		       COALESCE(c.parent_conversation_id::text, ''), COALESCE(c.origin_derivation_id::text, ''),
 		       COALESCE(last_message.content, ''), COALESCE(message_counts.message_count, 0), c.updated_at
 		FROM content.conversations c
 		LEFT JOIN content.note_bindings nb ON nb.conversation_id = c.id
@@ -140,7 +144,7 @@ func (s Service) ListPage(ctx context.Context, principal auth.Principal, workspa
 	items := make([]Summary, 0, limit+1)
 	for rows.Next() {
 		var item Summary
-		if err := rows.Scan(&item.ConversationID, &item.WorkspaceID, &item.Title, &item.Source, &item.Visibility, &item.Status, &item.ContainerID, &item.NoteAssetID, &item.LastMessagePreview, &item.MessageCount, &item.UpdatedAt); err != nil {
+		if err := rows.Scan(&item.ConversationID, &item.WorkspaceID, &item.Title, &item.Source, &item.Visibility, &item.Status, &item.ContainerID, &item.NoteAssetID, &item.ParentConversationID, &item.OriginDerivationID, &item.LastMessagePreview, &item.MessageCount, &item.UpdatedAt); err != nil {
 			return nil, false, "", fmt.Errorf("scan conversation summary: %w", err)
 		}
 		items = append(items, item)
@@ -157,6 +161,67 @@ func (s Service) ListPage(ctx context.Context, principal auth.Principal, workspa
 		nextCursor = encodeConversationCursor(items[len(items)-1].UpdatedAt, items[len(items)-1].ConversationID)
 	}
 	return items, hasMore, nextCursor, nil
+}
+
+// ListChildren returns the conversations derived from the given one. The
+// parent itself is only used to resolve the workspace and 404 semantics; each
+// child is filtered by the same visibility rule as the workspace list.
+func (s Service) ListChildren(ctx context.Context, principal auth.Principal, conversationID string) ([]Summary, error) {
+	if !validID(conversationID) {
+		return nil, ErrInvalidID
+	}
+	workspaceID, err := s.GetWorkspace(ctx, principal, conversationID)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.require(ctx, principal, workspaceID); err != nil {
+		return nil, err
+	}
+	rows, err := s.Store.Pool.Query(ctx, `
+		SELECT c.id::text, c.workspace_id::text, c.title, c.source, c.visibility, c.status,
+		       c.container_id::text, COALESCE(nb.note_asset_id::text, ''),
+		       COALESCE(c.parent_conversation_id::text, ''), COALESCE(c.origin_derivation_id::text, ''),
+		       COALESCE(last_message.content, ''), COALESCE(message_counts.message_count, 0), c.updated_at
+		FROM content.conversations c
+		LEFT JOIN content.note_bindings nb ON nb.conversation_id = c.id
+		LEFT JOIN LATERAL (SELECT br.content FROM content.message_blocks mb JOIN content.block_revisions br ON br.id = mb.block_revision_id WHERE mb.conversation_id = c.id ORDER BY mb.sequence_no DESC LIMIT 1) last_message ON true
+		LEFT JOIN LATERAL (SELECT count(*) AS message_count FROM content.message_blocks mb WHERE mb.conversation_id = c.id) message_counts ON true
+		WHERE c.organization_id = $1::uuid AND c.parent_conversation_id = $2::uuid AND c.status <> 'archived'
+		  AND (c.visibility = 'workspace' OR c.initiator_user_id = $3::uuid)
+		ORDER BY c.created_at, c.id
+	`, principal.OrganizationID, conversationID, principal.UserID)
+	if err != nil {
+		return nil, fmt.Errorf("list conversation children: %w", err)
+	}
+	defer rows.Close()
+	items := []Summary{}
+	for rows.Next() {
+		var item Summary
+		if err := rows.Scan(&item.ConversationID, &item.WorkspaceID, &item.Title, &item.Source, &item.Visibility, &item.Status, &item.ContainerID, &item.NoteAssetID, &item.ParentConversationID, &item.OriginDerivationID, &item.LastMessagePreview, &item.MessageCount, &item.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scan conversation child summary: %w", err)
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+func validID(value string) bool {
+	value = strings.TrimSpace(value)
+	if len(value) != 36 {
+		return false
+	}
+	for i, r := range value {
+		if (i == 8 || i == 13 || i == 18 || i == 23) && r == '-' {
+			continue
+		}
+		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')) {
+			return false
+		}
+	}
+	return true
 }
 
 func encodeConversationCursor(updatedAt time.Time, id string) string {

@@ -59,3 +59,34 @@ func conversationsCollection(deps Dependencies) http.HandlerFunc {
 		create(w, r)
 	}
 }
+
+func conversationChildren(deps Dependencies) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
+			return
+		}
+		principal, ok := requireMemberSession(w, r, deps)
+		if !ok {
+			return
+		}
+		items, err := deps.ConversationService.ListChildren(r.Context(), principal, r.PathValue("conversationId"))
+		if errors.Is(err, conversation.ErrInvalidID) {
+			writeError(w, http.StatusUnprocessableEntity, "invalid_conversation_id")
+			return
+		}
+		if errors.Is(err, conversation.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "conversation_not_found")
+			return
+		}
+		if errors.Is(err, conversation.ErrForbidden) {
+			writeError(w, http.StatusForbidden, "workspace_access_denied")
+			return
+		}
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "conversation_children_failed")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"items": items})
+	}
+}
