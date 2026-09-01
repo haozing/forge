@@ -159,12 +159,12 @@ func conversationNote(deps Dependencies) http.HandlerFunc {
 		var noteAssetID, noteContainerID, versionID string
 		var title, markdown *string
 		var fields []byte
-		var publicationStatus, quality string
+		var publicationStatus, confirmationStatus string
 		var messageCount int64
 		err := deps.Store.Pool.QueryRow(r.Context(), `
 			SELECT nb.note_asset_id::text, nb.note_container_id::text,
 			       COALESCE(a.current_working_version_id::text, ''), v.title, v.markdown, v.fields,
-			       a.publication_status, COALESCE(v.quality, ''), count(mb.block_revision_id)
+			       a.publication_status, COALESCE(v.confirmation_status, ''), count(mb.block_revision_id)
 			FROM content.note_bindings nb
                         JOIN content.conversations c ON c.id = nb.conversation_id
                         JOIN content.workspace_members wm ON wm.workspace_id = c.workspace_id AND wm.user_id = $3::uuid
@@ -173,8 +173,8 @@ func conversationNote(deps Dependencies) http.HandlerFunc {
 			LEFT JOIN content.message_blocks mb ON mb.organization_id = c.organization_id AND mb.conversation_id = c.id
                         WHERE nb.organization_id = $1::uuid AND nb.conversation_id = $2::uuid
                           AND (c.visibility = 'workspace' OR c.initiator_user_id = $3::uuid)
-			GROUP BY nb.note_asset_id, nb.note_container_id, a.current_working_version_id, v.title, v.markdown, v.fields, a.publication_status, v.quality`,
-			principal.OrganizationID, r.PathValue("conversationId"), principal.UserID).Scan(&noteAssetID, &noteContainerID, &versionID, &title, &markdown, &fields, &publicationStatus, &quality, &messageCount)
+			GROUP BY nb.note_asset_id, nb.note_container_id, a.current_working_version_id, v.title, v.markdown, v.fields, a.publication_status, v.confirmation_status`,
+			principal.OrganizationID, r.PathValue("conversationId"), principal.UserID).Scan(&noteAssetID, &noteContainerID, &versionID, &title, &markdown, &fields, &publicationStatus, &confirmationStatus, &messageCount)
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeError(w, http.StatusNotFound, "conversation_or_note_not_found")
 			return
@@ -190,7 +190,7 @@ func conversationNote(deps Dependencies) http.HandlerFunc {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"conversation_id": r.PathValue("conversationId"), "note_asset_id": noteAssetID, "note_container_id": noteContainerID,
 			"asset_version_id": versionID, "title": title, "markdown": markdown, "fields": decodedFields,
-			"publication_status": publicationStatus, "quality": quality, "message_count": messageCount,
+			"publication_status": publicationStatus, "confirmation_status": confirmationStatus, "message_count": messageCount,
 		})
 	}
 }

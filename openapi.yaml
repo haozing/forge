@@ -2876,7 +2876,7 @@ paths:
             application/json:
               schema:
                 allOf:
-                  - type: object
+                  - $ref: '#/components/schemas/NoteDetail'
                   - $ref: '#/components/schemas/Envelope'
         '404': { $ref: '#/components/responses/Error' }
   /api/conversations/{conversationId}/note/publish:
@@ -3166,6 +3166,19 @@ components:
           properties:
             input_tokens: { type: integer }
             output_tokens: { type: integer }
+    NoteDetail:
+      type: object
+      properties:
+        conversation_id: { type: string, format: uuid }
+        note_asset_id: { type: string, format: uuid }
+        note_container_id: { type: string, format: uuid }
+        asset_version_id: { type: string, description: 当前工作版本，无则为空字符串 }
+        title: { type: string, nullable: true }
+        markdown: { type: string, nullable: true }
+        fields: { type: object }
+        publication_status: { type: string }
+        confirmation_status: { type: string, enum: [unconfirmed, human_confirmed, ''] }
+        message_count: { type: integer }
     NoteSyncResult:
       type: object
       properties:
