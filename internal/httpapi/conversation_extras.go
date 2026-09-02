@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"time"
 
-	"agentchunzhi/internal/automation"
 	"agentchunzhi/internal/content"
 	"agentchunzhi/internal/conversation"
 	"github.com/jackc/pgx/v5"
@@ -285,52 +284,5 @@ func conversationTranscript(deps Dependencies) http.HandlerFunc {
 			result["created_at"] = createdAt
 		}
 		writeJSON(w, http.StatusOK, result)
-	}
-}
-
-func deleteAutomationJob(deps Dependencies) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodDelete {
-			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
-			return
-		}
-		principal, ok := requireMemberSession(w, r, deps)
-		if !ok {
-			return
-		}
-		if _, ok := requestIdempotencyKey(w, r); !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
-			return
-		}
-		if !requirePathUUID(w, r.PathValue("jobId")) {
-			return
-		}
-		if deps.Store == nil || deps.Store.Pool == nil {
-			writeError(w, http.StatusInternalServerError, "database_unconfigured")
-			return
-		}
-		job, err := deps.AutomationService.GetJob(r.Context(), principal, r.PathValue("jobId"))
-		if errors.Is(err, automation.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "automation_not_found")
-			return
-		}
-		if err != nil {
-			writeAutomationError(w, err, "automation_job_load_failed")
-			return
-		}
-		if _, err := deps.WorkspacePolicy.Require(r.Context(), principal, job.WorkspaceID, "", "automation.write"); err != nil {
-			writeError(w, http.StatusForbidden, "workspace_access_denied")
-			return
-		}
-		result, err := deps.Store.Pool.Exec(r.Context(), `DELETE FROM automation.jobs WHERE organization_id = $1::uuid AND id = $2::uuid`, principal.OrganizationID, job.ID)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "automation_job_delete_failed")
-			return
-		}
-		if result.RowsAffected() != 1 {
-			writeError(w, http.StatusNotFound, "automation_not_found")
-			return
-		}
-		w.WriteHeader(http.StatusNoContent)
 	}
 }

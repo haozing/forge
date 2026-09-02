@@ -39,6 +39,28 @@ func assetLineage(deps Dependencies) http.HandlerFunc {
 	}
 }
 
+// assetRelations returns the relation graph around an asset: outgoing and
+// incoming materialized edges plus draft-staged ones (doc §11.1 获取来源和
+// 关联).
+func assetRelations(deps Dependencies) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
+			return
+		}
+		principal, ok := requireMemberSession(w, r, deps)
+		if !ok {
+			return
+		}
+		items, err := deps.MemberAssetService.Relations(r.Context(), principal, strings.TrimSpace(r.PathValue("assetId")))
+		if err != nil {
+			writeMemberAssetError(w, err, "asset_relations_failed")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"items": items})
+	}
+}
+
 func assetVersionProcessing(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {

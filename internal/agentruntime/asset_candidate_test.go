@@ -80,22 +80,6 @@ func TestDecodeCandidateResponseStructured(t *testing.T) {
 	}
 }
 
-func TestDecodeCandidateResponseLegacyBareObject(t *testing.T) {
-	extraction, err := decodeCandidateResponse(`{"organization_id":"forged","score":2}`, decodeTagCandidates, decodeRelationCandidates)
-	if err != nil {
-		t.Fatalf("decode legacy bare object: %v", err)
-	}
-	if _, exists := extraction.Fields["organization_id"]; exists {
-		t.Fatal("organization_id must never be accepted from a model")
-	}
-	if extraction.Fields["score"] == nil {
-		t.Fatalf("legacy fields = %#v", extraction.Fields)
-	}
-	if extraction.Summary != nil || extraction.Tags != nil || extraction.Relations != nil || extraction.FieldConfidence != nil {
-		t.Fatalf("legacy shape must yield fields only: %#v", extraction)
-	}
-}
-
 func TestDecodeCandidateResponseFailsClosedOnRelations(t *testing.T) {
 	extraction, err := decodeCandidateResponse(`{"fields":{},"tags":[],"relations":[
 		{"target_asset_id":"11111111-1111-1111-1111-111111111111","relation_type":"references","confidence":0.7}

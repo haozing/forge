@@ -33,9 +33,10 @@ var (
 )
 
 // VersionCommitter lets the review service materialize a dirty draft into a
-// working version without importing the HTTP or asset-internal details.
+// working version inside the submission transaction without importing the
+// HTTP or asset-internal details. It accepts member and agent principals.
 type VersionCommitter interface {
-	CommitDraft(ctx context.Context, principal auth.Principal, workspaceID, assetID, expectedDraftRevision string) (asset.CommitResult, error)
+	CommitDraftForReviewTx(ctx context.Context, tx pgx.Tx, principal auth.Principal, workspaceID, assetID string, expectedDraftRevision int64) (asset.CommitResult, error)
 }
 
 type Service struct {
@@ -145,20 +146,49 @@ func (s Service) validID(value string) bool {
 }
 
 // Submit creates the single pending PublicationRequest for an asset. A dirty
-// draft is materialized into a working version first, so the request always
-// references a sealed snapshot.
-func (s Service) Submit(ctx context.Context, principal auth.Principal, workspaceID, assetID, expectedDraftRevision, idempotencyKey, comment string) (Request, error) {
+// draft is materialized into a working version inside the same transaction, so
+// the request always references a sealed snapshot and a failure leaves neither
+// a stray version nor a request behind. Members need the publication.submit
+// role action; agents need publication.submit (and asset.write for the commit
+// step) in their AgentAccessPolicy — doc §3.5/§11.1 "agents may submit under
+// the policy but never approve".
+func (s Service) Submit(ctx context.Context, principal auth.Principal, workspaceID, assetID string, expectedDraftRevision int64, idempotencyKey, comment string) (Request, error) {
 	if !s.validID(assetID) {
 		return Request{}, ErrInvalidInput
 	}
-	scope, err := s.require(ctx, principal, workspaceID, authz.ActionPublicationSubmit)
+	if expectedDraftRevision <= 0 {
+		return Request{}, ErrInvalidInput
+	}
+	if s.Store == nil || s.Store.Pool == nil || s.Policy == nil {
+		return Request{}, ErrForbidden
+	}
+	// Resolve the asset's model before the policy check so a model-scoped
+	// AgentAccessPolicy is judged against the asset it actually targets.
+	var modelID string
+	err := s.Store.Pool.QueryRow(ctx, `
+		SELECT resource_model_id::text FROM asset.assets
+		WHERE organization_id = $1::uuid AND id = $2::uuid AND deleted_at IS NULL
+	`, principal.OrganizationID, assetID).Scan(&modelID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Request{}, ErrNotFound
+	}
 	if err != nil {
 		return Request{}, err
 	}
-	_ = scope
-	// Materialize the draft snapshot; CommitDraft reverts to the current
-	// working version when the draft is clean.
-	commit, err := s.Committer.CommitDraft(ctx, principal, workspaceID, assetID, expectedDraftRevision)
+	if _, err := s.Policy.Require(ctx, principal, workspaceID, modelID, authz.ActionPublicationSubmit); err != nil {
+		if errors.Is(err, authz.ErrWorkspaceForbidden) || errors.Is(err, authz.ErrWorkspaceNotFound) {
+			return Request{}, ErrForbidden
+		}
+		return Request{}, err
+	}
+	tx, err := s.Store.Pool.Begin(ctx)
+	if err != nil {
+		return Request{}, err
+	}
+	defer tx.Rollback(ctx)
+	// Materialize the draft snapshot; CommitDraftForReviewTx reverts to the
+	// current working version when the draft is clean.
+	commit, err := s.Committer.CommitDraftForReviewTx(ctx, tx, principal, workspaceID, assetID, expectedDraftRevision)
 	if err != nil {
 		if errors.Is(err, asset.ErrDraftRevisionMismatch) {
 			return Request{}, ErrConflict
@@ -166,11 +196,6 @@ func (s Service) Submit(ctx context.Context, principal auth.Principal, workspace
 		return Request{}, mapCommitError(err)
 	}
 	versionID := commit.VersionID
-	tx, err := s.Store.Pool.Begin(ctx)
-	if err != nil {
-		return Request{}, err
-	}
-	defer tx.Rollback(ctx)
 	var assetWorkspace, assetVisibility string
 	err = tx.QueryRow(ctx, `
 		SELECT workspace_id::text, visibility FROM asset.assets
@@ -183,8 +208,8 @@ func (s Service) Submit(ctx context.Context, principal auth.Principal, workspace
 		return Request{}, err
 	}
 	// The asset must live in the routed workspace; a mismatch hides as
-	// NotFound (CommitDraft already blocks it — this is the redundant
-	// defense-in-depth re-check on the aggregate's own transaction).
+	// NotFound (CommitDraftForReviewTx already blocks it — this is the
+	// redundant defense-in-depth re-check on the aggregate's own transaction).
 	if assetWorkspace != workspaceID {
 		return Request{}, ErrNotFound
 	}
@@ -232,6 +257,22 @@ func (s Service) Submit(ctx context.Context, principal auth.Principal, workspace
 	if err := s.appendEventTx(ctx, tx, principal, request, publicationEventFor(request.Status, ""), nil); err != nil {
 		return Request{}, err
 	}
+	// Reviewers and workspace admins learn about new submissions; the
+	// submitter's own decision notifications stay in appendEventTx.
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO content.notifications (organization_id, workspace_id, recipient_user_id, kind, payload)
+		SELECT $1::uuid, $2::uuid, wm.user_id, 'publication.submitted', $3::jsonb
+		FROM content.workspace_members wm
+		WHERE wm.organization_id = $1::uuid AND wm.workspace_id = $2::uuid
+		  AND wm.role IN ('reviewer', 'admin')
+		  AND wm.user_id <> $4::uuid
+	`, principal.OrganizationID, assetWorkspace, mustJSON(map[string]any{
+		"request_id": request.ID,
+		"asset_id":   request.AssetID,
+		"status":     request.Status,
+	}), principal.UserID); err != nil {
+		return Request{}, fmt.Errorf("record reviewer notification: %w", err)
+	}
 	store.AppendAuditTx(ctx, tx, store.NewAuditEntry("publication.submit", principal.OrganizationID, principal.UserID, "publication_request", request.ID, map[string]any{
 		"workspace_id":     workspaceID,
 		"asset_id":         assetID,
@@ -251,6 +292,8 @@ func mapCommitError(err error) error {
 		return ErrConflict
 	case errors.Is(err, asset.ErrForbidden):
 		return ErrForbidden
+	case errors.Is(err, asset.ErrDraftRevisionMismatch):
+		return ErrConflict
 	default:
 		return err
 	}
@@ -891,17 +934,4 @@ func (s Service) ListComments(ctx context.Context, principal auth.Principal, wor
 		next = base64.RawURLEncoding.EncodeToString(raw)
 	}
 	return comments, next, nil
-}
-
-// PendingCount feeds the workspace statistics.
-func (s Service) PendingCount(ctx context.Context, principal auth.Principal, workspaceID string) (int64, error) {
-	if _, err := s.require(ctx, principal, workspaceID, authz.ActionPublicationRead); err != nil {
-		return 0, err
-	}
-	var count int64
-	err := s.Store.Pool.QueryRow(ctx, `
-		SELECT count(*) FROM asset.publication_requests
-		WHERE organization_id = $1::uuid AND workspace_id = $2::uuid AND status = 'pending'
-	`, principal.OrganizationID, workspaceID).Scan(&count)
-	return count, err
 }

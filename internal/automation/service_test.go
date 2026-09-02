@@ -25,12 +25,12 @@ func TestIntervalLiteralHasPositiveSeconds(t *testing.T) {
 }
 
 func TestSupportedAutomationOperationsAreExplicit(t *testing.T) {
-	for _, operation := range []string{"prepare_asset", "publish", "archive", "reindex", "import", "export", "transcribe", "sync_note"} {
-		if _, ok := supportedOperations[operation]; !ok {
-			t.Fatalf("operation %q is not registered", operation)
-		}
+	if _, ok := supportedOperations["prepare_asset"]; !ok {
+		t.Fatal("prepare_asset must be registered")
 	}
-	if _, ok := supportedOperations["arbitrary_code"]; ok {
-		t.Fatal("arbitrary operation must not be accepted")
+	for _, operation := range []string{"publish", "archive", "reindex", "import", "export", "transcribe", "sync_note", "arbitrary_code"} {
+		if _, ok := supportedOperations[operation]; ok {
+			t.Fatalf("retired operation %q must not be registered", operation)
+		}
 	}
 }

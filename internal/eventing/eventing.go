@@ -127,9 +127,9 @@ func eventKey(eventType string, payloadVersion int) string {
 func DefaultRegistry() (Registry, error) {
 	return NewRegistry([]ConsumerManifest{
 		{
-			// Phase 0 temporary consumer: the projector reacts to asset facts
-			// instead of receiving downstream commands. Phase 3 replaces this
-			// adapter with the final run/pointer model.
+			// The retrieval projector reacts to asset facts (publish/archive)
+			// and keeps projection runs eventually consistent with the
+			// authoritative PostgreSQL rows.
 			Key: "retrieval.projection",
 			EventVersions: map[string]int{
 				EventAssetPublished:               PayloadVersionV1,

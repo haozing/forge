@@ -106,7 +106,7 @@ func decodeBody(w http.ResponseWriter, r *http.Request, target any, maxBytes int
 
 type SubmitRequest struct {
 	AssetID       string `json:"asset_id"`
-	DraftRevision string `json:"draft_revision"`
+	DraftRevision *int64 `json:"draft_revision"`
 	Comment       string `json:"comment"`
 }
 
@@ -123,10 +123,13 @@ func PublicationRequests(deps Dependencies) http.HandlerFunc {
 		switch r.Method {
 		case http.MethodGet:
 			page, err := deps.ReviewService.ListPage(r.Context(), principal, workspaceID, review.ListInput{
-				Status:      r.URL.Query().Get("status"),
-				SubmittedBy: r.URL.Query().Get("submitted_by"),
-				Limit:       atoiDefault(r.URL.Query().Get("limit"), 20),
-				Cursor:      r.URL.Query().Get("cursor"),
+				Status:          r.URL.Query().Get("status"),
+				ResourceModelID: r.URL.Query().Get("resource_model_id"),
+				SubmittedBy:     r.URL.Query().Get("submitted_by"),
+				CreatedFrom:     r.URL.Query().Get("created_from"),
+				CreatedTo:       r.URL.Query().Get("created_to"),
+				Limit:           atoiDefault(r.URL.Query().Get("limit"), 20),
+				Cursor:          r.URL.Query().Get("cursor"),
 			})
 			if err != nil {
 				ServiceError(w, err)
@@ -145,7 +148,13 @@ func PublicationRequests(deps Dependencies) http.HandlerFunc {
 			if !decodeBody(w, r, &input, 64*1024) {
 				return
 			}
-			request, err := deps.ReviewService.Submit(r.Context(), principal, workspaceID, input.AssetID, input.DraftRevision, key, input.Comment)
+			// Doc §11.1: submission carries the same expected draft revision
+			// as commit and publish.
+			if input.DraftRevision == nil || *input.DraftRevision <= 0 {
+				writeError(w, http.StatusUnprocessableEntity, "draft_revision_required")
+				return
+			}
+			request, err := deps.ReviewService.Submit(r.Context(), principal, workspaceID, input.AssetID, *input.DraftRevision, key, input.Comment)
 			if err != nil {
 				ServiceError(w, err)
 				return
@@ -497,13 +506,15 @@ func memberPublishAsset(deps Dependencies) http.HandlerFunc {
 		if _, ok := requireIdempotencyKey(w, r); !ok {
 			return
 		}
-		var body struct {
-			DraftRevision string `json:"draft_revision"`
+		// Doc §11.1: publishing carries the same expected draft revision as
+		// commit and submit — the optimistic precondition is not optional.
+		var body CommitBody
+		if !decodeBody(w, r, &body, 16*1024) {
+			return
 		}
-		if r.ContentLength != 0 {
-			if !decodeBody(w, r, &body, 16*1024) {
-				return
-			}
+		if body.DraftRevision == nil {
+			writeError(w, http.StatusUnprocessableEntity, "draft_revision_required")
+			return
 		}
 		assetID := r.PathValue("assetId")
 		target, err := deps.MemberAssetService.Get(r.Context(), principal, assetID)
@@ -511,7 +522,7 @@ func memberPublishAsset(deps Dependencies) http.HandlerFunc {
 			ServiceError(w, err)
 			return
 		}
-		result, err := deps.MemberAssetService.Publish(r.Context(), principal, target.WorkspaceID, assetID, body.DraftRevision, requireIdempotencyKeyValue(r))
+		result, err := deps.MemberAssetService.Publish(r.Context(), principal, target.WorkspaceID, assetID, strconv.FormatInt(*body.DraftRevision, 10), requireIdempotencyKeyValue(r))
 		if err != nil {
 			ServiceError(w, err)
 			return

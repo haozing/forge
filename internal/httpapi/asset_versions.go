@@ -111,7 +111,20 @@ func duplicateAsset(deps Dependencies) http.HandlerFunc {
 			writeMemberAssetError(w, err, "asset_load_failed")
 			return
 		}
-		input := assetservice.MemberAssetInput{ResourceModelID: original.ResourceModelID, Title: original.Title, Markdown: original.Markdown, Fields: original.Fields, Visibility: original.Visibility}
+		// Doc §4: duplication records the duplicate edge to the source asset
+		// on the copy's first version.
+		input := assetservice.MemberAssetInput{
+			ResourceModelID: original.ResourceModelID,
+			Title:           original.Title,
+			Markdown:        original.Markdown,
+			Fields:          original.Fields,
+			Visibility:      original.Visibility,
+			InitialRelations: []assetservice.RelationMaterial{{
+				TargetAssetID: original.ID,
+				RelationType:  assetservice.RelationDuplicate,
+				Source:        "manual",
+			}},
+		}
 		result, err := deps.MemberAssetService.Create(r.Context(), principal, original.WorkspaceID, key, input)
 		if err != nil {
 			writeMemberAssetError(w, err, "asset_duplicate_failed")

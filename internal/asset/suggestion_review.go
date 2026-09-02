@@ -618,6 +618,9 @@ func (s SuggestionReviewService) acceptTagTx(ctx context.Context, tx pgx.Tx, pri
 // resolveTagTx resolves the accepted tag: an explicit override must be an
 // active workspace tag; otherwise the suggested key resolves with the import
 // semantics of tag.CreateOrReuseTx, which may create the missing definition.
+// A suggested key that hits an archived definition is rejected — tag.restore
+// is an admin act, so accepting a suggestion must not resurrect it silently
+// only to fail at commit with ErrTagArchived.
 func (s SuggestionReviewService) resolveTagTx(ctx context.Context, tx pgx.Tx, principal auth.Principal, workspaceID, overrideTagID, suggestedKey string) (string, error) {
 	if overrideTagID != "" {
 		var status string
@@ -642,6 +645,17 @@ func (s SuggestionReviewService) resolveTagTx(ctx context.Context, tx pgx.Tx, pr
 			return "", ErrInvalidInput
 		}
 		return "", err
+	}
+	if !resolved.Created {
+		var status string
+		if err := tx.QueryRow(ctx, `
+			SELECT status FROM asset.tags WHERE id = $1::uuid
+		`, resolved.ID).Scan(&status); err != nil {
+			return "", err
+		}
+		if status != tag.StatusActive {
+			return "", ErrTagArchived
+		}
 	}
 	return resolved.ID, nil
 }

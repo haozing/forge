@@ -141,23 +141,18 @@ func formatRelationList(candidates []workflows.RelationCandidate) string {
 }
 
 // decodeCandidateResponse parses the model reply into a validated extraction.
-// The structured shape is {"fields":…,"field_confidence":…,"summary":…,
-// "tags":…,"relations":…}; a bare field object (legacy shape, kept for test
-// stubs) yields fields only. Whitelist violations are dropped item by item —
-// one hallucinated tag or relation must never void the whole suggestion set.
+// The shape is {"fields":…,"field_confidence":…,"summary":…,"tags":…,
+// "relations":…}. Whitelist violations are dropped item by item — one
+// hallucinated tag or relation must never void the whole suggestion set.
 func decodeCandidateResponse(value string, tagCandidates []workflows.TagCandidate, relationCandidates []workflows.RelationCandidate) (workflows.CandidateExtraction, error) {
 	decoded, err := decodeModelJSONObject(value)
 	if err != nil {
 		return workflows.CandidateExtraction{}, err
 	}
-	fields, hasFields := decoded["fields"].(map[string]any)
+	fields, _ := decoded["fields"].(map[string]any)
 	tags, hasTags := decoded["tags"].([]any)
 	relations, hasRelations := decoded["relations"].([]any)
 	fieldConfidence, hasFieldConfidence := decoded["field_confidence"].(map[string]any)
-	if !hasFields && !hasTags && !hasRelations && !hasFieldConfidence {
-		// Legacy shape: the whole reply is the fields object.
-		fields = decoded
-	}
 	if fields == nil {
 		fields = map[string]any{}
 	}

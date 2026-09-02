@@ -534,6 +534,9 @@ func lockTag(ctx context.Context, tx pgx.Tx, organizationID, workspaceID, tagID,
 }
 
 // Usage aggregates per-page usage counts in one grouped query set (no N+1).
+// The published counter follows the current published pointer only — the
+// working counter stays per working version (标签系统最终设计架构: 当前发布
+// 版本决定公开标签集合).
 func (s Service) Usage(ctx context.Context, principal auth.Principal, workspaceID string, tagIDs []string) (map[string]Usage, error) {
 	result := make(map[string]Usage, len(tagIDs))
 	if len(tagIDs) == 0 {
@@ -542,7 +545,8 @@ func (s Service) Usage(ctx context.Context, principal auth.Principal, workspaceI
 	rows, err := s.Store.Pool.Query(ctx, `
 		SELECT avt.tag_id::text,
 		       count(DISTINCT CASE WHEN a.publication_status <> 'archived' THEN a.id END),
-		       count(DISTINCT CASE WHEN a.publication_status = 'published' THEN a.id END)
+		       count(DISTINCT CASE WHEN a.current_published_version_id = avt.asset_version_id
+		                             AND a.publication_status = 'published' THEN a.id END)
 		FROM asset.asset_version_tags avt
 		JOIN asset.asset_versions v ON v.organization_id = avt.organization_id AND v.id = avt.asset_version_id
 		JOIN asset.assets a ON a.organization_id = v.organization_id AND a.id = v.asset_id

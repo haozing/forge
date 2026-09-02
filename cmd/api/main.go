@@ -23,7 +23,6 @@ import (
 	"agentchunzhi/internal/authz"
 	"agentchunzhi/internal/automation"
 	"agentchunzhi/internal/config"
-	"agentchunzhi/internal/container"
 	contentservice "agentchunzhi/internal/content"
 	"agentchunzhi/internal/conversation"
 	"agentchunzhi/internal/delivery"
@@ -208,7 +207,6 @@ func main() {
 		SuggestionReviews:    &assetservice.SuggestionReviewService{Store: db, Policy: authz.WorkspacePolicyService{Store: db}},
 		TransferService:      assetservice.TransferService{Store: db, Policy: authz.WorkspacePolicyService{Store: db}},
 		ReviewService:        review.Service{Store: db, Policy: authz.WorkspacePolicyService{Store: db}, Events: &events, Committer: memberAssetService},
-		ContainerService:     container.Service{Store: db, Policy: authz.WorkspacePolicyService{Store: db}},
 		ConversationService:  conversation.Service{Store: db, Policy: authz.WorkspacePolicyService{Store: db}, Content: contentservice.Service{Store: db, Events: events}},
 		AutomationService:    automation.Service{Store: db, Policy: authz.WorkspacePolicyService{Store: db}},
 		OrganizationService:  organization.Service{Store: db, Events: &events},
@@ -251,7 +249,6 @@ func main() {
 		LoginThrottle:     loginThrottle,
 		TrustedProxyCIDRs: cfg.TrustedProxyCIDRs,
 		AllowedOrigins:    cfg.MemberAllowedOrigins,
-		AppEnv:            cfg.Environment,
 		// Phase 3 retrieval readiness inputs (/readyz wiring is completed by
 		// the query/httpapi work package).
 		SemanticAvailable:   semanticAvailable,

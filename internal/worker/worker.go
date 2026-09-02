@@ -12,7 +12,6 @@ import (
 	"agentchunzhi/internal/automation"
 	"agentchunzhi/internal/deletion"
 	"agentchunzhi/internal/eventing"
-	"agentchunzhi/internal/resourcemodel"
 	"agentchunzhi/internal/store"
 
 	"github.com/jackc/pgx/v5"
@@ -245,7 +244,6 @@ type RecoverAutomationAttemptsWorker struct {
 
 type BackgroundJobsWorker struct {
 	river.WorkerDefaults[eventing.ProcessBackgroundJobsArgs]
-	Migrations resourcemodel.MigrationProcessor
 	Transfers  asset.TransferProcessor
 	Deletions  deletion.Processor
 	Automation automation.Service
@@ -274,11 +272,6 @@ func (w *BackgroundJobsWorker) Work(ctx context.Context, _ *river.Job[eventing.P
 	}
 	for i := 0; i < limit; i++ {
 		processed := false
-		if err := w.Migrations.ProcessNext(ctx); err == nil {
-			processed = true
-		} else if !errors.Is(err, resourcemodel.ErrNoPendingMigration) {
-			return err
-		}
 		if w.Attachments != nil {
 			if expired, err := w.Attachments.CleanupExpired(ctx); err != nil {
 				return err

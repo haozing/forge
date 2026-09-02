@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"agentchunzhi/internal/access"
 	"agentchunzhi/internal/auth"
 	"agentchunzhi/internal/authz"
 	"agentchunzhi/internal/store"
@@ -136,8 +137,11 @@ func (c ScopeCompiler) ForOrganizationMember(ctx context.Context, principal auth
 // AgentAccessPolicy.workspaces ∩ resource_models ∩ actions contains
 // query.execute (doc §5.4). Models must be active with the agent channel
 // enabled on their current published version — the same conditions the member
-// compilers apply. The channel and retrieval-mode policies narrow further
-// inside the planner and final authorizer.
+// compilers apply. The per-policy data_scope (doc §10.4) narrows the
+// visibility band: the narrowest granted scope wins, so one public-only
+// policy cannot be widened through another policy's band. The channel and
+// retrieval-mode policies narrow further inside the planner and final
+// authorizer.
 func (c ScopeCompiler) ForAgent(ctx context.Context, principal auth.Principal, requestedModelIDs []string) (QueryAccessScope, error) {
 	if c.Store == nil || c.Store.Pool == nil {
 		return QueryAccessScope{}, errors.New("database store is not initialized")
@@ -146,7 +150,7 @@ func (c ScopeCompiler) ForAgent(ctx context.Context, principal auth.Principal, r
 		return QueryAccessScope{}, ErrQueryScopeForbidden
 	}
 	rows, err := c.Store.Pool.Query(ctx, `
-		SELECT DISTINCT COALESCE(ap.workspace_id::text, ''), ap.resource_model_id::text
+		SELECT DISTINCT COALESCE(ap.workspace_id::text, ''), ap.resource_model_id::text, ap.data_scope
 		FROM content.agent_access_policies ap
 		JOIN model.resource_models rm
 		  ON rm.organization_id = ap.organization_id AND rm.id = ap.resource_model_id
@@ -164,9 +168,10 @@ func (c ScopeCompiler) ForAgent(ctx context.Context, principal auth.Principal, r
 	orgWide := false
 	workspaces := []string{}
 	modelSet := map[string]bool{}
+	dataScopeRank := -1
 	for rows.Next() {
-		var workspaceID, modelID string
-		if err := rows.Scan(&workspaceID, &modelID); err != nil {
+		var workspaceID, modelID, dataScope string
+		if err := rows.Scan(&workspaceID, &modelID, &dataScope); err != nil {
 			return QueryAccessScope{}, err
 		}
 		if workspaceID == "" {
@@ -175,6 +180,9 @@ func (c ScopeCompiler) ForAgent(ctx context.Context, principal auth.Principal, r
 			workspaces = append(workspaces, workspaceID)
 		}
 		modelSet[modelID] = true
+		if rank := agentDataScopeRank(dataScope); rank >= 0 && (dataScopeRank < 0 || rank < dataScopeRank) {
+			dataScopeRank = rank
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return QueryAccessScope{}, err
@@ -202,6 +210,9 @@ func (c ScopeCompiler) ForAgent(ctx context.Context, principal auth.Principal, r
 		}
 		models = narrowed
 	}
+	if dataScopeRank < 0 {
+		dataScopeRank = agentDataScopeRank("organization")
+	}
 	scope := QueryAccessScope{
 		OrganizationID:      principal.OrganizationID,
 		SubjectKind:         SubjectAgent,
@@ -209,9 +220,35 @@ func (c ScopeCompiler) ForAgent(ctx context.Context, principal auth.Principal, r
 		Channel:             ChannelAgent,
 		WorkspaceIDs:        workspaces,
 		ResourceModelIDs:    models,
-		AllowedVisibilities: organizationVisibilities,
+		AllowedVisibilities: agentDataScopeVisibilities(dataScopeRank),
 	}
 	return c.seal(ctx, scope)
+}
+
+// agentDataScopeRank orders the doc §10.4 data scopes from narrowest to
+// widest; -1 means "not a known scope" (treated as the default organization).
+func agentDataScopeRank(value string) int {
+	switch value {
+	case "public":
+		return 0
+	case "organization":
+		return 1
+	case "workspace":
+		return 2
+	default:
+		return -1
+	}
+}
+
+func agentDataScopeVisibilities(rank int) []string {
+	switch rank {
+	case 0:
+		return []string{access.VisibilityPublic}
+	case 2:
+		return publishedVisibilities
+	default:
+		return organizationVisibilities
+	}
 }
 
 // ForOpenAPI compiles the technical API key scope: channels.open_api enabled

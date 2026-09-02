@@ -290,21 +290,6 @@ func truncateRunes(value string, max int) string {
 	return string(runes[:max])
 }
 
-func formatTimePtr(value *time.Time) string {
-	if value == nil {
-		return ""
-	}
-	return value.UTC().Format(time.RFC3339Nano)
-}
-
-func mustJSONRaw(value any) json.RawMessage {
-	payload, err := json.Marshal(value)
-	if err != nil {
-		return json.RawMessage("null")
-	}
-	return payload
-}
-
 // compactJSON collapses whitespace in a locator document for storage.
 func compactJSON(raw json.RawMessage) json.RawMessage {
 	if len(raw) == 0 {

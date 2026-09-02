@@ -162,15 +162,7 @@ func DefaultRegistry() (Registry, error) {
 	if err != nil {
 		return Registry{}, err
 	}
-	definitions := []Definition{{Key: "asset_prepare", CodeVersion: 1, Run: assetPrepare}}
-	for _, key := range []string{"asset_publish", "asset_archive", "asset_import", "asset_reindex", "asset_transcribe", "note_sync"} {
-		graph, graphErr := NewFixedWorkflowGraph(key)
-		if graphErr != nil {
-			return Registry{}, graphErr
-		}
-		definitions = append(definitions, Definition{Key: key, CodeVersion: 1, Run: graph})
-	}
-	return NewRegistry(definitions...)
+	return NewRegistry(Definition{Key: "asset_prepare", CodeVersion: 1, Run: assetPrepare})
 }
 
 func checksum(key string, version int64) string {

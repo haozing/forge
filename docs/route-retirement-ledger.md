@@ -27,3 +27,11 @@
 - 原「阶段 4-6 planned」的 run-now→prepare、automation callback 迁移等批次目标随本次清理一并完成（prepare 走 `/api/workspaces/{ws}/assets/{id}/prepare`，callback 走 `/api/open/automation/runs/{runId}/callback`）。
 - 从 frontend 面并入的域维持既有写语义（幂等键 opt-in + 服务端代理键）；如需全量强制 428，按域逐批切换 handler 内校验即可。
 - 历史阶段文档（`docs/产品文档-v2-阶段N实施方案.md` 等）中的旧路径为过程记录，未回改；以 `openapi.yaml` 与 `router_groups.go` 为准。
+
+## 2026-09-02 第二批：过度设计裁撤退役
+
+1. **automation jobs 管理面**：`GET/POST /api/workspaces/{workspaceId}/automation-jobs`、`GET/PATCH/DELETE /api/automation-jobs/{jobId}`、`POST /api/automation-jobs/{jobId}/pause|resume|run-now`、`GET /api/automation-jobs/{jobId}/runs`、`POST /api/task-runs/{runId}/retry` 全部移除（cron 调度器、jobs 管理服务、定时入队与重试随路由一并删除）。保留 `/api/task-runs/{runId}` 的 GET、`/attempts` GET、`/cancel` POST、`/events` GET（prepare/ReAct 运行观测面）。
+2. **外部任务回调**：`POST /api/open/automation/runs/{runId}/callback` 移除（凭证签发、宽限窗与回调 handler 删除）。
+3. **模型迁移作业**：`GET /api/resource-models/{resourceModelId}/migration-previews`、`POST/GET /api/resource-models/{resourceModelId}/migrations`、`GET /api/resource-model-migrations/{migrationId}`、`POST /api/resource-model-migrations/{migrationId}/cancel` 移除（preview 数字硬编码 0 的框架整体下线；模型版本切换不受影响）。
+4. **容器文件夹树**：`GET/POST /api/workspaces/{workspaceId}/containers`（含 /tree）、`GET/PATCH/DELETE /api/containers/{containerId}`、`POST /api/containers/{containerId}/move`、`GET /api/containers/{containerId}/children|assets`、`POST /api/assets/{assetId}/move`、`GET/PUT /api/assets/{assetId}/document-parent`、`GET /api/assets/{assetId}/document-children|containers` 移除（internal/container 包删除；content.containers 表保留为会话正文存储；folders 重做见《统一分类树重构整改方案》）。
+5. 上述路由从未进入 openapi.yaml；第二批退役同样由 member_contract_test（401 门清单收缩）与全量回归覆盖。

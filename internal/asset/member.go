@@ -64,6 +64,10 @@ type MemberAssetInput struct {
 	Source          map[string]any `json:"source"`
 	ContainerIDs    []string       `json:"container_ids"`
 	ParentAssetID   *string        `json:"parent_asset_id"`
+	// InitialRelations is server-side only (json:"-"): relations the first
+	// version materializes, used by the duplicate command to record the
+	// duplicate edge. Clients cannot set it through JSON.
+	InitialRelations []RelationMaterial `json:"-"`
 }
 
 type MemberAssetPatch struct {
@@ -583,7 +587,7 @@ func (s MemberService) Create(ctx context.Context, principal auth.Principal, wor
 	material := VersionMaterial{
 		OrganizationID:         principal.OrganizationID,
 		WorkspaceID:            workspaceID,
-		AssetID:                assetID,
+		AssetID:               assetID,
 		ResourceModelID:        input.ResourceModelID,
 		ResourceModelVersionID: resourceModelVersionID,
 		Origin:                 OriginHuman,
@@ -592,6 +596,7 @@ func (s MemberService) Create(ctx context.Context, principal auth.Principal, wor
 		Summary:                summary,
 		Markdown:               markdown,
 		Fields:                 fields,
+		Relations:              input.InitialRelations,
 		CreatedBy:              principal.UserID,
 	}
 	versionID, _, err := CreateVersionTx(ctx, tx, material)
@@ -965,7 +970,7 @@ func (s MemberService) Archive(ctx context.Context, principal auth.Principal, as
 		return MemberAsset{}, ErrConflict
 	}
 	previous := row.CurrentPublishedVersionID
-	if _, err := CancelPendingRequestsTx(ctx, tx, row.OrganizationID, row.ID, principal.UserID, "asset_archived"); err != nil {
+	if _, err := CancelPendingRequestsTx(ctx, tx, s.Events, row, principal, "asset_archived"); err != nil {
 		return MemberAsset{}, err
 	}
 	row, err = ClearPublishedPointerTx(ctx, tx, row)
@@ -1061,6 +1066,24 @@ func (s MemberService) ConfirmVersion(ctx context.Context, principal auth.Princi
 	if confirmed {
 		return MemberAssetVersion{}, ErrConflict
 	}
+	// Idempotency: a prior confirm of the same source already derived a
+	// human_confirmed child — return that snapshot instead of deriving an
+	// identical twin (the same source cannot be confirmed twice).
+	var derivedChild string
+	err = s.Store.Pool.QueryRow(ctx, `
+		SELECT v.id::text
+		FROM asset.asset_versions v
+		WHERE v.organization_id = $1::uuid AND v.parent_version_id = $2::uuid
+		  AND v.confirmation_status = 'human_confirmed'
+		ORDER BY v.created_at
+		LIMIT 1
+	`, organizationID, versionID).Scan(&derivedChild)
+	if err == nil {
+		return s.GetVersion(ctx, principal, derivedChild)
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return MemberAssetVersion{}, err
+	}
 	if _, err := s.require(ctx, principal, workspaceID, modelID, authz.ActionAssetConfirm); err != nil {
 		return MemberAssetVersion{}, err
 	}
@@ -1128,7 +1151,7 @@ func (s MemberService) ConfirmVersion(ctx context.Context, principal auth.Princi
 	}
 	// The confirmed snapshot becomes the working copy and the draft rebases;
 	// pending requests must be re-submitted against the new version.
-	if _, err := CancelPendingRequestsTx(ctx, tx, organizationID, assetID, principal.UserID, reviewCancelReasonNewVersion); err != nil {
+	if _, err := CancelPendingRequestsTx(ctx, tx, s.Events, row, principal, reviewCancelReasonNewVersion); err != nil {
 		return MemberAssetVersion{}, err
 	}
 	if _, err := tx.Exec(ctx, `
@@ -1139,6 +1162,18 @@ func (s MemberService) ConfirmVersion(ctx context.Context, principal auth.Princi
 		WHERE organization_id = $1::uuid AND asset_id = $2::uuid
 	`, organizationID, assetID, newVersionID, principal.UserID); err != nil {
 		return MemberAssetVersion{}, fmt.Errorf("rebase draft after confirm: %w", err)
+	}
+	// The rebased draft starts unconfirmed and mirrors the new snapshot's tags
+	// exactly — stale draft-only tags from before the confirm do not survive.
+	if _, err := tx.Exec(ctx, `
+		DELETE FROM asset.asset_draft_tags
+		WHERE organization_id = $1::uuid
+		  AND asset_draft_id IN (
+		      SELECT id FROM asset.asset_drafts
+		      WHERE organization_id = $1::uuid AND asset_id = $2::uuid
+		  )
+	`, organizationID, assetID); err != nil {
+		return MemberAssetVersion{}, fmt.Errorf("clear draft tags after confirm: %w", err)
 	}
 	// The confirmed snapshot becomes the working copy.
 	if _, err := tx.Exec(ctx, `

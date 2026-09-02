@@ -35,6 +35,10 @@ func writeMemberAssetError(w http.ResponseWriter, err error, fallback string) {
 		writeError(w, http.StatusNotFound, "asset_not_found")
 	case errors.Is(err, assetservice.ErrConflict):
 		writeError(w, http.StatusConflict, "version_conflict")
+	case errors.Is(err, assetservice.ErrDraftRevisionMismatch):
+		writeError(w, http.StatusPreconditionFailed, "draft_revision_mismatch")
+	case errors.Is(err, assetservice.ErrAssetArchived):
+		writeError(w, http.StatusConflict, "asset_archived")
 	default:
 		log.Printf("member asset request failed: %v", err)
 		writeError(w, http.StatusInternalServerError, fallback)
@@ -131,6 +135,13 @@ func createMemberAsset(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusUnprocessableEntity, "validation_failed")
 			return
 		}
+		// String tags are import/webhook/agent-channel syntax only; the member
+		// write surface uses tag_ids through the draft (doc §11.1). Reject
+		// loudly instead of silently dropping the field.
+		if len(input.Tags) > 0 {
+			writeError(w, http.StatusUnprocessableEntity, "legacy_tags_field_not_supported")
+			return
+		}
 		if !rejectBlankText(w, input.Title, input.Markdown) {
 			return
 		}
@@ -205,6 +216,10 @@ func patchMemberAsset(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusUnprocessableEntity, "validation_failed")
 			return
 		}
+		if input.Tags != nil && len(*input.Tags) > 0 {
+			writeError(w, http.StatusUnprocessableEntity, "legacy_tags_field_not_supported")
+			return
+		}
 		if !rejectBlankText(w, input.Title, input.Markdown) {
 			return
 		}
@@ -219,17 +234,5 @@ func patchMemberAsset(deps Dependencies) http.HandlerFunc {
 		}
 		writeETag(w, result.ETag)
 		writeJSON(w, http.StatusOK, result)
-	}
-}
-
-func memberAssetResource(deps Dependencies) http.HandlerFunc {
-	get := getMemberAsset(deps)
-	patch := patchMemberAsset(deps)
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet {
-			get(w, r)
-			return
-		}
-		patch(w, r)
 	}
 }

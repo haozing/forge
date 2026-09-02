@@ -434,6 +434,473 @@ paths:
                 allOf:
                   - $ref: '#/components/schemas/AssetVersion'
                   - $ref: '#/components/schemas/Envelope'
+  /api/workspaces/{workspaceId}/assets:
+    get:
+      tags: [assets]
+      operationId: listWorkspaceAssets
+      summary: List workspace assets
+      description: 工作区资产集合（游标分页；q 过滤走 query 域）
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: 资产列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/Asset' }
+                  - $ref: '#/components/schemas/CursorPage'
+                  - $ref: '#/components/schemas/Envelope'
+    post:
+      tags: [assets]
+      operationId: createWorkspaceAsset
+      summary: Create a workspace asset
+      description: 在工作区创建资产（直接落库，非草稿流；member 写面禁用字符串 tags 字段）
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [resource_model_id]
+              properties:
+                resource_model_id: { type: string, format: uuid }
+                visibility: { type: string }
+                title: { type: string, nullable: true }
+                summary: { type: string, nullable: true }
+                markdown: { type: string, nullable: true }
+                fields: { type: object, additionalProperties: true }
+                source: { type: object, additionalProperties: true }
+                container_ids:
+                  type: array
+                  items: { type: string, format: uuid }
+                parent_asset_id: { type: string, format: uuid, nullable: true }
+      responses:
+        '201':
+          description: 已创建（ETag 头返回版本校验和）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Asset'
+                  - $ref: '#/components/schemas/Envelope'
+        '422': { $ref: '#/components/responses/Error' }
+  /api/assets/{assetId}:
+    get:
+      tags: [assets]
+      operationId: getAsset
+      summary: Get asset detail
+      parameters:
+        - $ref: '#/components/parameters/AssetId'
+      responses:
+        '200':
+          description: 资产详情（ETag 头返回版本校验和）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Asset'
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
+    patch:
+      tags: [assets]
+      operationId: patchAsset
+      summary: Patch asset metadata
+      description: 覆盖式更新资产元数据（需 If-Match 与 Idempotency-Key）
+      parameters:
+        - $ref: '#/components/parameters/AssetId'
+        - $ref: '#/components/parameters/IfMatch'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title: { type: string, nullable: true }
+                summary: { type: string, nullable: true }
+                markdown: { type: string, nullable: true }
+                fields: { type: object, additionalProperties: true, nullable: true }
+                visibility: { type: string, nullable: true }
+                source: { type: object, additionalProperties: true, nullable: true }
+                container_ids:
+                  type: array
+                  items: { type: string, format: uuid }
+                  nullable: true
+                parent_asset_id: { type: string, format: uuid, nullable: true }
+      responses:
+        '200':
+          description: 已更新
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Asset'
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+    delete:
+      tags: [assets]
+      operationId: deleteAsset
+      summary: Archive asset via DELETE
+      description: 软删除（归档）资产
+      parameters:
+        - $ref: '#/components/parameters/AssetId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '204':
+          description: 已归档
+        '404': { $ref: '#/components/responses/Error' }
+  /api/assets/{assetId}/duplicate:
+    post:
+      tags: [assets]
+      operationId: duplicateAsset
+      summary: Duplicate an asset
+      description: 复制资产内容并在副本首个版本记录 duplicate 关系
+      parameters:
+        - $ref: '#/components/parameters/AssetId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '201':
+          description: 副本已创建
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Asset'
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+  /api/assets/{assetId}/lineage:
+    get:
+      tags: [assets]
+      operationId: getAssetLineage
+      summary: Get asset lineage
+      description: 资产血缘：版本历史、原始输入与加工链
+      parameters:
+        - $ref: '#/components/parameters/AssetId'
+      responses:
+        '200':
+          description: 血缘视图
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/AssetVersion' }
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
+  /api/assets/{assetId}/relations:
+    get:
+      tags: [assets]
+      operationId: getAssetRelations
+      summary: Get asset relations
+      description: 资产关系边（duplicate/derivation/container 等关系类型）
+      parameters:
+        - $ref: '#/components/parameters/AssetId'
+      responses:
+        '200':
+          description: 关系列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            relation_type: { type: string }
+                            target_asset_id: { type: string, format: uuid }
+                            source_asset_id: { type: string, format: uuid }
+                            source: { type: string }
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
+  /api/assets/{assetId}/versions:
+    get:
+      tags: [assets]
+      operationId: listAssetVersions
+      summary: List asset versions
+      parameters:
+        - $ref: '#/components/parameters/AssetId'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: 版本列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/AssetVersion' }
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
+  /api/asset-versions/{versionId}:
+    get:
+      tags: [assets]
+      operationId: getAssetVersion
+      summary: Get asset version detail
+      parameters:
+        - name: versionId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: 版本详情
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/AssetVersion'
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
+  /api/asset-versions/{versionId}/attachments:
+    get:
+      tags: [attachments]
+      operationId: listAssetVersionAttachments
+      summary: List attachments registered on a version
+      parameters:
+        - name: versionId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: 附件列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/Attachment' }
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
+  /api/asset-versions/{versionId}/processing:
+    get:
+      tags: [assets]
+      operationId: getAssetVersionProcessing
+      summary: Get processing jobs of a version
+      description: 版本加工链（processing jobs）只读视图
+      parameters:
+        - name: versionId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: 加工任务列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            job_id: { type: string, format: uuid }
+                            status: { type: string }
+                            started_at: { type: string, format: date-time, nullable: true }
+                            finished_at: { type: string, format: date-time, nullable: true }
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
+  /api/workspaces/{workspaceId}/attachments:
+    post:
+      tags: [attachments]
+      operationId: uploadAttachment
+      summary: Upload an attachment (multipart)
+      description: multipart 上传附件（单个 file part；大小上限由服务配置决定）
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        '201':
+          description: 已上传
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Attachment'
+                  - $ref: '#/components/schemas/Envelope'
+        '422': { $ref: '#/components/responses/Error' }
+  /api/attachments/{attachmentId}:
+    get:
+      tags: [attachments]
+      operationId: getAttachment
+      summary: Get attachment detail
+      parameters:
+        - name: attachmentId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: 附件详情
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Attachment'
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
+    patch:
+      tags: [attachments]
+      operationId: patchAttachment
+      summary: Rename an attachment
+      parameters:
+        - name: attachmentId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [filename]
+              properties:
+                filename: { type: string }
+      responses:
+        '200':
+          description: 已更新
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Attachment'
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+    delete:
+      tags: [attachments]
+      operationId: deleteAttachment
+      summary: Delete an attachment
+      parameters:
+        - name: attachmentId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '204':
+          description: 已删除
+        '404': { $ref: '#/components/responses/Error' }
+  /api/attachments/{attachmentId}/link:
+    post:
+      tags: [attachments]
+      operationId: linkAttachment
+      summary: Link an attachment to an asset
+      description: 把已上传附件登记为资产的 body/cover 附件
+      parameters:
+        - name: attachmentId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [asset_id]
+              properties:
+                asset_id: { type: string, format: uuid }
+                role: { type: string, enum: [body, cover] }
+      responses:
+        '200':
+          description: 已登记
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    properties:
+                      status: { type: string }
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+  /api/attachments/{attachmentId}/download:
+    get:
+      tags: [attachments]
+      operationId: downloadAttachment
+      summary: Download attachment bytes
+      parameters:
+        - name: attachmentId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: 附件二进制流
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        '404': { $ref: '#/components/responses/Error' }
+  /api/attachments/{attachmentId}/presigned-download:
+    post:
+      tags: [attachments]
+      operationId: presignAttachmentDownload
+      summary: Issue a short-lived download URL
+      description: 换取 10 分钟有效的下载地址（指向 /api/attachments/{attachmentId}/download）
+      parameters:
+        - name: attachmentId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: 下载地址
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    properties:
+                      download_url: { type: string }
+                      expires_at: { type: string, format: date-time }
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
   /api/workspaces/{workspaceId}/assets/{assetId}/prepare:
     post:
       tags: [suggestions]
@@ -2785,6 +3252,783 @@ paths:
                   - type: object
                   - $ref: '#/components/schemas/Envelope'
         '404': { $ref: '#/components/responses/Error' }
+  /api/open/assets:
+    post:
+      tags: [open]
+      operationId: createOpenAsset
+      summary: Create an asset with agent credentials
+      description: Agent 直接建资产（asset.create 能力；幂等键；201 返回资产）
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [resource_model_id, workspace_id]
+              properties:
+                resource_model_id: { type: string, format: uuid }
+                workspace_id: { type: string, format: uuid }
+                title: { type: string, nullable: true }
+                markdown: { type: string, nullable: true }
+                fields: { type: object, additionalProperties: true }
+                source: { type: object, additionalProperties: true }
+      responses:
+        '201':
+          description: 已创建
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Asset'
+                  - $ref: '#/components/schemas/Envelope'
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+  /api/open/assets/{assetId}:
+    patch:
+      tags: [open]
+      operationId: updateOpenAsset
+      summary: Update an asset with agent credentials
+      description: Agent 编辑资产（asset.edit 能力；If-Match 必填版本 id）
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/AssetId'
+        - $ref: '#/components/parameters/IfMatch'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title: { type: string, nullable: true }
+                markdown: { type: string, nullable: true }
+                fields: { type: object, additionalProperties: true, nullable: true }
+      responses:
+        '200':
+          description: 已更新
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Asset'
+                  - $ref: '#/components/schemas/Envelope'
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+  /api/open/assets/{assetId}/publish:
+    post:
+      tags: [open]
+      operationId: publishOpenAsset
+      summary: Publish an asset version with agent credentials
+      description: Agent 发布指定版本（asset.publish 能力；发布门禁与成员面一致）
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/AssetId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [version_id]
+              properties:
+                version_id: { type: string, format: uuid }
+      responses:
+        '200':
+          description: 已发布
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Asset'
+                  - $ref: '#/components/schemas/Envelope'
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+  /api/open/assets/{assetId}/archive:
+    post:
+      tags: [open]
+      operationId: archiveOpenAsset
+      summary: Archive an asset with agent credentials
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/AssetId'
+      responses:
+        '200':
+          description: 已归档
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Asset'
+                  - $ref: '#/components/schemas/Envelope'
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+  /api/open/assets/{assetId}/references:
+    get:
+      tags: [open]
+      operationId: getOpenAssetReference
+      summary: Resolve an opaque asset reference
+      description: Agent 解析资产引用（reference.read 能力；返回 AssetReference）
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/AssetId'
+      responses:
+        '200':
+          description: 引用详情
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Citation'
+                  - $ref: '#/components/schemas/Envelope'
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+  /api/open/attachments/{attachmentId}/download:
+    get:
+      tags: [open]
+      operationId: downloadOpenAttachment
+      summary: Download an attachment with agent credentials
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: attachmentId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: 附件二进制流
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+  /api/open/workspaces/{workspaceId}/publication-requests:
+    post:
+      tags: [open]
+      operationId: submitOpenPublicationRequest
+      summary: Submit a publication request with agent credentials
+      description: Agent 提交发布审批（publication.submit 能力；draft_revision 必填正整数）
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [asset_id, draft_revision]
+              properties:
+                asset_id: { type: string, format: uuid }
+                draft_revision: { type: integer, minimum: 1 }
+                comment: { type: string }
+      responses:
+        '201':
+          description: 已创建
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/PublicationRequest'
+                  - $ref: '#/components/schemas/Envelope'
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+  /api/workspaces/{workspaceId}/agent-applications:
+    get:
+      tags: [agent-applications]
+      operationId: listWorkspaceAgentApplications
+      summary: List agent applications enabled on a workspace
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+      responses:
+        '200':
+          description: 工作区已启用应用列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/AgentApplication' }
+                  - $ref: '#/components/schemas/Envelope'
+        '403': { $ref: '#/components/responses/Error' }
+    post:
+      tags: [agent-applications]
+      operationId: createWorkspaceAgentApplication
+      summary: Register an agent application bound to a workspace
+      description: 注册 Agent 并绑定工作区（返回一次性 api_key；默认授予工作区默认资源模型 read+query.execute）
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [display_name, api_key_name, application_name, model_endpoint_id, runtime_mode]
+              properties:
+                display_name: { type: string }
+                api_key_name: { type: string }
+                application_name: { type: string }
+                model_endpoint_id: { type: string, format: uuid }
+                runtime_mode: { type: string, enum: [chat, react] }
+                workflow_key: { type: string }
+                capabilities:
+                  type: array
+                  items: { type: string }
+                answer_posture: { type: string }
+                expires_at: { type: string, format: date-time, nullable: true }
+      responses:
+        '201':
+          description: 已注册（api_key 仅此一次返回）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/AgentApplication'
+                  - $ref: '#/components/schemas/Envelope'
+        '403': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+  /api/agent-applications:
+    get:
+      tags: [agent-applications]
+      operationId: listAgentApplications
+      summary: List agent applications for the organization
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 100 }
+      responses:
+        '200':
+          description: 应用列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/AgentApplication' }
+                  - $ref: '#/components/schemas/Envelope'
+  /api/agent-applications/{applicationId}:
+    get:
+      tags: [agent-applications]
+      operationId: getAgentApplication
+      summary: Get agent application detail
+      parameters:
+        - name: applicationId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: 应用详情
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/AgentApplication'
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
+    patch:
+      tags: [agent-applications]
+      operationId: patchAgentApplication
+      summary: Patch agent application settings
+      parameters:
+        - name: applicationId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                model_endpoint_id: { type: string, format: uuid }
+                runtime_mode: { type: string }
+                workflow_key: { type: string }
+                capabilities:
+                  type: array
+                  items: { type: string }
+                answer_posture: { type: string }
+      responses:
+        '200':
+          description: 已更新
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/AgentApplication'
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+  /api/agent-applications/{applicationId}/enable:
+    post:
+      tags: [agent-applications]
+      operationId: enableAgentApplication
+      summary: Enable an agent application
+      parameters:
+        - name: applicationId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: 已启用
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/AgentApplication'
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/agent-applications/{applicationId}/disable:
+    post:
+      tags: [agent-applications]
+      operationId: disableAgentApplication
+      summary: Disable an agent application
+      parameters:
+        - name: applicationId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: 已停用
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/AgentApplication'
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/agent-applications/{applicationId}/sessions:
+    post:
+      tags: [agent-sessions]
+      operationId: startAgentApplicationSession
+      summary: Start an agent session on an application
+      description: 开启会话（agent.use 能力；返回绑定会话）
+      parameters:
+        - name: applicationId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '201':
+          description: 会话已创建
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/AgentSession'
+                  - $ref: '#/components/schemas/Envelope'
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+  /api/agent-sessions/{sessionId}:
+    get:
+      tags: [agent-sessions]
+      operationId: getAgentSession
+      summary: Get agent session detail
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: 会话详情
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/AgentSession'
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
+  /api/agent-sessions/{sessionId}/chat:
+    post:
+      tags: [agent-sessions]
+      operationId: chatAgentSession
+      summary: Send a chat message on an agent session
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [query]
+              properties:
+                query: { type: string, maxLength: 10000 }
+                conversation_id: { type: string, maxLength: 200 }
+                response_mode: { type: string, enum: [answer, answer_with_sources] }
+      responses:
+        '200':
+          description: 问答结果
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/AgentChatResult'
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+  /api/agent-sessions/{sessionId}/chat/stream:
+    post:
+      tags: [agent-sessions]
+      operationId: streamAgentSessionChat
+      summary: Stream a chat answer over SSE
+      description: SSE 流式问答（text/event-stream；message.start/delta/事件序列与 conversations 流一致）
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [query]
+              properties:
+                query: { type: string, maxLength: 10000 }
+                conversation_id: { type: string, maxLength: 200 }
+                response_mode: { type: string, enum: [answer, answer_with_sources] }
+      responses:
+        '200':
+          description: text/event-stream
+          content:
+            text/event-stream:
+              schema: { type: string }
+        '404': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+  /api/agent-sessions/{sessionId}/references/validate:
+    post:
+      tags: [agent-sessions]
+      operationId: validateAgentSessionReferences
+      summary: Validate asset references for a session
+      description: 校验 1..50 条 asset+version 引用（会话绑定的 agent 身份执行 asset.read）
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [references]
+              properties:
+                references:
+                  type: array
+                  minItems: 1
+                  maxItems: 50
+                  items:
+                    type: object
+                    required: [asset_id, asset_version_id]
+                    properties:
+                      asset_id: { type: string, format: uuid }
+                      asset_version_id: { type: string, format: uuid }
+      responses:
+        '200':
+          description: 校验结果
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    properties:
+                      references:
+                        type: array
+                        items: { $ref: '#/components/schemas/ValidatedReference' }
+                      rejected_count: { type: integer }
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+  /api/agent-sessions/{sessionId}/runs:
+    post:
+      tags: [agent-runs]
+      operationId: createAgentSessionRun
+      summary: Start a react-mode run on a session
+      description: 在活跃会话上创建 react 运行（202 受理；workspace 必须启用该应用）
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [workspace_id, query]
+              properties:
+                workspace_id: { type: string, format: uuid }
+                query: { type: string, maxLength: 10000 }
+                history:
+                  type: array
+                  maxItems: 20
+                  items:
+                    type: object
+                    required: [role, content]
+                    properties:
+                      role: { type: string, enum: [user, assistant] }
+                      content: { type: string, maxLength: 10000 }
+      responses:
+        '202':
+          description: 运行已受理
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/AgentRun'
+                  - $ref: '#/components/schemas/Envelope'
+        '403': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+  /api/agent-sessions/{sessionId}/cancel:
+    post:
+      tags: [agent-sessions]
+      operationId: cancelAgentSession
+      summary: Revoke an active agent session
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: 已吊销
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    properties:
+                      session_id: { type: string, format: uuid }
+                      status: { type: string }
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+  /api/agent-runs/{runId}:
+    get:
+      tags: [agent-runs]
+      operationId: getAgentRun
+      summary: Get agent run detail with output snapshot
+      parameters:
+        - name: runId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: 运行详情
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    properties:
+                      run: { $ref: '#/components/schemas/AgentRun' }
+                      output: { type: object, additionalProperties: true, nullable: true }
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
+  /api/agent-runs/{runId}/resume:
+    post:
+      tags: [agent-runs]
+      operationId: resumeAgentRun
+      summary: Approve or reject a pending interaction
+      parameters:
+        - name: runId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [interaction_id, approved]
+              properties:
+                interaction_id: { type: string }
+                approved: { type: boolean }
+                reason: { type: string, maxLength: 500 }
+      responses:
+        '202':
+          description: 已恢复
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/AgentRun'
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+  /api/agent-runs/{runId}/cancel:
+    post:
+      tags: [agent-runs]
+      operationId: cancelAgentRun
+      summary: Request cancellation of an agent run
+      parameters:
+        - name: runId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '204':
+          description: 取消已请求
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/agent-runs/{runId}/events:
+    get:
+      tags: [agent-runs]
+      operationId: streamAgentRunEvents
+      summary: Stream run events over SSE
+      description: SSE 事件流（text/event-stream；Last-Event-ID 支持续传）
+      parameters:
+        - name: runId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: text/event-stream
+          content:
+            text/event-stream:
+              schema: { type: string }
+        '404': { $ref: '#/components/responses/Error' }
+  /api/task-runs/{runId}:
+    get:
+      tags: [automation]
+      operationId: getTaskRun
+      summary: Get automation task run detail
+      parameters:
+        - name: runId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: 运行详情
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/TaskRun'
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
+  /api/task-runs/{runId}/attempts:
+    get:
+      tags: [automation]
+      operationId: listTaskRunAttempts
+      summary: List attempts of a task run
+      parameters:
+        - name: runId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: 尝试记录列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            attempt_no: { type: integer }
+                            status: { type: string }
+                            started_at: { type: string, format: date-time, nullable: true }
+                            finished_at: { type: string, format: date-time, nullable: true }
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
+  /api/task-runs/{runId}/cancel:
+    post:
+      tags: [automation]
+      operationId: cancelTaskRun
+      summary: Cancel a task run
+      parameters:
+        - name: runId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '204':
+          description: 已取消
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/task-runs/{runId}/events:
+    get:
+      tags: [automation]
+      operationId: streamTaskRunEvents
+      summary: Stream task run events over SSE
+      description: SSE 事件流（text/event-stream；Last-Event-ID 支持续传）
+      parameters:
+        - name: runId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: text/event-stream
+          content:
+            text/event-stream:
+              schema: { type: string }
+        '404': { $ref: '#/components/responses/Error' }
   /api/workspaces/{workspaceId}/conversations:
     get:
       tags: [conversations]
@@ -3224,6 +4468,1006 @@ paths:
                   - type: object
                   - $ref: '#/components/schemas/Envelope'
         '404': { $ref: '#/components/responses/Error' }
+  /api/workspaces/{workspaceId}/assets/imports:
+    post:
+      tags: [transfer]
+      operationId: startImport
+      summary: Start a bulk asset import job
+      description: 批量导入（JSON 数组或 CSV；?format=json|csv 显式指定，否则按 body 嗅探）
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - name: format
+          in: query
+          schema: { type: string, enum: [json, csv] }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items: { type: object, additionalProperties: true }
+          text/csv:
+            schema: { type: string }
+      responses:
+        '202':
+          description: 任务已受理
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ImportJob'
+                  - $ref: '#/components/schemas/Envelope'
+        '422': { $ref: '#/components/responses/Error' }
+  /api/import-jobs/{jobId}:
+    get:
+      tags: [transfer]
+      operationId: getImportJob
+      summary: Get import job detail
+      parameters:
+        - name: jobId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: 任务详情（含 summary）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ImportJob'
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
+  /api/import-jobs/{jobId}/rows:
+    get:
+      tags: [transfer]
+      operationId: listImportJobRows
+      summary: List row-level results of an import job
+      parameters:
+        - name: jobId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: status
+          in: query
+          schema: { type: string, enum: [succeeded, failed] }
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: 行级结果列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            row_no: { type: integer }
+                            status: { type: string }
+                            error: { type: string, nullable: true }
+                            asset_id: { type: string, format: uuid, nullable: true }
+                  - $ref: '#/components/schemas/CursorPage'
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
+  /api/import-jobs/{jobId}/errors.csv:
+    get:
+      tags: [transfer]
+      operationId: downloadImportJobErrorsCsv
+      summary: Download failed rows as CSV
+      parameters:
+        - name: jobId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: 失败行 CSV
+          content:
+            text/csv:
+              schema: { type: string }
+        '404': { $ref: '#/components/responses/Error' }
+  /api/workspaces/{workspaceId}/assets/exports:
+    post:
+      tags: [transfer]
+      operationId: startExport
+      summary: Start a bulk asset export job
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [resource_model_id]
+              properties:
+                resource_model_id: { type: string, format: uuid }
+                filters: { type: object, additionalProperties: true }
+                format: { type: string }
+      responses:
+        '202':
+          description: 任务已受理
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ExportJob'
+                  - $ref: '#/components/schemas/Envelope'
+        '422': { $ref: '#/components/responses/Error' }
+  /api/export-jobs/{jobId}:
+    get:
+      tags: [transfer]
+      operationId: getExportJob
+      summary: Get export job detail
+      parameters:
+        - name: jobId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: 任务详情
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ExportJob'
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
+  /api/export-jobs/{jobId}/download:
+    get:
+      tags: [transfer]
+      operationId: downloadExport
+      summary: Download the export artifact
+      parameters:
+        - name: jobId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: 导出文件流
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/deletion-jobs/{jobId}:
+    get:
+      tags: [transfer]
+      operationId: getDeletionJob
+      summary: Get deletion job detail
+      parameters:
+        - name: jobId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: 任务详情
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/DeletionJob'
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
+  /api/workspaces/{workspaceId}/notifications:
+    get:
+      tags: [notifications]
+      operationId: listNotifications
+      summary: List workspace notifications
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - name: unread
+          in: query
+          schema: { type: boolean }
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: 通知列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/Notification' }
+                  - $ref: '#/components/schemas/CursorPage'
+                  - $ref: '#/components/schemas/Envelope'
+        '403': { $ref: '#/components/responses/Error' }
+  /api/workspaces/{workspaceId}/notifications/unread-count:
+    get:
+      tags: [notifications]
+      operationId: getUnreadNotificationCount
+      summary: Get unread notification count
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+      responses:
+        '200':
+          description: 未读数
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    properties:
+                      count: { type: integer }
+                  - $ref: '#/components/schemas/Envelope'
+        '403': { $ref: '#/components/responses/Error' }
+  /api/notifications/{notificationId}/read:
+    post:
+      tags: [notifications]
+      operationId: markNotificationRead
+      summary: Mark a notification read
+      parameters:
+        - name: notificationId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: 已标记
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    properties:
+                      status: { type: string }
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+  /api/workspaces/{workspaceId}/notifications/read-all:
+    post:
+      tags: [notifications]
+      operationId: markAllNotificationsRead
+      summary: Mark all workspace notifications read
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '204':
+          description: 已全部标记
+        '403': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+  /api/workspaces/{workspaceId}/notifications/stream:
+    get:
+      tags: [notifications]
+      operationId: streamNotifications
+      summary: Stream notifications over SSE
+      description: SSE 事件流（text/event-stream；Last-Event-ID 支持续传）
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+      responses:
+        '200':
+          description: text/event-stream
+          content:
+            text/event-stream:
+              schema: { type: string }
+        '403': { $ref: '#/components/responses/Error' }
+  /api/workspaces/{workspaceId}/resource-models:
+    get:
+      tags: [resource-models]
+      operationId: listResourceModels
+      summary: List workspace resource models
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: 资源模型列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/ResourceModel' }
+                  - $ref: '#/components/schemas/Envelope'
+        '403': { $ref: '#/components/responses/Error' }
+    post:
+      tags: [resource-models]
+      operationId: createResourceModel
+      summary: Create a resource model with initial version
+      description: 建模型并落首版本（ETag 头返回 schema 校验和）
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [model_key, name, content_kind]
+              properties:
+                model_key: { type: string }
+                name: { type: string }
+                description: { type: string }
+                content_kind: { type: string }
+                initial_version:
+                  type: object
+                  properties:
+                    version: { type: string }
+                    schema: { type: object, additionalProperties: true }
+      responses:
+        '201':
+          description: 已创建
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ResourceModel'
+                  - $ref: '#/components/schemas/Envelope'
+        '403': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+  /api/resource-models/{resourceModelId}:
+    get:
+      tags: [resource-models]
+      operationId: getResourceModel
+      summary: Get resource model detail
+      parameters:
+        - name: resourceModelId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: 模型详情
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ResourceModel'
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
+    patch:
+      tags: [resource-models]
+      operationId: patchResourceModel
+      summary: Patch resource model metadata
+      parameters:
+        - name: resourceModelId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                description: { type: string }
+                status: { type: string }
+      responses:
+        '200':
+          description: 已更新
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ResourceModel'
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+  /api/resource-models/{resourceModelId}/versions:
+    get:
+      tags: [resource-models]
+      operationId: listResourceModelVersions
+      summary: List versions of a resource model
+      parameters:
+        - name: resourceModelId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: 版本列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/ResourceModelVersion' }
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
+    post:
+      tags: [resource-models]
+      operationId: createResourceModelVersion
+      summary: Create a draft version of a resource model
+      parameters:
+        - name: resourceModelId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                version: { type: string }
+                schema: { type: object, additionalProperties: true }
+      responses:
+        '201':
+          description: 草稿版本已创建
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ResourceModelVersion'
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+  /api/resource-model-versions/{versionId}:
+    get:
+      tags: [resource-models]
+      operationId: getResourceModelVersion
+      summary: Get resource model version detail
+      parameters:
+        - name: versionId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: 版本详情
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ResourceModelVersion'
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
+    patch:
+      tags: [resource-models]
+      operationId: patchResourceModelVersion
+      summary: Patch a draft resource model version
+      description: 仅 draft 状态可改（version/schema 字段）
+      parameters:
+        - name: versionId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                version: { type: string }
+                schema: { type: object, additionalProperties: true }
+      responses:
+        '200':
+          description: 已更新
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ResourceModelVersion'
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+  /api/resource-model-versions/{versionId}/validate:
+    post:
+      tags: [resource-models]
+      operationId: validateResourceModelVersion
+      summary: Validate a resource model version
+      parameters:
+        - name: versionId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: 校验结果
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    properties:
+                      valid: { type: boolean }
+                      errors:
+                        type: array
+                        items: { type: string }
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+  /api/resource-model-versions/{versionId}/publish:
+    post:
+      tags: [resource-models]
+      operationId: publishResourceModelVersion
+      summary: Publish a resource model version
+      parameters:
+        - name: versionId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: 已发布
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ResourceModelVersion'
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/resource-model-versions/{versionId}/retire:
+    post:
+      tags: [resource-models]
+      operationId: retireResourceModelVersion
+      summary: Retire a published resource model version
+      parameters:
+        - name: versionId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: 已退役
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ResourceModelVersion'
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/model-endpoints:
+    get:
+      tags: [model-endpoints]
+      operationId: listModelEndpoints
+      summary: List model endpoints
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, default: 100 }
+      responses:
+        '200':
+          description: 模型端点列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/ModelEndpoint' }
+                  - $ref: '#/components/schemas/Envelope'
+    post:
+      tags: [model-endpoints]
+      operationId: createModelEndpoint
+      summary: Register a model endpoint
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ModelEndpointRequest'
+      responses:
+        '201':
+          description: 已创建
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ModelEndpoint'
+                  - $ref: '#/components/schemas/Envelope'
+        '422': { $ref: '#/components/responses/Error' }
+  /api/model-endpoints/{endpointId}:
+    get:
+      tags: [model-endpoints]
+      operationId: getModelEndpoint
+      summary: Get model endpoint detail
+      parameters:
+        - name: endpointId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: 端点详情
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ModelEndpoint'
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
+    put:
+      tags: [model-endpoints]
+      operationId: replaceModelEndpoint
+      summary: Replace a model endpoint configuration
+      parameters:
+        - name: endpointId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ModelEndpointRequest'
+      responses:
+        '200':
+          description: 已替换
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ModelEndpoint'
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+  /api/model-endpoints/{endpointId}/test:
+    post:
+      tags: [model-endpoints]
+      operationId: testModelEndpoint
+      summary: Run a connectivity test against a model endpoint
+      parameters:
+        - name: endpointId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: 测试结果
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    properties:
+                      ok: { type: boolean }
+                      latency_ms: { type: integer, nullable: true }
+                      error: { type: string, nullable: true }
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+  /api/model-endpoints/{endpointId}/enable:
+    post:
+      tags: [model-endpoints]
+      operationId: enableModelEndpoint
+      summary: Enable a model endpoint
+      parameters:
+        - name: endpointId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: 已启用
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ModelEndpoint'
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/model-endpoints/{endpointId}/disable:
+    post:
+      tags: [model-endpoints]
+      operationId: disableModelEndpoint
+      summary: Disable a model endpoint
+      parameters:
+        - name: endpointId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: 已停用
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ModelEndpoint'
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/admin/agent-users:
+    post:
+      tags: [admin]
+      operationId: registerAgentUser
+      summary: Register an agent user with application and API key
+      description: 注册 Agent 身份（agent.manage 能力；返回一次性 api_key，no-store）
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [display_name, api_key_name, application_name, model_endpoint_id, runtime_mode]
+              properties:
+                display_name: { type: string }
+                api_key_name: { type: string }
+                application_name: { type: string }
+                model_endpoint_id: { type: string, format: uuid }
+                runtime_mode: { type: string, enum: [chat, react] }
+                workflow_key: { type: string }
+                capabilities:
+                  type: array
+                  items: { type: string }
+                answer_posture: { type: string }
+                expires_at: { type: string, format: date-time, nullable: true }
+      responses:
+        '201':
+          description: 已注册（api_key 仅此一次返回）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/AgentApplication'
+                  - $ref: '#/components/schemas/Envelope'
+        '403': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+  /api/admin/agent-users/{agentUserId}/onboarding:
+    get:
+      tags: [admin]
+      operationId: getAgentUserOnboarding
+      summary: Get agent user onboarding state
+      parameters:
+        - name: agentUserId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: 引导状态
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    properties:
+                      agent_user_id: { type: string, format: uuid }
+                      display_name: { type: string }
+                      applications:
+                        type: array
+                        items: { $ref: '#/components/schemas/AgentApplication' }
+                      api_keys:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            name: { type: string }
+                            prefix: { type: string }
+                            created_at: { type: string, format: date-time }
+                      policies:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            resource_model_id: { type: string, format: uuid }
+                            actions:
+                              type: array
+                              items: { type: string }
+                  - $ref: '#/components/schemas/Envelope'
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+  /api/admin/agent-users/{agentUserId}/access-policy:
+    put:
+      tags: [admin]
+      operationId: replaceAgentAccessPolicy
+      summary: Replace the model access policy of an agent user
+      parameters:
+        - name: agentUserId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [resource_model_id, actions, data_scope]
+              properties:
+                resource_model_id: { type: string, format: uuid }
+                actions:
+                  type: array
+                  items: { type: string }
+                data_scope: { type: string }
+      responses:
+        '200':
+          description: 已替换
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    properties:
+                      agent_user_id: { type: string, format: uuid }
+                      resource_model_id: { type: string, format: uuid }
+                      actions:
+                        type: array
+                        items: { type: string }
+                      data_scope: { type: string }
+                  - $ref: '#/components/schemas/Envelope'
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+  /api/admin/agent-users/{agentUserId}/api-keys/rotate:
+    post:
+      tags: [admin]
+      operationId: rotateAgentAPIKey
+      summary: Rotate the API key of an agent user
+      description: 轮换 API key（返回一次性新 key，no-store）
+      parameters:
+        - name: agentUserId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+                expires_at: { type: string, format: date-time, nullable: true }
+      responses:
+        '200':
+          description: 已轮换（新 key 仅此一次返回）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    properties:
+                      agent_user_id: { type: string, format: uuid }
+                      api_key: { type: string }
+                      api_key_prefix: { type: string }
+                      expires_at: { type: string, format: date-time, nullable: true }
+                  - $ref: '#/components/schemas/Envelope'
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+  /api/admin/agent-users/{agentUserId}/api-keys/revoke-all:
+    post:
+      tags: [admin]
+      operationId: revokeAllAgentAPIKeys
+      summary: Revoke every API key of an agent user
+      parameters:
+        - name: agentUserId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '204':
+          description: 已全部吊销
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+  /api/admin/agent-applications:
+    get:
+      tags: [admin]
+      operationId: adminListAgentApplications
+      summary: List all agent applications (operator view)
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 100 }
+      responses:
+        '200':
+          description: 全量应用列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/AgentApplication' }
+                  - $ref: '#/components/schemas/Envelope'
+        '403': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+  /api/admin/agent-applications/{applicationId}:
+    get:
+      tags: [admin]
+      operationId: adminGetAgentApplication
+      summary: Get an agent application (operator view)
+      parameters:
+        - name: applicationId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: 应用详情
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/AgentApplication'
+                  - $ref: '#/components/schemas/Envelope'
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+  /api/admin/agent-applications/{applicationId}/status:
+    patch:
+      tags: [admin]
+      operationId: adminSetAgentApplicationStatus
+      summary: Set agent application status (operator)
+      parameters:
+        - name: applicationId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, enum: [active, disabled] }
+      responses:
+        '200':
+          description: 已更新
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/AgentApplication'
+                  - $ref: '#/components/schemas/Envelope'
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
 components:
   schemas:
     ConversationList:
@@ -4384,3 +6628,184 @@ components:
         email:
           type: string
           description: 脱敏邮箱（首字符 + *** + @domain）
+    Attachment:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        workspace_id: { type: string, format: uuid }
+        filename: { type: string }
+        media_type: { type: string }
+        size_bytes: { type: integer }
+        checksum: { type: string }
+        status: { type: string }
+        created_by: { type: string, format: uuid }
+        created_at: { type: string, format: date-time }
+    AgentApplication:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        model_endpoint_id: { type: string, format: uuid }
+        runtime_mode: { type: string, enum: [chat, react] }
+        workflow_key: { type: string }
+        capabilities:
+          type: array
+          items: { type: string }
+        answer_posture: { type: string }
+        status: { type: string, enum: [active, disabled] }
+        agent_user_id: { type: string, format: uuid }
+        display_name: { type: string }
+        created_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time, nullable: true }
+    AgentSession:
+      type: object
+      properties:
+        session_id: { type: string, format: uuid }
+        agent_application_id: { type: string, format: uuid }
+        status: { type: string, enum: [active, revoked, completed] }
+        model_endpoint_id: { type: string, format: uuid }
+        model_endpoint_revision: { type: integer }
+        provider_type: { type: string }
+        model_name: { type: string }
+        runtime_mode: { type: string }
+        expires_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+        completed_at: { type: string, format: date-time, nullable: true }
+    AgentRun:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        organization_id: { type: string, format: uuid }
+        workspace_id: { type: string, format: uuid }
+        agent_application_id: { type: string, format: uuid }
+        session_id: { type: string, format: uuid }
+        model_endpoint_id: { type: string, format: uuid }
+        model_revision: { type: integer }
+        runtime_mode: { type: string }
+        workflow_key: { type: string }
+        workflow_code_version: { type: integer }
+        status: { type: string }
+        current_node: { type: string }
+        checkpoint_id: { type: string }
+        checkpoint_sequence: { type: integer }
+        waiting_interaction_id: { type: string }
+        created_at: { type: string, format: date-time }
+    AgentChatResult:
+      type: object
+      properties:
+        answer: { type: string }
+        grounded: { type: boolean }
+        conversation_id: { type: string }
+        message_id: { type: string }
+        references:
+          type: array
+          items: { $ref: '#/components/schemas/Citation' }
+        rejected_reference_count: { type: integer }
+    TaskRun:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        organization_id: { type: string, format: uuid }
+        workspace_id: { type: string, format: uuid }
+        status: { type: string }
+        source: { type: string }
+        input: { type: object, additionalProperties: true }
+        output_snapshot: { type: object, additionalProperties: true, nullable: true }
+        created_at: { type: string, format: date-time }
+        finished_at: { type: string, format: date-time, nullable: true }
+    ImportJob:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        workspace_id: { type: string, format: uuid }
+        resource_model_id: { type: string, format: uuid }
+        resource_model_version_id: { type: string, format: uuid }
+        status: { type: string, enum: [pending, running, succeeded, failed] }
+        summary: { type: object, additionalProperties: true }
+        created_by: { type: string, format: uuid }
+        created_at: { type: string, format: date-time }
+    ExportJob:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        workspace_id: { type: string, format: uuid }
+        resource_model_id: { type: string, format: uuid }
+        status: { type: string, enum: [pending, running, succeeded, failed] }
+        format: { type: string }
+        summary: { type: object, additionalProperties: true }
+        created_by: { type: string, format: uuid }
+        created_at: { type: string, format: date-time }
+    DeletionJob:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        workspace_id: { type: string, format: uuid }
+        status: { type: string, enum: [pending, running, succeeded, failed] }
+        summary: { type: object, additionalProperties: true }
+        created_by: { type: string, format: uuid }
+        created_at: { type: string, format: date-time }
+    Notification:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        workspace_id: { type: string, format: uuid }
+        kind: { type: string }
+        payload: { type: object, additionalProperties: true }
+        read_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }
+    ResourceModel:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        workspace_id: { type: string, format: uuid }
+        model_key: { type: string }
+        name: { type: string }
+        description: { type: string }
+        content_kind: { type: string }
+        status: { type: string }
+        current_version: { $ref: '#/components/schemas/ResourceModelVersion' }
+        created_at: { type: string, format: date-time }
+    ResourceModelVersion:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        resource_model_id: { type: string, format: uuid }
+        version: { type: string }
+        schema: { type: object, additionalProperties: true }
+        status: { type: string, enum: [draft, published, retired] }
+        schema_checksum: { type: string }
+        created_by: { type: string, format: uuid }
+        created_at: { type: string, format: date-time }
+    ModelEndpoint:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        organization_id: { type: string, format: uuid }
+        name: { type: string }
+        provider_type: { type: string }
+        base_url: { type: string }
+        model_name: { type: string }
+        current_revision: { type: integer }
+        status: { type: string, enum: [active, disabled] }
+        created_at: { type: string, format: date-time }
+    ModelEndpointRequest:
+      type: object
+      required: [name, provider_type, base_url, model_name]
+      properties:
+        name: { type: string }
+        provider_type: { type: string }
+        base_url: { type: string }
+        model_name: { type: string }
+        api_key: { type: string }
+        secret_ref: { type: string }
+        options:
+          type: object
+          properties:
+            timeout_seconds: { type: integer }
+            max_input_tokens: { type: integer }
+            max_output_tokens: { type: integer }
+            temperature: { type: number, nullable: true }
+            enable_tool_calling: { type: boolean }
+            enable_streaming: { type: boolean }
+            structured_output_mode: { type: string }
+            thinking_mode: { type: string }

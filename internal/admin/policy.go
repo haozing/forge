@@ -22,6 +22,7 @@ type ReplacePolicyInput struct {
 	AgentUserID     string
 	ResourceModelID string
 	Actions         []string
+	DataScope       string
 	IdempotencyKey  string
 }
 
@@ -29,6 +30,7 @@ type PolicyResult struct {
 	AgentUserID     string   `json:"agent_user_id"`
 	ResourceModelID string   `json:"resource_model_id"`
 	Actions         []string `json:"actions"`
+	DataScope       string   `json:"data_scope"`
 }
 
 var supportedAgentActions = map[string]struct{}{
@@ -39,12 +41,26 @@ var supportedAgentActions = map[string]struct{}{
 	"archive": {},
 }
 
+var supportedAgentDataScopes = map[string]struct{}{
+	"public":       {},
+	"organization": {},
+	"workspace":    {},
+}
+
 func (s Service) ReplaceAgentModelPolicy(ctx context.Context, principal auth.Principal, input ReplacePolicyInput) (PolicyResult, error) {
 	input.AgentUserID = strings.TrimSpace(input.AgentUserID)
 	input.ResourceModelID = strings.TrimSpace(input.ResourceModelID)
 	input.IdempotencyKey = strings.TrimSpace(input.IdempotencyKey)
+	input.DataScope = strings.TrimSpace(input.DataScope)
+	if input.DataScope == "" {
+		// 0017 default: the pre-existing organization band.
+		input.DataScope = "organization"
+	}
 	actions, ok := normalizeActions(input.Actions)
 	if principal.UserType != "member" || !validUUID(input.AgentUserID) || !validUUID(input.ResourceModelID) || !ok || !validIdempotencyKey(input.IdempotencyKey) {
+		return PolicyResult{}, ErrInvalidInput
+	}
+	if _, known := supportedAgentDataScopes[input.DataScope]; !known {
 		return PolicyResult{}, ErrInvalidInput
 	}
 	if s.Store == nil || s.Store.Pool == nil {
@@ -59,7 +75,8 @@ func (s Service) ReplaceAgentModelPolicy(ctx context.Context, principal auth.Pri
 		AgentUserID     string   `json:"agent_user_id"`
 		ResourceModelID string   `json:"resource_model_id"`
 		Actions         []string `json:"actions"`
-	}{input.AgentUserID, input.ResourceModelID, actions})
+		DataScope       string   `json:"data_scope"`
+	}{input.AgentUserID, input.ResourceModelID, actions, input.DataScope})
 	hash := sha256.Sum256(requestBytes)
 	requestHash := hex.EncodeToString(hash[:])
 	reserved, err := tx.Exec(ctx, `
@@ -108,9 +125,9 @@ func (s Service) ReplaceAgentModelPolicy(ctx context.Context, principal auth.Pri
 	if len(actions) > 0 {
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO content.agent_access_policies
-				(organization_id, workspace_id, agent_user_id, resource_model_id, actions, created_by)
-			VALUES ($1::uuid, NULL, $2::uuid, $3::uuid, $4::text[], $5::uuid)
-		`, principal.OrganizationID, input.AgentUserID, input.ResourceModelID, actions, principal.UserID); err != nil {
+				(organization_id, workspace_id, agent_user_id, resource_model_id, actions, data_scope, created_by)
+			VALUES ($1::uuid, NULL, $2::uuid, $3::uuid, $4::text[], $5, $6::uuid)
+		`, principal.OrganizationID, input.AgentUserID, input.ResourceModelID, actions, input.DataScope, principal.UserID); err != nil {
 			return PolicyResult{}, fmt.Errorf("grant agent model policy: %w", err)
 		}
 	}
@@ -123,7 +140,7 @@ func (s Service) ReplaceAgentModelPolicy(ctx context.Context, principal auth.Pri
 	`, principal.OrganizationID); err != nil {
 		return PolicyResult{}, fmt.Errorf("bump authorization policy revision: %w", err)
 	}
-	result := PolicyResult{AgentUserID: input.AgentUserID, ResourceModelID: input.ResourceModelID, Actions: actions}
+	result := PolicyResult{AgentUserID: input.AgentUserID, ResourceModelID: input.ResourceModelID, Actions: actions, DataScope: input.DataScope}
 	responseBytes, _ := json.Marshal(result)
 	metadataBytes, _ := json.Marshal(result)
 	if _, err := tx.Exec(ctx, `

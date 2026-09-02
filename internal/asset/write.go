@@ -161,7 +161,7 @@ func (s Service) Create(ctx context.Context, principal auth.Principal, allowedMo
 	}
 	assetID, versionID, versionNo, err := createAssetWithFirstVersionTx(ctx, tx,
 		principal.OrganizationID, workspaceID, input.ResourceModelID, modelVersionID,
-		rawInputID, OriginHuman, derefString(input.Title), "", derefString(input.Markdown),
+		rawInputID, OriginAIGenerated, derefString(input.Title), "", derefString(input.Markdown),
 		fields, nil, "", principal.UserID)
 	if err != nil {
 		return AssetResult{}, err

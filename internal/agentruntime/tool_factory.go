@@ -401,26 +401,48 @@ func (f DomainToolFactory) createRelation(ctx context.Context, scope ReActToolSc
 	if !map[string]bool{"related_to": true, "references": true, "derived_from": true, "cites": true, "continues_from": true}[relationType] {
 		return nil, errors.New("unsupported relation type")
 	}
-	var relationID string
-	err := f.Store.Pool.QueryRow(ctx, `
-		INSERT INTO asset.asset_relations
-			(organization_id, source_asset_version_id, target_asset_version_id, relation_type, created_by)
-		SELECT $1::uuid, source.current_working_version_id, target.current_working_version_id, $4, $5::uuid
-		FROM asset.assets source, asset.assets target
-		WHERE source.id = $2::uuid AND target.id = $3::uuid
-		  AND source.organization_id = $1::uuid AND target.organization_id = $1::uuid
-		  AND source.workspace_id = $6::uuid AND target.workspace_id = $6::uuid
-		  AND source.resource_model_id::text = ANY($7::text[])
-		  AND target.resource_model_id::text = ANY($7::text[])
-		ON CONFLICT (source_asset_version_id, target_asset_version_id, relation_type)
-		DO UPDATE SET relation_type = EXCLUDED.relation_type
-		RETURNING id::text
-	`, scope.OrganizationID, stringValue(arguments["source_asset_id"]), stringValue(arguments["target_asset_id"]),
-		relationType, principal.UserID, scope.WorkspaceID, allowed).Scan(&relationID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, errors.New("relation assets were not found or authorized")
+	// AI-proposed relations park on the source asset's draft (source='ai'):
+	// sealed versions reject direct asset_relations inserts (sealed guard),
+	// and the draft commit transaction is the only materialization path.
+	// The revision bump keeps the draft dirty so the parked edge cannot be
+	// short-circuited by a clean-draft commit.
+	commandTag, err := f.Store.Pool.Exec(ctx, `
+		WITH parked AS (
+			INSERT INTO asset.asset_draft_relations
+				(organization_id, workspace_id, asset_draft_id, asset_id, target_asset_id,
+				 relation_type, source, confidence, citation, added_by)
+			SELECT source.organization_id, source.workspace_id, d.id, source.id, target.id,
+			       $4, 'ai', 0.8, '{}'::jsonb, $5::uuid
+			FROM asset.assets source
+			JOIN asset.asset_drafts d
+			  ON d.organization_id = source.organization_id AND d.asset_id = source.id
+			JOIN asset.assets target
+			  ON target.organization_id = source.organization_id
+			 AND target.workspace_id = source.workspace_id
+			 AND target.resource_model_id::text = ANY($3::text[])
+			WHERE source.organization_id = $1::uuid AND source.id = $2::uuid
+			  AND source.workspace_id = $6::uuid
+			  AND source.resource_model_id::text = ANY($3::text[])
+			  AND source.publication_status <> 'archived'
+			ON CONFLICT (asset_draft_id, target_asset_id, relation_type) DO NOTHING
+			RETURNING asset_draft_id
+		)
+		UPDATE asset.asset_drafts d
+		SET revision = d.revision + 1
+		WHERE d.id IN (SELECT asset_draft_id FROM parked)
+	`, scope.OrganizationID, stringValue(arguments["source_asset_id"]), allowed,
+		relationType, principal.UserID, scope.WorkspaceID)
+	if err != nil {
+		return nil, err
 	}
-	return map[string]any{"relation_id": relationID, "relation_type": relationType}, err
+	if commandTag.RowsAffected() == 0 {
+		return nil, errors.New("relation assets were not found, authorized, or already parked")
+	}
+	return map[string]any{
+		"status":        "parked_on_draft",
+		"relation_type": relationType,
+		"note":          "the relation materializes when the source asset's draft is committed",
+	}, nil
 }
 
 func boundedInt(value any, fallback, minimum, maximum int) int {

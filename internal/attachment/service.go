@@ -33,6 +33,7 @@ var ErrInvalidUpload = errors.New("invalid attachment upload")
 var ErrUploadTooLarge = errors.New("attachment is too large")
 var ErrForbidden = errors.New("attachment access denied")
 var ErrNotClean = errors.New("attachment is not clean")
+var ErrAssetArchived = errors.New("asset is archived")
 
 type Service struct {
 	Store        *store.Store
@@ -399,6 +400,15 @@ func (s Service) Link(ctx context.Context, principal auth.Principal, attachmentI
 	if err := s.validateStore(); err != nil {
 		return err
 	}
+	// Archived assets freeze every draft write — linking must not dirty them
+	// (doc §5.4).
+	var archived bool
+	if err := s.Store.Pool.QueryRow(ctx, `
+		SELECT (publication_status = 'archived') FROM asset.assets
+		WHERE organization_id = $1::uuid AND id = $2::uuid AND deleted_at IS NULL
+	`, principal.OrganizationID, assetID).Scan(&archived); err == nil && archived {
+		return ErrAssetArchived
+	}
 	// Cover eligibility (二期 §6): clean image attachments within 5MB; one
 	// cover per draft (the unique index on versions is the final backstop).
 	extraClause := ""
@@ -423,6 +433,7 @@ func (s Service) Link(ctx context.Context, principal auth.Principal, attachmentI
 			JOIN asset.assets a ON a.organization_id = d.organization_id AND a.id = d.asset_id
 			WHERE at.organization_id = $1::uuid AND at.id = $2::uuid
 			  AND a.id = $4::uuid
+			  AND a.publication_status <> 'archived'
 			  AND at.deleted_at IS NULL AND at.status = 'clean'
 			  AND (at.expires_at IS NULL OR at.expires_at > now())`+extraClause+`
 			ON CONFLICT (asset_draft_id, attachment_id) DO UPDATE SET role = EXCLUDED.role

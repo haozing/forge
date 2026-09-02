@@ -3,6 +3,7 @@ package httpapi
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 
@@ -15,8 +16,83 @@ func writeAttachmentError(w http.ResponseWriter, err error, fallback string) {
 		writeError(w, http.StatusNotFound, "attachment_not_found")
 	case errors.Is(err, attachment.ErrInvalidUpload):
 		writeError(w, http.StatusUnprocessableEntity, "invalid_attachment")
+	case errors.Is(err, attachment.ErrUploadTooLarge):
+		writeError(w, http.StatusRequestEntityTooLarge, "attachment_too_large")
+	case errors.Is(err, attachment.ErrForbidden):
+		writeError(w, http.StatusForbidden, "attachment_forbidden")
+	case errors.Is(err, attachment.ErrAssetArchived):
+		writeError(w, http.StatusConflict, "asset_archived")
 	default:
 		writeError(w, http.StatusInternalServerError, fallback)
+	}
+}
+
+// uploadAttachment is the member-facing multipart upload endpoint (doc §11.1
+// "附件上传和下载"): one file part named "file" becomes a standalone scanning
+// attachment; callers bind it to an asset draft through the link endpoint.
+func uploadAttachment(deps Dependencies) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
+			return
+		}
+		principal, ok := requireMemberSession(w, r, deps)
+		if !ok {
+			return
+		}
+		if _, ok := requestIdempotencyKey(w, r); !ok {
+			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
+			return
+		}
+		workspaceID := r.PathValue("workspaceId")
+		if !requirePathUUID(w, workspaceID) {
+			return
+		}
+		maxBytes := deps.AttachmentService.MaxBytes
+		if maxBytes <= 0 {
+			maxBytes = 50 * 1024 * 1024
+		}
+		// The multipart envelope adds a little overhead over the raw object.
+		r.Body = http.MaxBytesReader(w, r.Body, maxBytes+(1<<20))
+		if err := r.ParseMultipartForm(8 << 20); err != nil {
+			writeError(w, http.StatusUnprocessableEntity, "invalid_multipart_body")
+			return
+		}
+		defer func() {
+			if r.MultipartForm != nil {
+				_ = r.MultipartForm.RemoveAll()
+			}
+		}()
+		files := r.MultipartForm.File["file"]
+		if len(files) != 1 {
+			writeError(w, http.StatusUnprocessableEntity, "file_part_required")
+			return
+		}
+		header := files[0]
+		if header.Size <= 0 {
+			writeError(w, http.StatusUnprocessableEntity, "invalid_attachment")
+			return
+		}
+		file, err := header.Open()
+		if err != nil {
+			writeError(w, http.StatusUnprocessableEntity, "invalid_attachment")
+			return
+		}
+		defer file.Close()
+		seeker, ok := file.(interface {
+			io.ReadSeeker
+		})
+		if !ok {
+			writeError(w, http.StatusUnprocessableEntity, "invalid_attachment")
+			return
+		}
+		item, err := deps.AttachmentService.Upload(r.Context(), principal, workspaceID,
+			header.Filename, header.Header.Get("Content-Type"), header.Size, seeker)
+		if err != nil {
+			writeAttachmentError(w, err, "attachment_upload_failed")
+			return
+		}
+		writeJSON(w, http.StatusCreated, item)
 	}
 }
 

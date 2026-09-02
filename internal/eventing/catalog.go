@@ -20,7 +20,6 @@ const (
 	EventPublicationApproved  = "publication_request.approved"
 	EventPublicationRejected  = "publication_request.rejected"
 	EventPublicationCancelled = "publication_request.cancelled"
-	EventPublicationCommented = "publication_request.commented"
 )
 
 // Tag aggregate facts.
@@ -43,7 +42,6 @@ const (
 
 // Agent access policy facts.
 const (
-	EventAgentAccessPolicyChanged = "agent_access_policy.changed"
 )
 
 // PublicSite aggregate facts (phase 5 extends the catalog with site changes;
@@ -73,7 +71,6 @@ const (
 	EventOrganizationMemberRoleChanged   = "organization.member_role_changed"
 	EventOrganizationMemberStatusChanged = "organization.member_status_changed"
 	EventWorkspaceCreated                = "workspace.created"
-	EventWorkspaceUpdated                = "workspace.updated"
 	EventWorkspaceArchived               = "workspace.archived"
 	EventWorkspaceRestored               = "workspace.restored"
 	EventIdentityPasswordChanged         = "identity.password_changed"
@@ -132,13 +129,6 @@ type PublicationRequestPayload struct {
 	CancelReason   string `json:"cancel_reason,omitempty"`
 }
 
-// PublicationCommentedPayload carries the comment fact.
-type PublicationCommentedPayload struct {
-	RequestID   string `json:"request_id"`
-	CommentID   string `json:"comment_id"`
-	WorkspaceID string `json:"workspace_id"`
-}
-
 // TagCreatedPayload / TagArchivedPayload / TagRestoredPayload share the shape.
 type TagLifecyclePayload struct {
 	TagID       string `json:"tag_id"`
@@ -167,13 +157,6 @@ type WorkspaceMembershipChangedPayload struct {
 	OldRole     string `json:"old_role,omitempty"`
 	NewRole     string `json:"new_role,omitempty"`
 	Operation   string `json:"operation"` // granted / role_changed / revoked / left
-}
-
-// AgentAccessPolicyChangedPayload marks an Agent policy change.
-type AgentAccessPolicyChangedPayload struct {
-	PolicyID    string `json:"policy_id"`
-	AgentUserID string `json:"agent_user_id"`
-	WorkspaceID string `json:"workspace_id,omitempty"`
 }
 
 // SiteChangedPayload marks a public site configuration or lifecycle change.
@@ -222,14 +205,12 @@ func KnownEvents() map[string]int {
 		EventPublicationApproved:          PayloadVersionV1,
 		EventPublicationRejected:          PayloadVersionV1,
 		EventPublicationCancelled:         PayloadVersionV1,
-		EventPublicationCommented:         PayloadVersionV1,
 		EventTagCreated:                   PayloadVersionV1,
 		EventTagUpdated:                   PayloadVersionV1,
 		EventTagArchived:                  PayloadVersionV1,
 		EventTagRestored:                  PayloadVersionV1,
 		EventResourceModelPolicyPublished: PayloadVersionV1,
 		EventWorkspaceMembershipChanged:   PayloadVersionV1,
-		EventAgentAccessPolicyChanged:     PayloadVersionV1,
 		EventSiteChanged:                  PayloadVersionV1,
 		EventSiteBindingChanged:           PayloadVersionV1,
 		EventSiteCommentCreated:           PayloadVersionV1,

@@ -24,7 +24,6 @@ import (
 	"agentchunzhi/internal/auth"
 	"agentchunzhi/internal/authz"
 	"agentchunzhi/internal/automation"
-	"agentchunzhi/internal/container"
 	contentservice "agentchunzhi/internal/content"
 	"agentchunzhi/internal/conversation"
 	"agentchunzhi/internal/delivery"
@@ -64,7 +63,6 @@ type Dependencies struct {
 	MemberAssetService   assetservice.MemberService
 	TransferService      assetservice.TransferService
 	ReviewService        review.Service
-	ContainerService     container.Service
 	ConversationService  conversation.Service
 	AutomationService    automation.Service
 	// Phase 1 member identity and organization governance services.
@@ -93,7 +91,6 @@ type Dependencies struct {
 	// for rate-limit keys; AllowedOrigins drives the CSRF Origin policy.
 	TrustedProxyCIDRs []string
 	AllowedOrigins    []string
-	AppEnv            string
 	// Phase 3 retrieval readiness: SemanticAvailable mirrors the provider
 	// registry result and ManifestFingerprint is the embedding manifest
 	// fingerprint compared against worker heartbeats by /readyz.
@@ -148,6 +145,7 @@ type registerAgentRequest struct {
 type replaceAgentModelPolicyRequest struct {
 	ResourceModelID string   `json:"resource_model_id"`
 	Actions         []string `json:"actions"`
+	DataScope       string   `json:"data_scope"`
 }
 
 type rotateAgentAPIKeyRequest struct {
@@ -880,6 +878,7 @@ func replaceAgentModelPolicy(deps Dependencies) http.HandlerFunc {
 			AgentUserID:     agentUserID,
 			ResourceModelID: input.ResourceModelID,
 			Actions:         input.Actions,
+			DataScope:       input.DataScope,
 			IdempotencyKey:  idempotencyKey,
 		})
 		if errors.Is(err, adminservice.ErrInvalidInput) {
@@ -1908,6 +1907,72 @@ func archiveAsset(deps Dependencies) http.HandlerFunc {
 			return
 		}
 		writeJSON(w, http.StatusOK, result)
+	}
+}
+
+type agentSubmitPublicationInput struct {
+	AssetID       string `json:"asset_id"`
+	DraftRevision *int64 `json:"draft_revision"`
+	Comment       string `json:"comment"`
+}
+
+// submitPublicationRequest lets an agent submit an approval-policy asset for
+// review (doc §3.5/§11.1): the AgentAccessPolicy must grant publication.submit
+// and asset.write; the capability scope must carry publication.submit. Agents
+// still never approve or reject.
+func submitPublicationRequest(deps Dependencies) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
+			return
+		}
+		principal, err := deps.Authenticator.Authenticate(r.Context(), r)
+		if err != nil {
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		if !requireAgentCapability(w, principal, "publication.submit") {
+			return
+		}
+		workspaceID := r.PathValue("workspaceId")
+		if !agentquery.ValidUUID(workspaceID) {
+			writeError(w, http.StatusUnprocessableEntity, "invalid_workspace_id")
+			return
+		}
+		var input agentSubmitPublicationInput
+		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16*1024))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&input); err != nil || !agentquery.ValidUUID(input.AssetID) || input.DraftRevision == nil || *input.DraftRevision <= 0 {
+			writeError(w, http.StatusUnprocessableEntity, "invalid_publication_submission")
+			return
+		}
+		request, err := deps.ReviewService.Submit(r.Context(), principal, workspaceID, input.AssetID, *input.DraftRevision, r.Header.Get("Idempotency-Key"), input.Comment)
+		if err != nil {
+			writePublicationSubmitError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusCreated, request)
+	}
+}
+
+func writePublicationSubmitError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, review.ErrForbidden):
+		writeError(w, http.StatusForbidden, "action_not_allowed")
+	case errors.Is(err, review.ErrNotFound):
+		writeError(w, http.StatusNotFound, "asset_not_found")
+	case errors.Is(err, review.ErrInvalidInput):
+		writeError(w, http.StatusUnprocessableEntity, "invalid_publication_submission")
+	case errors.Is(err, review.ErrConflict):
+		writeError(w, http.StatusConflict, "publication_request_not_pending")
+	case errors.Is(err, assetservice.ErrConfirmationRequired):
+		writeError(w, http.StatusConflict, "human_confirmation_required")
+	case errors.Is(err, assetservice.ErrAttachmentNotClean):
+		writeError(w, http.StatusConflict, "attachments_not_clean")
+	case errors.Is(err, assetservice.ErrRequiredFieldMissing):
+		writeError(w, http.StatusConflict, "required_field_missing")
+	default:
+		writeError(w, http.StatusInternalServerError, "publication_submit_failed")
 	}
 }
 

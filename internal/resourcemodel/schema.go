@@ -313,11 +313,17 @@ func validateField(key string, definition map[string]any, path string, issues *[
 	if fieldType == "" {
 		*issues = append(*issues, issue(path+".type", "required", "field type is required"))
 	}
+	// The 2026-09-02 over-design sweep converged the vocabulary to the types
+	// the product actually exercises (builtin models use enum/integer/
+	// string/date). Retired zero-semantics types — block, json, currency,
+	// relation, person, department, attachment, image, video, location,
+	// calculated — had no downstream consumer (query families, JSON-value
+	// validation and extraction schemas all default them away), and
+	// department contradicted doc §15 (no departments in v2).
 	allowedTypes := map[string]struct{}{
-		"string": {}, "text": {}, "markdown": {}, "block": {}, "integer": {}, "number": {}, "currency": {},
-		"boolean": {}, "date": {}, "datetime": {}, "enum": {}, "multiselect": {}, "object": {}, "json": {},
-		"array": {}, "asset_reference": {}, "relation": {}, "person": {}, "department": {},
-		"attachment": {}, "image": {}, "video": {}, "location": {}, "calculated": {},
+		"string": {}, "text": {}, "markdown": {}, "integer": {}, "number": {},
+		"boolean": {}, "date": {}, "datetime": {}, "enum": {}, "multiselect": {},
+		"object": {}, "array": {}, "asset_reference": {},
 	}
 	if _, ok := allowedTypes[fieldType]; fieldType != "" && !ok {
 		*issues = append(*issues, issue(path+".type", "unsupported_type", "field type is not supported"))
@@ -330,23 +336,6 @@ func validateField(key string, definition map[string]any, path string, issues *[
 	if unique, exists := definition["unique"]; exists {
 		if _, ok := unique.(bool); !ok {
 			*issues = append(*issues, issue(path+".unique", "invalid_boolean", "unique must be boolean"))
-		}
-	}
-	if calculated, exists := definition["calculated"]; exists {
-		if _, ok := calculated.(bool); !ok {
-			*issues = append(*issues, issue(path+".calculated", "invalid_boolean", "calculated must be boolean"))
-		}
-	}
-	if fieldType == "calculated" {
-		expression, ok := definition["expression"].(string)
-		if !ok || strings.TrimSpace(expression) == "" {
-			*issues = append(*issues, issue(path+".expression", "required", "calculated fields require an expression"))
-		}
-	}
-	if fieldType == "currency" {
-		currency, ok := definition["currency"].(string)
-		if !ok || strings.TrimSpace(currency) == "" {
-			*issues = append(*issues, issue(path+".currency", "required", "currency fields require a currency code"))
 		}
 	}
 	if fieldType == "object" {

@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -243,9 +244,14 @@ func persistDraftPatch(ctx context.Context, tx pgx.Tx, organizationID string, dr
 type RelationMaterial struct {
 	TargetAssetID string
 	RelationType  string
-	Confidence    float64
-	Citation      []byte
-	SuggestionID  string
+	// Source is the asset_relations.source provenance. Empty means 'ai' —
+	// the historical behavior of suggestion-driven commits. Member-driven
+	// relations (asset duplicate) pass 'manual'; the DB CHECK then forces
+	// confidence to NULL.
+	Source      string
+	Confidence  float64
+	Citation    []byte
+	SuggestionID string
 }
 
 // VersionMaterial is the content snapshot a commit turns into an immutable
@@ -486,16 +492,22 @@ func materializeVersionRelationsTx(ctx context.Context, tx pgx.Tx, material Vers
 		if len(citation) == 0 {
 			citation = []byte("{}")
 		}
+		source := relation.Source
+		if source == "" {
+			source = "ai"
+		}
 		var relationID string
 		err = tx.QueryRow(ctx, `
 			INSERT INTO asset.asset_relations
 				(organization_id, source_asset_version_id, target_asset_version_id,
 				 relation_type, source, confidence, citation, suggestion_id, created_by)
-			VALUES ($1::uuid, $2::uuid, $3::uuid, $4, 'ai', $5, $6::jsonb, NULLIF($7, '')::uuid, $8::uuid)
+			VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $9,
+			        CASE WHEN $9 = 'ai' THEN $5 ELSE NULL END,
+			        $6::jsonb, NULLIF($7, '')::uuid, $8::uuid)
 			ON CONFLICT (source_asset_version_id, target_asset_version_id, relation_type) DO NOTHING
 			RETURNING id::text
 		`, material.OrganizationID, versionID, targetVersionID, relation.RelationType,
-			relation.Confidence, string(citation), relation.SuggestionID, material.CreatedBy).Scan(&relationID)
+			relation.Confidence, string(citation), relation.SuggestionID, material.CreatedBy, source).Scan(&relationID)
 		if errors.Is(err, pgx.ErrNoRows) {
 			materialized = append(materialized, materializedRelation{material: relation})
 			continue
@@ -593,6 +605,38 @@ type CommitResult struct {
 	VersionNo int64
 	Created   bool
 	Asset     LifecycleRow
+}
+
+// CommitDraftForReviewTx materializes the draft inside the caller's
+// transaction so a publication submission stays atomic end to end. Unlike
+// CommitDraft it accepts agent principals — the WorkspacePolicy agent branch
+// judges asset.write against the AgentAccessPolicy, mirroring the member
+// surface — and it never commits: the review aggregate owns the transaction.
+func (s MemberService) CommitDraftForReviewTx(ctx context.Context, tx pgx.Tx, principal auth.Principal, workspaceID, assetID string, expectedDraftRevision int64) (CommitResult, error) {
+	if s.Store == nil || s.Store.Pool == nil || s.Policy == nil {
+		return CommitResult{}, ErrForbidden
+	}
+	row, err := LoadLifecycleTx(ctx, tx, principal.OrganizationID, assetID)
+	if err != nil {
+		return CommitResult{}, err
+	}
+	if row.WorkspaceID != workspaceID {
+		return CommitResult{}, ErrNotFound
+	}
+	if row.PublicationStatus == PublicationArchived {
+		return CommitResult{}, ErrAssetArchived
+	}
+	if _, err := s.Policy.Require(ctx, principal, workspaceID, row.ResourceModelID, authz.ActionAssetWrite); err != nil {
+		if errors.Is(err, authz.ErrWorkspaceForbidden) || errors.Is(err, authz.ErrWorkspaceNotFound) {
+			return CommitResult{}, ErrForbidden
+		}
+		return CommitResult{}, err
+	}
+	draft, err := LoadDraftTx(ctx, tx, principal.OrganizationID, assetID, strconv.FormatInt(expectedDraftRevision, 10))
+	if err != nil {
+		return CommitResult{}, err
+	}
+	return commitDraftTx(ctx, tx, s.Events, principal, row, draft)
 }
 
 func commitDraftTx(ctx context.Context, tx pgx.Tx, events *eventing.EventStore, principal auth.Principal, row LifecycleRow, draft Draft) (CommitResult, error) {
@@ -723,7 +767,7 @@ func commitDraftTx(ctx context.Context, tx pgx.Tx, events *eventing.EventStore, 
 	`, row.OrganizationID, row.ID, versionID, draft.DraftID); err != nil {
 		return CommitResult{}, fmt.Errorf("backfill processing results: %w", err)
 	}
-	if _, err := CancelPendingRequestsTx(ctx, tx, row.OrganizationID, row.ID, principal.UserID, reviewCancelReasonNewVersion); err != nil {
+	if _, err := CancelPendingRequestsTx(ctx, tx, events, row, principal, reviewCancelReasonNewVersion); err != nil {
 		return CommitResult{}, err
 	}
 	// Re-point the draft at the new snapshot and mark it clean.
@@ -793,11 +837,6 @@ func loadDraftTagIDs(ctx context.Context, tx pgx.Tx, draftID string) ([]string, 
 		ids = append(ids, id)
 	}
 	return ids, rows.Err()
-}
-
-func loadDraftAttachmentIDs(ctx context.Context, tx pgx.Tx, draftID string) ([]string, error) {
-	ids, _, err := loadDraftAttachments(ctx, tx, draftID)
-	return ids, err
 }
 
 // loadDraftAttachments returns the draft's attachment ids and its explicit

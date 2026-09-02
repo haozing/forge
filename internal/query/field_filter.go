@@ -31,19 +31,21 @@ const (
 // families (object, json, block, calculated, relations, media...) never
 // participate in phase 3 queries.
 const (
-	typeFamilyText     = "text"     // text / markdown / url / email / string
-	typeFamilyNumber   = "number"   // integer / number / currency
+	typeFamilyText     = "text"     // text / markdown / string
+	typeFamilyNumber   = "number"   // integer / number
 	typeFamilyTemporal = "temporal" // date / datetime
 	typeFamilyBoolean  = "boolean"
 	typeFamilyEnum     = "enum"
 	typeFamilyArray    = "array" // multiselect / array scalar
 )
 
+// fieldFamily maps the schema type vocabulary onto the query families; the
+// vocabulary is closed in resourcemodel.schema, so these cases are exhaustive.
 func fieldFamily(fieldType string) (string, bool) {
 	switch fieldType {
-	case "text", "markdown", "url", "email", "string":
+	case "text", "markdown", "string":
 		return typeFamilyText, true
-	case "integer", "number", "currency":
+	case "integer", "number":
 		return typeFamilyNumber, true
 	case "date", "datetime":
 		return typeFamilyTemporal, true

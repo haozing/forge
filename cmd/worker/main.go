@@ -25,7 +25,6 @@ import (
 	"agentchunzhi/internal/notification"
 	"agentchunzhi/internal/objectstore"
 	"agentchunzhi/internal/query"
-	"agentchunzhi/internal/resourcemodel"
 	"agentchunzhi/internal/retrieval"
 	"agentchunzhi/internal/site"
 	"agentchunzhi/internal/store"
@@ -225,11 +224,10 @@ func main() {
 	river.AddWorker(workers, &retrieval.ReconcileWorker{Engine: retrievalEngine})
 	river.AddWorker(workers, &retrieval.CleanupWorker{Engine: retrievalEngine})
 	river.AddWorker(workers, &worker.BackgroundJobsWorker{
-		Migrations:  resourcemodel.MigrationProcessor{Store: db, Events: events},
 		Transfers:   asset.TransferProcessor{Store: db, Events: events, Objects: objects, ObjectPrefix: cfg.OSSPrefix},
 		Deletions:   deletion.Processor{Store: db},
 		Automation:  automation.Service{Store: db},
-		Operations:  automation.OperationProcessor{Store: db, Events: events, Transfers: &asset.TransferProcessor{Store: db, Events: events, Objects: objects, ObjectPrefix: cfg.OSSPrefix}, Workflows: workflows.Executor{Registry: workflowRegistry}, Preparation: preparation, ReAct: reactProcessor},
+		Operations:  automation.OperationProcessor{Store: db, Events: events,  Workflows: workflows.Executor{Registry: workflowRegistry}, Preparation: preparation, ReAct: reactProcessor},
 		Attachments: attachment.ScanProcessor{Store: db, Objects: objects},
 		WorkerID:    fmt.Sprintf("background-%d", os.Getpid()),
 		Limit:       20,
@@ -273,13 +271,6 @@ func main() {
 	if err != nil {
 		log.Fatalf("worker River startup failed: %v", err)
 	}
-	// Built-in cron trigger loop (runs alongside the River workers): every 30s
-	// it evaluates enabled automation.jobs with trigger.type='cron' and
-	// enqueues due runs via Service.CreateScheduledRun. Window identity is a
-	// structured idempotency key checked against automation.runs, so ticks,
-	// restarts, or parallel worker processes cannot double-fire one minute.
-	cronScheduler := automation.NewScheduler(automation.NewServiceScheduleEnqueuer(db), log.Printf)
-	go cronScheduler.Run(ctx, automation.DefaultSchedulerInterval)
 	// Phase 3 readiness: register this retrieval worker in
 	// system.worker_heartbeats so the API /readyz can verify a live worker
 	// with a matching manifest fingerprint; the row is removed on exit.

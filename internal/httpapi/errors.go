@@ -84,8 +84,7 @@ type errorDetail struct {
 	Details   map[string]any `json:"details,omitempty"`
 }
 
-// writeError emits the error envelope. Kept compatible with the old
-// call signature so handlers migrate mechanically.
+// writeError emits the error envelope.
 func writeError(w http.ResponseWriter, status int, code string) {
 	writeJSONValue(w, status, errorBody{Error: errorDetail{
 		Code:      code,

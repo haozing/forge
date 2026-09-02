@@ -1,9 +1,7 @@
 package httpapi
 
-// member_session.go — shared member-session and workspace error mapping
-// helpers still used by the legacy routes scheduled for retirement in phases
-// 2-4. The phase 1 identity/workspace handlers they served are retired; see
-// docs/route-retirement-ledger.md.
+// member_session.go — shared member-session gate and workspace error mapping
+// helpers for the member /api surface.
 
 import (
 	"errors"

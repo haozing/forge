@@ -333,7 +333,7 @@ func (s Service) CreateFromWebhook(ctx context.Context, principal auth.Principal
 	}
 	assetID, versionID, versionNo, err := createAssetWithFirstVersionTx(ctx, tx,
 		principal.OrganizationID, workspaceID, resourceModelID, modelVersionID,
-		rawInputID, OriginHuman, derefString(input.Title), "", derefString(input.Markdown),
+		rawInputID, OriginImported, derefString(input.Title), "", derefString(input.Markdown),
 		fields, tagIDs, tag.SourceWebhook, principal.UserID)
 	if err != nil {
 		return replay, false, err

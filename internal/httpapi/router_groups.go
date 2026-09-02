@@ -23,7 +23,6 @@ func newRouter(deps Dependencies) *http.ServeMux {
 	registerSiteRoutes(deps, mux)
 	registerQueryRoutes(deps, mux)
 	registerAttachmentRoutes(deps, mux)
-	registerContainerRoutes(deps, mux)
 	registerConversationRoutes(deps, mux)
 	registerAgentRoutes(deps, mux)
 	registerAutomationRoutes(deps, mux)
@@ -222,6 +221,7 @@ func registerAssetRoutes(deps Dependencies, mux *http.ServeMux) {
 	mux.HandleFunc("/api/workspaces/{workspaceId}/assets", memberAssetsCollection(deps))
 	mux.HandleFunc("/api/assets/{assetId}", assetResource(deps))
 	mux.HandleFunc("/api/assets/{assetId}/lineage", assetLineage(deps))
+	mux.HandleFunc("/api/assets/{assetId}/relations", assetRelations(deps))
 	mux.HandleFunc("/api/assets/{assetId}/versions", assetVersionCollection(deps))
 	mux.HandleFunc("/api/assets/{assetId}/draft", AssetDraft(deps))
 	mux.HandleFunc("/api/assets/{assetId}/commit-draft", CommitDraft(deps))
@@ -229,10 +229,6 @@ func registerAssetRoutes(deps Dependencies, mux *http.ServeMux) {
 	mux.HandleFunc("/api/assets/{assetId}/archive", memberArchiveAsset(deps))
 	mux.HandleFunc("/api/assets/{assetId}/restore", memberRestoreAsset(deps))
 	mux.HandleFunc("/api/assets/{assetId}/duplicate", duplicateAsset(deps))
-	mux.HandleFunc("/api/assets/{assetId}/move", moveAssetToContainer(deps))
-	mux.HandleFunc("/api/assets/{assetId}/document-parent", documentParentResource(deps))
-	mux.HandleFunc("/api/assets/{assetId}/document-children", documentChildren(deps))
-	mux.HandleFunc("/api/assets/{assetId}/containers", assetContainers(deps))
 	mux.HandleFunc("/api/asset-versions/{versionId}", assetVersionResource(deps))
 	mux.HandleFunc("/api/asset-versions/{versionId}/processing", assetVersionProcessing(deps))
 	mux.HandleFunc("/api/asset-versions/{versionId}/confirm", ConfirmVersion(deps))
@@ -298,25 +294,16 @@ func registerQueryRoutes(deps Dependencies, mux *http.ServeMux) {
 	mux.HandleFunc("/api/query-executions/{executionId}", QueryExecution(deps))
 }
 
-// registerAttachmentRoutes holds the member attachment surface: per-version
-// attachment registration, resource detail, linking and downloads.
+// registerAttachmentRoutes holds the member attachment surface: multipart
+// upload, per-version attachment registration, resource detail, linking and
+// downloads.
 func registerAttachmentRoutes(deps Dependencies, mux *http.ServeMux) {
+	mux.HandleFunc("/api/workspaces/{workspaceId}/attachments", uploadAttachment(deps))
 	mux.HandleFunc("/api/asset-versions/{versionId}/attachments", assetVersionAttachments(deps))
 	mux.HandleFunc("/api/attachments/{attachmentId}", attachmentResource(deps))
 	mux.HandleFunc("/api/attachments/{attachmentId}/link", linkAttachment(deps))
 	mux.HandleFunc("/api/attachments/{attachmentId}/download", memberDownloadAttachment(deps))
 	mux.HandleFunc("/api/attachments/{attachmentId}/presigned-download", presignedAttachmentDownload(deps))
-}
-
-// registerContainerRoutes holds the workspace container tree: read the tree,
-// create/rename/move containers and list children/assets.
-func registerContainerRoutes(deps Dependencies, mux *http.ServeMux) {
-	mux.HandleFunc("/api/workspaces/{workspaceId}/containers/tree", containersCollection(deps))
-	mux.HandleFunc("/api/workspaces/{workspaceId}/containers", createContainer(deps))
-	mux.HandleFunc("/api/containers/{containerId}", containerResource(deps))
-	mux.HandleFunc("/api/containers/{containerId}/move", moveContainer(deps))
-	mux.HandleFunc("/api/containers/{containerId}/children", containerChildren(deps))
-	mux.HandleFunc("/api/containers/{containerId}/assets", listContainerAssets(deps))
 }
 
 // registerConversationRoutes holds the note/conversation surface: collections,
@@ -368,21 +355,8 @@ func registerAgentRoutes(deps Dependencies, mux *http.ServeMux) {
 // registerAutomationRoutes holds the scheduled job surface: job CRUD, pause/
 // resume, run-now and the run/attempt inspection endpoints.
 func registerAutomationRoutes(deps Dependencies, mux *http.ServeMux) {
-	mux.HandleFunc("/api/workspaces/{workspaceId}/automation-jobs", automationJobsCollection(deps))
-	mux.HandleFunc("/api/automation-jobs/{jobId}", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodDelete {
-			deleteAutomationJob(deps)(w, r)
-			return
-		}
-		automationJobResource(deps)(w, r)
-	})
-	mux.HandleFunc("/api/automation-jobs/{jobId}/pause", pauseAutomationJob(deps, false))
-	mux.HandleFunc("/api/automation-jobs/{jobId}/resume", pauseAutomationJob(deps, true))
-	mux.HandleFunc("/api/automation-jobs/{jobId}/run-now", createAutomationRun(deps))
-	mux.HandleFunc("/api/automation-jobs/{jobId}/runs", listAutomationRuns(deps))
 	mux.HandleFunc("/api/task-runs/{runId}", getAutomationRun(deps))
 	mux.HandleFunc("/api/task-runs/{runId}/attempts", listAutomationAttempts(deps))
-	mux.HandleFunc("/api/task-runs/{runId}/retry", retryAutomationRun(deps))
 	mux.HandleFunc("/api/task-runs/{runId}/cancel", cancelAutomationRun(deps))
 	mux.HandleFunc("/api/task-runs/{runId}/events", taskRunEvents(deps))
 }
@@ -411,7 +385,7 @@ func registerNotificationRoutes(deps Dependencies, mux *http.ServeMux) {
 }
 
 // registerModelRoutes holds the resource-model registry (versions, validation,
-// publish/retire, migrations) and the model-endpoint registry (test/enable/
+// publish/retire) and the model-endpoint registry (test/enable/
 // disable).
 func registerModelRoutes(deps Dependencies, mux *http.ServeMux) {
 	mux.HandleFunc("/api/workspaces/{workspaceId}/resource-models", resourceModelsCollection(deps))
@@ -421,10 +395,6 @@ func registerModelRoutes(deps Dependencies, mux *http.ServeMux) {
 	mux.HandleFunc("/api/resource-model-versions/{versionId}/validate", validateResourceModelVersion(deps))
 	mux.HandleFunc("/api/resource-model-versions/{versionId}/publish", publishResourceModelVersion(deps))
 	mux.HandleFunc("/api/resource-model-versions/{versionId}/retire", retireResourceModelVersion(deps))
-	mux.HandleFunc("/api/resource-models/{resourceModelId}/migration-previews", previewResourceModelMigration(deps))
-	mux.HandleFunc("/api/resource-models/{resourceModelId}/migrations", startResourceModelMigration(deps))
-	mux.HandleFunc("/api/resource-model-migrations/{migrationId}", getResourceModelMigration(deps))
-	mux.HandleFunc("/api/resource-model-migrations/{migrationId}/cancel", cancelResourceModelMigration(deps))
 	mux.HandleFunc("/api/model-endpoints", modelEndpointCollection(deps))
 	mux.HandleFunc("/api/model-endpoints/{endpointId}", modelEndpointResource(deps))
 	mux.HandleFunc("/api/model-endpoints/{endpointId}/test", testModelEndpoint(deps))
@@ -446,8 +416,8 @@ func registerOpenRoutes(deps Dependencies, mux *http.ServeMux) {
 	mux.HandleFunc("/api/open/assets/{assetId}/publish", publishAsset(deps))
 	mux.HandleFunc("/api/open/assets/{assetId}/archive", archiveAsset(deps))
 	mux.HandleFunc("/api/open/assets/{assetId}/references", assetReferences(deps))
+	mux.HandleFunc("/api/open/workspaces/{workspaceId}/publication-requests", submitPublicationRequest(deps))
 	mux.HandleFunc("/api/open/attachments/{attachmentId}/download", downloadAttachment(deps))
-	mux.HandleFunc("/api/open/automation/runs/{runId}/callback", automationRunCallback(deps))
 }
 
 // registerAdminRoutes holds the operator surface: agent-user registration,

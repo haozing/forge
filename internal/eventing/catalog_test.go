@@ -34,10 +34,10 @@ func TestEveryCatalogEventIsRegisteredAtV1(t *testing.T) {
 		EventAssetVersionCreated, EventAssetPublished, EventAssetArchived,
 		EventAssetRestored, EventAssetVisibilityChanged,
 		EventPublicationSubmitted, EventPublicationApproved, EventPublicationRejected,
-		EventPublicationCancelled, EventPublicationCommented,
+		EventPublicationCancelled,
 		EventTagCreated, EventTagUpdated, EventTagArchived, EventTagRestored,
 		EventResourceModelPolicyPublished, EventWorkspaceMembershipChanged,
-		EventAgentAccessPolicyChanged, EventSiteBindingChanged,
+		EventSiteBindingChanged,
 	}
 	for _, name := range required {
 		if version, ok := known[name]; !ok || version != PayloadVersionV1 {

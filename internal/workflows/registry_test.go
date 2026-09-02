@@ -3,7 +3,6 @@ package workflows
 import (
 	"context"
 	"errors"
-	"reflect"
 	"testing"
 )
 
@@ -51,19 +50,5 @@ func TestDefaultRegistryCompilesEveryProductWorkflow(t *testing.T) {
 		if output.WorkflowKey != key || output.CodeVersion != definition.CodeVersion {
 			t.Fatalf("workflow %s returned invalid metadata: %+v", key, output)
 		}
-	}
-}
-
-func TestFixedWorkflowTopologies(t *testing.T) {
-	want := map[string][]string{
-		"asset_publish":    {"load_reviewed_version", "authz", "publish_transaction", "enqueue_projection"},
-		"asset_archive":    {"load_published_version", "authz", "archive_transaction", "delete_projection"},
-		"asset_import":     {"parse_input", "validate_schema", "write_raw", "enqueue_prepare"},
-		"asset_reindex":    {"resolve_scope", "enqueue_projection", "collect_results"},
-		"asset_transcribe": {"load_media", "request_asr", "write_content", "optional_prepare"},
-		"note_sync":        {"load_conversation", "build_note_version", "idempotent_write"},
-	}
-	if got := fixedWorkflowSteps(); !reflect.DeepEqual(got, want) {
-		t.Fatalf("unexpected fixed workflow topology:\n got: %#v\nwant: %#v", got, want)
 	}
 }

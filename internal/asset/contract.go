@@ -37,12 +37,13 @@ const (
 	RelationDerivedFrom   = "derived_from"
 	RelationCites         = "cites"
 	RelationContinuesFrom = "continues_from"
+	RelationDuplicate     = "duplicate"
 )
 
 // ValidRelationType mirrors the relation_type CHECK constraint.
 func ValidRelationType(value string) bool {
 	switch value {
-	case RelationRelatedTo, RelationReferences, RelationDerivedFrom, RelationCites, RelationContinuesFrom:
+	case RelationRelatedTo, RelationReferences, RelationDerivedFrom, RelationCites, RelationContinuesFrom, RelationDuplicate:
 		return true
 	default:
 		return false

@@ -70,8 +70,10 @@ func LoadLifecycleTx(ctx context.Context, tx pgx.Tx, organizationID, assetID str
 }
 
 // SetPublishedPointerTx switches the published pointer. The version must
-// belong to the same asset. Status becomes published and published_at is set
-// only when it was empty; replays keep the original timestamp.
+// belong to the same asset. published_at follows doc §5.4: switching to a
+// different version stamps now(); replaying the same version (idempotent
+// re-publish or publish-after-restore of the same pointer) keeps the existing
+// timestamp.
 func SetPublishedPointerTx(ctx context.Context, tx pgx.Tx, row LifecycleRow, versionID string) (LifecycleRow, error) {
 	if row.PublicationStatus != PublicationDraft && row.PublicationStatus != PublicationPublished {
 		return row, ErrInvalidTransition
@@ -80,7 +82,10 @@ func SetPublishedPointerTx(ctx context.Context, tx pgx.Tx, row LifecycleRow, ver
 		UPDATE asset.assets a
 		SET publication_status = 'published',
 		    current_published_version_id = $3::uuid,
-		    published_at = COALESCE(a.published_at, now()),
+		    published_at = CASE
+		        WHEN a.current_published_version_id IS DISTINCT FROM $3::uuid THEN now()
+		        ELSE COALESCE(a.published_at, now())
+		    END,
 		    revision = a.revision + 1,
 		    updated_at = now()
 		WHERE a.organization_id = $1::uuid AND a.id = $2::uuid
@@ -99,9 +104,13 @@ func SetPublishedPointerTx(ctx context.Context, tx pgx.Tx, row LifecycleRow, ver
 	status := PublicationPublished
 	next.PublicationStatus = status
 	versionCopy := versionID
+	previous := ""
+	if row.CurrentPublishedVersionID != nil {
+		previous = *row.CurrentPublishedVersionID
+	}
 	next.CurrentPublishedVersionID = &versionCopy
 	next.Revision++
-	if row.PublishedAt == nil {
+	if previous != versionID || row.PublishedAt == nil {
 		now := time.Now().UTC()
 		next.PublishedAt = &now
 	}
@@ -162,9 +171,12 @@ func RestoreToDraftTx(ctx context.Context, tx pgx.Tx, row LifecycleRow) (Lifecyc
 }
 
 // CancelPendingRequestsTx cancels any pending PublicationRequest for the
-// asset with an explicit reason. Returns the number of cancelled requests.
-func CancelPendingRequestsTx(ctx context.Context, tx pgx.Tx, organizationID, assetID, actorUserID, reason string) (int64, error) {
-	commandTag, err := tx.Exec(ctx, `
+// asset with an explicit reason. Every auto-cancel carries the same facts as a
+// manual one — publication_request.cancelled event, submitter notification and
+// audit row — inside the caller's transaction (doc §18-18). Returns the number
+// of cancelled requests.
+func CancelPendingRequestsTx(ctx context.Context, tx pgx.Tx, events *eventing.EventStore, row LifecycleRow, actor auth.Principal, reason string) (int64, error) {
+	requests, err := tx.Query(ctx, `
 		UPDATE asset.publication_requests
 		SET status = 'cancelled',
 		    cancelled_by = NULLIF($3, '')::uuid,
@@ -172,11 +184,66 @@ func CancelPendingRequestsTx(ctx context.Context, tx pgx.Tx, organizationID, ass
 		    revision = revision + 1,
 		    decided_at = now()
 		WHERE organization_id = $1::uuid AND asset_id = $2::uuid AND status = 'pending'
-	`, organizationID, assetID, actorUserID, reason)
+		RETURNING id::text, workspace_id::text, asset_id::text, asset_version_id::text,
+		          submitted_by::text, revision, cancel_reason
+	`, row.OrganizationID, row.ID, actor.UserID, reason)
 	if err != nil {
 		return 0, fmt.Errorf("cancel pending publication requests: %w", err)
 	}
-	return commandTag.RowsAffected(), nil
+	defer requests.Close()
+	var cancelled int64
+	for requests.Next() {
+		var requestID, workspaceID, assetID, versionID, submittedBy, cancelReason string
+		var revision int64
+		if err := requests.Scan(&requestID, &workspaceID, &assetID, &versionID, &submittedBy, &revision, &cancelReason); err != nil {
+			return 0, fmt.Errorf("scan cancelled publication request: %w", err)
+		}
+		if events != nil {
+			raw, err := eventing.EncodePayload(eventing.PublicationRequestPayload{
+				RequestID:      requestID,
+				AssetID:        assetID,
+				AssetVersionID: versionID,
+				WorkspaceID:    workspaceID,
+				CancelReason:   cancelReason,
+			})
+			if err == nil {
+				_, err = events.AppendTx(ctx, tx, eventing.Event{
+					OrganizationID:   row.OrganizationID,
+					WorkspaceID:      workspaceID,
+					EventType:        eventing.EventPublicationCancelled,
+					AggregateType:    "publication_request",
+					AggregateID:      requestID,
+					AggregateVersion: revision,
+					PayloadVersion:   eventing.PayloadVersionV1,
+					Actor:            eventing.ActorFromPrincipal(actor),
+					Payload:          raw,
+				})
+			}
+			if err != nil {
+				return 0, fmt.Errorf("append auto-cancel event: %w", err)
+			}
+		}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO content.notifications (organization_id, workspace_id, recipient_user_id, kind, payload)
+			SELECT $1::uuid, $2::uuid, $3::uuid, 'publication.cancelled', $4::jsonb
+			WHERE $3::uuid IS DISTINCT FROM $5::uuid
+		`, row.OrganizationID, workspaceID, submittedBy, []byte(fmt.Sprintf(
+			`{"request_id":%q,"asset_id":%q,"status":"cancelled","reason":%q}`, requestID, assetID, cancelReason,
+		)), actor.UserID); err != nil {
+			return 0, fmt.Errorf("record auto-cancel notification: %w", err)
+		}
+		store.AppendAuditTx(ctx, tx, store.NewAuditEntry("publication.cancel", row.OrganizationID, actor.UserID, "publication_request", requestID, map[string]any{
+			"workspace_id": workspaceID,
+			"asset_id":     assetID,
+			"auto":         true,
+			"reason":       cancelReason,
+		}), workspaceID)
+		cancelled++
+	}
+	if err := requests.Err(); err != nil {
+		return 0, fmt.Errorf("cancel pending publication requests: %w", err)
+	}
+	return cancelled, nil
 }
 
 // AppendAssetEventTx appends a domain fact with the asset revision as

@@ -161,7 +161,7 @@ func (s Service) Archive(ctx context.Context, principal auth.Principal, allowedM
 		return ArchiveResult{}, err
 	}
 	previous := row.CurrentPublishedVersionID
-	if _, err := CancelPendingRequestsTx(ctx, tx, row.OrganizationID, row.ID, principal.UserID, "asset_archived"); err != nil {
+	if _, err := CancelPendingRequestsTx(ctx, tx, s.Events, row, principal, "asset_archived"); err != nil {
 		return ArchiveResult{}, err
 	}
 	row, err = ClearPublishedPointerTx(ctx, tx, row)
