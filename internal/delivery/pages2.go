@@ -148,6 +148,7 @@ func (s *Service) Media(ctx context.Context, slug, attachmentID string) (MediaOb
 		WHERE cover.organization_id = $1::uuid
 		  AND cover.id = $2::uuid
 		  AND cover.deleted_at IS NULL
+		  AND cover.status = 'clean'
 		  AND cover.media_type LIKE 'image/%'
 		  AND b.site_id = $3::uuid
 		LIMIT 1

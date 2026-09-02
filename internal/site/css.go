@@ -384,6 +384,10 @@ func selectorAllowed(text string) bool {
 			return false
 		}
 	}
+	// Same escape/HTML defenses as values (audit bypasses B-1..B-3).
+	if strings.ContainsAny(trimmed, "\\<>") || strings.Contains(lower, "url") {
+		return false
+	}
 	// No at-keywords or stray braces smuggled into selectors.
 	if strings.ContainsAny(trimmed, "{}@") {
 		return false
@@ -407,6 +411,16 @@ func sanitizeDeclaration(prop, value string) (string, bool) {
 		if strings.Contains(lower, forbidden) {
 			return "", false
 		}
+	}
+	// Character-level defenses (audit 2026-09-02, three real bypasses):
+	// - a backslash starts a CSS escape sequence: escaped spellings of url()
+	//   and expression() reassemble in the browser and slip past every
+	//   literal blacklist; no whitelisted value ever needs a backslash.
+	// - "<" and ">" enable string payloads that close the inline style tag.
+	// - any "url" spelling (url + newline + "(" is valid CSS too): forbid
+	//   the token outright rather than its parenthesis form.
+	if strings.ContainsAny(value, "\\<>") || strings.Contains(lower, "url") {
+		return "", false
 	}
 	if prop == "position" && !cssAllowedPositionValues[lower] {
 		return "", false

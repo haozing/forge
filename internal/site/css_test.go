@@ -83,3 +83,24 @@ func TestSanitizeCSSCanonicalizesStoredForm(t *testing.T) {
 		t.Fatalf("not idempotent: %q -> %q (%v)", first, second, stripped)
 	}
 }
+
+func TestSanitizeCSSAuditBypasses(t *testing.T) {
+	// 2026-09-02 审计发现的三个真实绕过（已修）：CSS 转义序列重组
+	// url()/expression()、换行 url、字符串携带 </style> 闭合标签。
+	payloads := []string{
+		`.x { background-image: u\72 l(https://evil.example/x); }`,
+		`.x { width: expr\65 ssion(alert(1)); }`,
+		`.x{background-image:url\n(https://evil.example/x)}`,
+		`.x { font-family: '</style><script>alert(1)</script>'; }`,
+	}
+	for _, p := range payloads {
+		if out, _ := SanitizeCSS(p); strings.TrimSpace(out) != "" {
+			t.Errorf("审计绕过存活: in=%q out=%q", p, out)
+		}
+	}
+	// 合法值不受影响（含连字符字体族、负值）。
+	out, stripped := SanitizeCSS(`.a { font-family: "PingFang SC", sans-serif; margin-top: -4px; }`)
+	if len(stripped) != 0 || !strings.Contains(out, "sans-serif") || !strings.Contains(out, "-4px") {
+		t.Fatalf("合法值被误杀: %q %v", out, stripped)
+	}
+}
