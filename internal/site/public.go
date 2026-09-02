@@ -287,6 +287,13 @@ func (r *PublicReader) AllowPublic(ctx context.Context, visitorAddr string) erro
 	return r.allow(ctx, visitorAddr)
 }
 
+// VisitorFor resolves the visitor band of one public read for callers
+// outside the read methods (the delivery media route runs the same tiering
+// through the shared authorizer instead of its own visibility logic).
+func (r *PublicReader) VisitorFor(ctx context.Context, item Site, principal auth.Principal) agentquery.VisitorIdentity {
+	return r.visitor(ctx, item, principal)
+}
+
 // SectionSlugs enumerates the distinct binding section slugs of one site for
 // the delivery sitemap and section navigation (binding catalog metadata, not
 // an asset content read; plan D2 keeps content reads on the query service).

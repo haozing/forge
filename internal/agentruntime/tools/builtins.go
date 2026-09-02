@@ -130,13 +130,10 @@ func (t *builtinTool) InvokableRun(ctx context.Context, argumentsInJSON string, 
 	result, err := t.handler(ctx, arguments)
 	if err != nil {
 		// The detail rides along so the model can self-heal (design doc
-		// §8.3: correction hints go back to the caller), bounded to keep
-		// provider errors from flooding the context window.
-		detail := err.Error()
-		if len(detail) > 400 {
-			detail = detail[:400]
-		}
-		body, _ := json.Marshal(map[string]any{"ok": false, "code": "tool_failed", "detail": detail})
+		// §8.3: correction hints go back to the caller). Internal failure
+		// markers are replaced wholesale — a raw SQLSTATE or driver error
+		// never reaches the model (audit B-10).
+		body, _ := json.Marshal(map[string]any{"ok": false, "code": "tool_failed", "detail": toolErrorDetail(err)})
 		return string(body), nil
 	}
 	body, err := json.Marshal(map[string]any{"ok": true, "data": result})
@@ -194,3 +191,19 @@ func structuredToolError(code string) string {
 }
 
 var _ tool.InvokableTool = (*builtinTool)(nil)
+
+// toolErrorDetail renders a self-healing hint from a handler error. Domain
+// messages pass through (bounded); anything smelling of infrastructure is
+// collapsed to a generic marker so schema/driver details stay server-side.
+func toolErrorDetail(err error) string {
+	detail := err.Error()
+	for _, marker := range []string{"SQLSTATE", "sql:", "pgx:", "dial tcp", "connection refused", "net/http", "unexpected EOF"} {
+		if strings.Contains(detail, marker) {
+			return "internal error (see server logs)"
+		}
+	}
+	if len(detail) > 400 {
+		detail = detail[:400]
+	}
+	return detail
+}

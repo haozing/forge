@@ -15,6 +15,7 @@ import (
 	"agentchunzhi/internal/auth"
 	"agentchunzhi/internal/authz"
 	"agentchunzhi/internal/eventing"
+	agentquery "agentchunzhi/internal/query"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -32,8 +33,8 @@ type Comment struct {
 
 // CommentPage is one page of the moderation queue.
 type CommentPage struct {
-	Items []Comment
-	HasMore bool
+	Items      []Comment
+	HasMore    bool
 	NextCursor string
 }
 
@@ -69,40 +70,58 @@ func (s Service) CreateComment(ctx context.Context, principal auth.Principal, sl
 	if !ValidDisplayPath(displayPath) {
 		return Comment{}, ErrSiteNotFound
 	}
+	// Resolve the bound published target, then re-check the commenter can
+	// actually SEE it through the shared authorizer (audit B-09: a member
+	// must not be able to comment on an asset whose band hides it from
+	// them). All misses collapse into one error (anti-probing parity).
+	var boundAssetID, boundVersionID, boundDisplayPath string
+	err = s.Store.Pool.QueryRow(ctx, `
+		SELECT b.asset_id::text, a.current_published_version_id::text, b.display_path
+		FROM site.site_content_bindings b
+		JOIN asset.assets a
+		  ON a.organization_id = b.organization_id AND a.id = b.asset_id
+		  AND a.current_published_version_id IS NOT NULL
+		WHERE b.organization_id = $1::uuid AND b.site_id = $2::uuid
+		  AND b.display_path = $3
+		LIMIT 1
+	`, item.OrganizationID, item.ID, displayPath).Scan(&boundAssetID, &boundVersionID, &boundDisplayPath)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Comment{}, ErrSiteNotFound
+	}
+	if err != nil {
+		return Comment{}, fmt.Errorf("resolve comment target: %w", err)
+	}
+	var authorized bool
+	authorized, err = agentquery.AuthorizePublicSiteAsset(ctx, s.Store, siteRef(item),
+		reader.visitor(ctx, item, principal), boundAssetID, boundVersionID)
+	if err != nil {
+		return Comment{}, err
+	}
+	if !authorized {
+		return Comment{}, ErrSiteNotFound
+	}
 	status := "pending"
 	if item.CommentsMode == "open" {
 		status = "visible"
 	}
 	var comment Comment
 	err = s.Store.Pool.QueryRow(ctx, `
-		WITH bound AS (
-			SELECT b.asset_id, b.display_path
-			FROM site.site_content_bindings b
-			JOIN asset.assets a
-			  ON a.organization_id = b.organization_id AND a.id = b.asset_id
-			  AND a.current_published_version_id IS NOT NULL
-			WHERE b.organization_id = $1::uuid AND b.site_id = $2::uuid
-			  AND b.display_path = $3
-			LIMIT 1
-		)
 		INSERT INTO site.site_comments
 			(organization_id, site_id, asset_id, display_path, author_user_id, body, status)
-		SELECT $1::uuid, $2::uuid, bound.asset_id, bound.display_path, $4::uuid, $5, $6
-		FROM bound
+		SELECT $1::uuid, $2::uuid, $3::uuid, $4, $5::uuid, $6, $7
 		WHERE NOT EXISTS (
 			SELECT 1 FROM site.site_comments recent
-			WHERE recent.site_id = $2::uuid AND recent.asset_id = bound.asset_id
-			  AND recent.author_user_id = $4::uuid
-			  AND recent.created_at > now() - $7::interval
+			WHERE recent.site_id = $2::uuid AND recent.asset_id = $3::uuid
+			  AND recent.author_user_id = $5::uuid
+			  AND recent.created_at > now() - $8::interval
 		)
 		RETURNING id::text, asset_id::text, display_path, body, status, created_at
-	`, item.OrganizationID, item.ID, displayPath, principal.UserID, body, status,
+	`, item.OrganizationID, item.ID, boundAssetID, boundDisplayPath, principal.UserID, body, status,
 		fmt.Sprint(CommentCooldown.Seconds())+" seconds").Scan(
 		&comment.ID, &comment.AssetID, &comment.DisplayPath, &comment.Body,
 		&comment.Status, &comment.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
-		// Either the path is not a bound published asset, or the cooldown.
-		// The distinction stays hidden (anti-probing parity).
+		// The cooldown window (the target was just resolved and authorized).
 		return Comment{}, ErrSiteNotFound
 	}
 	if err != nil {

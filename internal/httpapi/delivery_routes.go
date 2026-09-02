@@ -427,7 +427,8 @@ func deliverySiteMedia(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusNotFound, "site_not_found")
 			return
 		}
-		media, err := service.Media(r.Context(), slug, attachmentID)
+		media, err := service.Media(r.Context(), effectiveClientAddr(r, deps.TrustedProxyCIDRs),
+			publicVisitorPrincipal(r, deps), slug, attachmentID)
 		if err != nil {
 			writeError(w, http.StatusNotFound, "site_not_found")
 			return

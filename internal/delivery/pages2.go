@@ -9,6 +9,7 @@ import (
 	"errors"
 
 	"agentchunzhi/internal/auth"
+	agentquery "agentchunzhi/internal/query"
 	"agentchunzhi/internal/site"
 )
 
@@ -117,14 +118,17 @@ type MediaObject struct {
 }
 
 // Media authorizes and opens one public cover image: the attachment must be
-// the cover of the current published version of an asset bound to this
-// active site (二期 §6.2). Missing/foreign targets collapse into the same
-// not-found error (anti-probing parity).
-func (s *Service) Media(ctx context.Context, slug, attachmentID string) (MediaObject, error) {
+// a clean image, the cover of the current published version of an asset
+// bound to this active site, AND visible to the requesting visitor — the
+// visibility decision itself runs through the shared authorizer
+// (audit B-07: no second visibility judgment lives here). Missing/foreign/
+// below-tier targets all collapse into the same not-found error
+// (anti-probing parity).
+func (s *Service) Media(ctx context.Context, addr string, principal auth.Principal, slug, attachmentID string) (MediaObject, error) {
 	if s.Store == nil || s.Store.Pool == nil || s.Reader == nil {
 		return MediaObject{}, errMediaNotFound
 	}
-	if err := s.Reader.AllowPublic(ctx, previewAddr); err != nil {
+	if err := s.Reader.AllowPublic(ctx, addr); err != nil {
 		return MediaObject{}, err
 	}
 	facts, err := s.Reader.SiteFacts(ctx, slug)
@@ -132,8 +136,10 @@ func (s *Service) Media(ctx context.Context, slug, attachmentID string) (MediaOb
 		return MediaObject{}, errMediaNotFound
 	}
 	var media MediaObject
+	var assetID, versionID string
 	err = s.Store.Pool.QueryRow(ctx, `
-		SELECT cover.object_key, cover.media_type, cover.byte_size, COALESCE(cover.sha256::text, '')
+		SELECT cover.object_key, cover.media_type, cover.byte_size,
+		       COALESCE(cover.sha256::text, ''), a.id::text, v.id::text
 		FROM asset.attachments cover
 		JOIN asset.asset_version_attachments cav
 		  ON cav.organization_id = cover.organization_id AND cav.attachment_id = cover.id
@@ -153,8 +159,22 @@ func (s *Service) Media(ctx context.Context, slug, attachmentID string) (MediaOb
 		  AND b.site_id = $3::uuid
 		LIMIT 1
 	`, facts.Site.OrganizationID, attachmentID, facts.Site.ID).Scan(
-		&media.ObjectKey, &media.MediaType, &media.ByteSize, &media.ETag)
+		&media.ObjectKey, &media.MediaType, &media.ByteSize, &media.ETag,
+		&assetID, &versionID)
 	if err != nil {
+		return MediaObject{}, errMediaNotFound
+	}
+	// The one visibility judgment: same authorizer, same visitor band as
+	// every other public read (member covers stay member-only on gated
+	// sites, matching what the cards render).
+	visitor := s.Reader.VisitorFor(ctx, facts.Site, principal)
+	authorized, err := agentquery.AuthorizePublicSiteAsset(ctx, s.Store,
+		agentquery.PublicSiteRef{
+			OrganizationID: facts.Site.OrganizationID,
+			WorkspaceID:    facts.Site.WorkspaceID,
+			DefaultScope:   facts.Site.DefaultContentScope,
+		}, visitor, assetID, versionID)
+	if err != nil || !authorized {
 		return MediaObject{}, errMediaNotFound
 	}
 	return media, nil
