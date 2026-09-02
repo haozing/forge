@@ -1,4 +1,5 @@
 {{define "content"}}
+<div class="article-layout{{if ne .Site.Style.Sidebar "none"}} has-sidebar{{end}}">
 <article class="article">
   <h1 class="article-title">{{.Title}}</h1>
   <footer class="card-meta article-meta">
@@ -6,7 +7,12 @@
     {{with .Section}}{{if ne . ""}}<a href="{{$.SectionHref}}">{{.}}</a>{{end}}{{end}}
     {{template "tag_chips" .Tags}}
   </footer>
-  {{if gt (len .TOC) 1}}<nav class="toc"><h2>目录</h2><ul>{{range .TOC}}<li class="toc-l{{.Level}}"><a href="#{{.ID}}">{{.Text}}</a></li>{{end}}</ul></nav>{{end}}
+  {{if and (ne .Site.Style.Sidebar "toc") (gt (len .TOC) 1)}}<nav class="toc"><h2>目录</h2><ul>{{range .TOC}}<li class="toc-l{{.Level}}"><a href="#{{.ID}}">{{.Text}}</a></li>{{end}}</ul></nav>{{end}}
   <div class="article-body">{{noescape .ContentHTML}}</div>
 </article>
+{{if ne .Site.Style.Sidebar "none"}}<aside class="sidebar">
+  {{if eq .Site.Style.Sidebar "toc"}}{{if gt (len .TOC) 1}}<nav class="toc"><h2>目录</h2><ul>{{range .TOC}}<li class="toc-l{{.Level}}"><a href="#{{.ID}}">{{.Text}}</a></li>{{end}}</ul></nav>{{end}}{{end}}
+  {{if eq .Site.Style.Sidebar "tags"}}{{if .Tags}}<nav class="sidebar-tags"><h2>标签</h2>{{template "tag_chips" .Tags}}</nav>{{end}}{{end}}
+</aside>{{end}}
+</div>
 {{end}}

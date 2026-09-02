@@ -130,6 +130,24 @@
 - LLM：api.deepseek.com/v1，deepseek-chat，json_object 结构化 + tool calling；凭据来源 `.env` DEEPSEEK_API_KEY（不回显）。观测窗口 2026-09-02 00:20–01:12 本地；一轮探测失败（tool_calling=false，因未开 enable_tool_calling 选项，非服务故障）；建议输出存在轮间方差（仅 summary 类），与 08-31 留档一致——定性为"观测"，验收轮全过。
 - 复现命令：`docker compose build api worker migrate && docker compose run --rm migrate && docker compose up -d`，随后 `cd tmp_qa && python itd_p5.py / itd_p4.py / itd_p7.py / itd_p7perf.py / itd_p8.py`（itd_p8 需 .env 含 DEEPSEEK_API_KEY）；产物留档 `tmp_qa/out/itd_p8_final_*.log`。
 
+## 9.1 缺口闭环复测（2026-09-02 追加）
+
+评审追问"接口是否挨个真实业务测试"后复核，itd_p8 之外补测 4 个未被打到的接口与 3 个反向路径，全部通过（驱动脚本 `tmp_qa/itd_p8_gaps.py`，本地留档）：
+
+| 用例 | 接口 | 结果 |
+| --- | --- | --- |
+| G1-TAG-PAGE | HTML 标签归档页 /sites/{slug}/tags/{key}/ | 通过（真实 tag：打标签→重发→打页 200 命中） |
+| G2-RELEASE-CURSOR | GET releases 翻页 cursor | 通过（p1=[3,2] → p2=[1]，单调正确） |
+| G3-PREVIEW-POSTS/DETAIL | 预览 page=posts / page=detail 两形态 | 通过（候选样式渲染进 HTML） |
+| G4-TAG-INVALIDATE | tag.updated → 失效链 | 通过（工作区站点失效行 17→20） |
+| G5-MEMBER-INVALIDATE | workspace.membership_changed → 失效链 | 通过（member 档行 0→1，仅命中非 public 站，档位精确） |
+| N1-ROLLBACK-BAD-BASE | POST releases 伪 base_release_id | 404 release_not_found |
+| N2/N3-PREVIEW-BAD-PAGE/NO-PATH | 预览非法 page / detail 缺 path | 422 |
+
+仍为代码级确信、无真库触发的项：tag.archived / tag.restored / asset.archived / asset.visibility_changed 四类事件的失效行插入（与已测事件共用同一 Process 函数与同一张表，仅事件名分派不同）。§7 的其余未测试项不变。
+
+同轮顺带补齐实施缺口：detail 页 sidebar 分栏渲染（sidebar=toc/tags，宽屏右侧粘性、窄屏回落单栏）——原实施只收参数未渲染；card_ratio 仍无视觉作用对象（内容模型无首图字段，见 §7）。
+
 ## 10. 覆盖分层统计
 
 - 传输层路由：15 条 /sites 路由 + /static/delivery-search.js + 2 条新 /api 路径（契约门 + 路由表测试双向钉死）。

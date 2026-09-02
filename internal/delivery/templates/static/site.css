@@ -59,6 +59,14 @@ h2 { font-size: 1.35em; }
 
 /* article */
 .article { background: var(--c-surface); border: 1px solid var(--c-border); border-radius: var(--radius); box-shadow: var(--shadow); padding: calc(var(--space) * 3); margin: calc(var(--space) * 2) 0; }
+.article-layout { display: grid; grid-template-columns: minmax(0, 1fr); gap: calc(var(--space) * 2); align-items: start; }
+@media (min-width: 920px) {
+  .article-layout.has-sidebar { grid-template-columns: minmax(0, 1fr) 230px; }
+}
+.sidebar { position: sticky; top: var(--space); font-size: .92em; }
+.sidebar .toc { margin-bottom: var(--space); }
+.sidebar-tags h2 { font-size: 1em; color: var(--c-muted); margin: 0 0 var(--space); }
+.sidebar-tags .tag-chip { display: block; margin-bottom: calc(var(--space) * 0.5); }
 .article-meta { margin-bottom: calc(var(--space) * 2); border-bottom: 1px solid var(--c-border); padding-bottom: var(--space); }
 .article-body { overflow-wrap: break-word; }
 .article-body img { max-width: 100%; height: auto; border-radius: var(--radius); }

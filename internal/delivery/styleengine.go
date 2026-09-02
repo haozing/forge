@@ -102,6 +102,7 @@ func LayoutClasses(config site.StyleConfig, pageKind string) string {
 		"home--" + config.HomeStyle,
 		"list--" + config.ListStyle,
 		"ratio--" + cssClassName(config.CardRatio),
+		"sidebar--" + config.Sidebar,
 		"page--" + pageKind,
 	}
 	return strings.Join(classes, " ")
