@@ -12,6 +12,7 @@ import (
 	"net/http"
 
 	"agentchunzhi/internal/authz"
+	"agentchunzhi/internal/delivery"
 	"agentchunzhi/internal/site"
 )
 
@@ -37,6 +38,8 @@ func SiteError(w http.ResponseWriter, err error, conflictCode string) {
 		writeError(w, http.StatusNotFound, "site_not_found")
 	case errors.Is(err, site.ErrBindingNotFound):
 		writeError(w, http.StatusNotFound, "binding_not_found")
+	case errors.Is(err, site.ErrReleaseNotFound):
+		writeError(w, http.StatusNotFound, "release_not_found")
 	case errors.Is(err, site.ErrSlugInvalid):
 		writeError(w, http.StatusUnprocessableEntity, "slug_invalid")
 	case errors.Is(err, site.ErrPathInvalid):
@@ -64,6 +67,7 @@ type CreateSiteRequest struct {
 	DefaultContentScope string          `json:"default_content_scope"`
 	HomepageConfig      json.RawMessage `json:"homepage_config"`
 	NavigationConfig    json.RawMessage `json:"navigation_config"`
+	StyleConfig         json.RawMessage `json:"style_config"`
 }
 
 type UpdateSiteRequest struct {
@@ -73,6 +77,7 @@ type UpdateSiteRequest struct {
 	DefaultContentScope *string          `json:"default_content_scope"`
 	HomepageConfig      *json.RawMessage `json:"homepage_config"`
 	NavigationConfig    *json.RawMessage `json:"navigation_config"`
+	StyleConfig         *json.RawMessage `json:"style_config"`
 	Status              *string          `json:"status"`
 }
 
@@ -125,6 +130,7 @@ func SitesCollection(deps Dependencies) http.HandlerFunc {
 				DefaultContentScope: input.DefaultContentScope,
 				HomepageConfig:      input.HomepageConfig,
 				NavigationConfig:    input.NavigationConfig,
+				StyleConfig:         input.StyleConfig,
 			})
 			if err != nil {
 				SiteError(w, err, "slug_conflict")
@@ -187,6 +193,7 @@ func SiteResource(deps Dependencies) http.HandlerFunc {
 					DefaultContentScope: input.DefaultContentScope,
 					HomepageConfig:      input.HomepageConfig,
 					NavigationConfig:    input.NavigationConfig,
+					StyleConfig:         input.StyleConfig,
 					Status:              input.Status,
 				})
 			if err != nil {
@@ -359,10 +366,13 @@ func SiteBindingResource(deps Dependencies) http.HandlerFunc {
 	}
 }
 
-// SitePreview serves GET
-// /api/workspaces/{workspaceId}/sites/{siteId}/preview: the JSON snapshot
-// (site + bindings + homepage configuration) behind site.read with no-store
-// headers. The P5-3 wave extends this into the full public-face preview.
+// SitePreview serves the site preview surface:
+//
+//	GET  — the JSON snapshot (site + bindings, no-store) behind site.read;
+//	POST — the real Delivery render behind site.read: body
+//	       {style_config?, page?, display_path?} answers the full HTML of the
+//	       requested page with the candidate style merged over the working
+//	       style (design doc §8.2), always noindex + no-store.
 func SitePreview(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		principal, ok := sessionPrincipal(w, r, deps)
@@ -370,10 +380,6 @@ func SitePreview(deps Dependencies) http.HandlerFunc {
 			return
 		}
 		if !requireSiteService(w, deps) {
-			return
-		}
-		if r.Method != http.MethodGet {
-			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
 			return
 		}
 		workspaceID := r.PathValue("workspaceId")
@@ -384,14 +390,98 @@ func SitePreview(deps Dependencies) http.HandlerFunc {
 		if !requireWorkspaceAction(w, r, deps, principal, workspaceID, authz.ActionSiteRead) {
 			return
 		}
-		snapshot, err := deps.Sites.Preview(r.Context(), principal, workspaceID, siteID)
-		if err != nil {
-			SiteError(w, err, "slug_conflict")
+		switch r.Method {
+		case http.MethodGet:
+			snapshot, err := deps.Sites.Preview(r.Context(), principal, workspaceID, siteID)
+			if err != nil {
+				SiteError(w, err, "slug_conflict")
+				return
+			}
+			// Previews are member-gated working state: they must never sit in
+			// any shared cache, unlike the public face's short-lived caching.
+			w.Header().Set("Cache-Control", "no-store")
+			writeData(w, r, http.StatusOK, snapshot)
+		case http.MethodPost:
+			if deps.Delivery == nil {
+				writeError(w, http.StatusInternalServerError, "internal_error")
+				return
+			}
+			var input delivery.PreviewInput
+			if !decodeBody(w, r, &input, 256*1024) {
+				return
+			}
+			page, err := deps.Delivery.RenderPreview(r.Context(), principal, workspaceID, siteID, input)
+			if err != nil {
+				SiteError(w, err, "slug_conflict")
+				return
+			}
+			w.Header().Set("Cache-Control", "no-store")
+			w.Header().Set("X-Robots-Tag", "noindex, nofollow")
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(page.Body)
+		default:
+			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
+		}
+	}
+}
+
+// SiteReleases serves GET/POST
+// /api/workspaces/{workspaceId}/sites/{siteId}/releases. POST publishes the
+// current working configuration (or, with base_release_id, republishes one
+// historical snapshot — the rollback path, design doc §7.4) as a new
+// immutable release and moves the published pointer. Both surfaces sit
+// behind site.manage for writes / site.read for reads.
+func SiteReleases(deps Dependencies) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		principal, ok := sessionPrincipal(w, r, deps)
+		if !ok {
 			return
 		}
-		// Previews are member-gated working state: they must never sit in any
-		// shared cache, unlike the public face's short-lived caching.
-		w.Header().Set("Cache-Control", "no-store")
-		writeData(w, r, http.StatusOK, snapshot)
+		if !requireSiteService(w, deps) {
+			return
+		}
+		workspaceID := r.PathValue("workspaceId")
+		siteID := r.PathValue("siteId")
+		if !requirePathUUID(w, workspaceID, siteID) {
+			return
+		}
+		switch r.Method {
+		case http.MethodGet:
+			if !requireWorkspaceAction(w, r, deps, principal, workspaceID, authz.ActionSiteRead) {
+				return
+			}
+			page, err := deps.Sites.ListReleases(r.Context(), principal, workspaceID, siteID,
+				r.URL.Query().Get("cursor"), atoiDefault(r.URL.Query().Get("limit"), 20))
+			if err != nil {
+				SiteError(w, err, "slug_conflict")
+				return
+			}
+			writeData(w, r, http.StatusOK, map[string]any{
+				"items": page.Items,
+				"page":  cursorPageFrom(page.HasMore, page.NextCursor),
+			})
+		case http.MethodPost:
+			if !requireWorkspaceAction(w, r, deps, principal, workspaceID, authz.ActionSiteManage) {
+				return
+			}
+			if _, ok := requireIdempotencyKey(w, r); !ok {
+				return
+			}
+			var input struct {
+				BaseReleaseID string `json:"base_release_id"`
+			}
+			if !decodeBody(w, r, &input, 4096) {
+				return
+			}
+			item, err := deps.Sites.PublishRelease(r.Context(), principal, workspaceID, siteID, input.BaseReleaseID)
+			if err != nil {
+				SiteError(w, err, "slug_conflict")
+				return
+			}
+			writeData(w, r, http.StatusCreated, item)
+		default:
+			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
+		}
 	}
 }

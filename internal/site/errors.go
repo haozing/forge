@@ -30,4 +30,7 @@ var (
 	// ErrForbidden collapses policy denials (unknown workspace and missing
 	// action) so existence is never leaked past the handler guard.
 	ErrForbidden = errors.New("site action forbidden")
+	// ErrReleaseNotFound reports a release id that does not exist under the
+	// addressed site (rollback base resolution).
+	ErrReleaseNotFound = errors.New("site release not found")
 )

@@ -31,8 +31,9 @@ type Service struct {
 	Policy authz.WorkspacePolicyService
 }
 
-// Site is the workspace-scoped public site aggregate. HomepageConfig and
-// NavigationConfig are presentation extension points carried verbatim.
+// Site is the workspace-scoped public site aggregate. HomepageConfig,
+// NavigationConfig and StyleConfig are presentation extension points carried
+// verbatim (style_config is the L1 parameter space, validated on write).
 type Site struct {
 	ID                  string          `json:"id"`
 	OrganizationID      string          `json:"organization_id"`
@@ -45,9 +46,13 @@ type Site struct {
 	Status              string          `json:"status"`
 	HomepageConfig      json.RawMessage `json:"homepage_config"`
 	NavigationConfig    json.RawMessage `json:"navigation_config"`
-	Revision            int64           `json:"revision"`
-	CreatedAt           time.Time       `json:"created_at"`
-	UpdatedAt           time.Time       `json:"updated_at"`
+	StyleConfig         json.RawMessage `json:"style_config"`
+	// PublishedReleaseID points at the live immutable config snapshot; NULL
+	// means the public render falls back to the working columns above.
+	PublishedReleaseID *string         `json:"published_release_id"`
+	Revision           int64           `json:"revision"`
+	CreatedAt          time.Time       `json:"created_at"`
+	UpdatedAt          time.Time       `json:"updated_at"`
 	// ETag is the representation version (the revision); handlers emit it for
 	// the If-Match contract.
 	ETag string `json:"etag"`
@@ -63,10 +68,12 @@ type CreateSiteInput struct {
 	DefaultContentScope string
 	HomepageConfig      json.RawMessage
 	NavigationConfig    json.RawMessage
+	StyleConfig         json.RawMessage
 }
 
 // UpdateSiteInput carries the PATCH /sites/{siteId} body; nil pointers stay
-// unchanged. Slug is identity and never updatable.
+// unchanged. Slug is identity and never updatable. StyleConfig is a partial
+// document deep-merged over the stored one (null leaves reset to preset).
 type UpdateSiteInput struct {
 	Name                *string
 	Domain              *string
@@ -74,6 +81,7 @@ type UpdateSiteInput struct {
 	DefaultContentScope *string
 	HomepageConfig      *json.RawMessage
 	NavigationConfig    *json.RawMessage
+	StyleConfig         *json.RawMessage
 	Status              *string
 }
 
@@ -126,13 +134,15 @@ func (s Service) require(ctx context.Context, principal auth.Principal, workspac
 
 const siteColumns = `id::text, organization_id::text, workspace_id::text, slug, name,
 	COALESCE(domain, ''), template, default_content_scope, status, revision,
-	homepage_config, navigation_config, created_at, updated_at`
+	homepage_config, navigation_config, style_config, published_release_id::text,
+	created_at, updated_at`
 
 func scanSiteRow(row interface{ Scan(...any) error }) (Site, error) {
 	var item Site
 	err := row.Scan(&item.ID, &item.OrganizationID, &item.WorkspaceID, &item.Slug, &item.Name,
 		&item.Domain, &item.Template, &item.DefaultContentScope, &item.Status, &item.Revision,
-		&item.HomepageConfig, &item.NavigationConfig, &item.CreatedAt, &item.UpdatedAt)
+		&item.HomepageConfig, &item.NavigationConfig, &item.StyleConfig, &item.PublishedReleaseID,
+		&item.CreatedAt, &item.UpdatedAt)
 	if err != nil {
 		return Site{}, err
 	}
@@ -285,6 +295,10 @@ func (s Service) CreateSite(ctx context.Context, principal auth.Principal, works
 	if err != nil {
 		return Site{}, err
 	}
+	style, err := defaultStyleConfig(input.StyleConfig)
+	if err != nil {
+		return Site{}, err
+	}
 	if s.Events == nil {
 		return Site{}, errors.New("event store is not initialized")
 	}
@@ -317,11 +331,12 @@ func (s Service) CreateSite(ctx context.Context, principal auth.Principal, works
 	item, err := scanSiteRow(tx.QueryRow(ctx, `
 		INSERT INTO site.public_sites
 			(organization_id, workspace_id, slug, name, domain, template,
-			 default_content_scope, homepage_config, navigation_config, status, revision, created_by)
-		VALUES ($1::uuid, $2::uuid, $3, $4, NULLIF($5, ''), $6, $7, $8::jsonb, $9::jsonb, 'active', 1, $10::uuid)
+			 default_content_scope, homepage_config, navigation_config, style_config,
+			 status, revision, created_by)
+		VALUES ($1::uuid, $2::uuid, $3, $4, NULLIF($5, ''), $6, $7, $8::jsonb, $9::jsonb, $10::jsonb, 'active', 1, $11::uuid)
 		RETURNING `+siteColumns+`
 	`, principal.OrganizationID, workspaceID, slug, name, domain, template,
-		scope, []byte(homepage), []byte(navigation), principal.UserID))
+		scope, []byte(homepage), []byte(navigation), []byte(style), principal.UserID))
 	if err != nil {
 		if uniqueViolation(err) {
 			return Site{}, ErrConflict
@@ -420,6 +435,17 @@ func (s Service) UpdateSite(ctx context.Context, principal auth.Principal, works
 	if !revisionMatches(current.Revision, expectedRevision) {
 		return Site{}, ErrConflict
 	}
+	// style_config is a partial document deep-merged over the locked row's
+	// stored value; the merged result is re-validated (unknown keys, enums,
+	// ranges and the WCAG contrast gate all reject here).
+	var style json.RawMessage
+	if input.StyleConfig != nil {
+		merged, err := MergeStylePatch(current.StyleConfig, *input.StyleConfig)
+		if err != nil {
+			return Site{}, err
+		}
+		style = merged
+	}
 	if domain != "" && domain != current.Domain {
 		var exists bool
 		if err := tx.QueryRow(ctx, `
@@ -431,7 +457,7 @@ func (s Service) UpdateSite(ctx context.Context, principal auth.Principal, works
 			return Site{}, ErrConflict
 		}
 	}
-	item, err := applySiteUpdate(ctx, tx, principal, workspaceID, siteID, input, name, domain, homepage, navigation)
+	item, err := applySiteUpdate(ctx, tx, principal, workspaceID, siteID, input, name, domain, homepage, navigation, style)
 	if err != nil {
 		return Site{}, err
 	}
@@ -452,7 +478,7 @@ func (s Service) UpdateSite(ctx context.Context, principal auth.Principal, works
 
 // applySiteUpdate renders the dynamic SET clause from the non-nil pointers
 // and bumps the revision inside the caller's transaction.
-func applySiteUpdate(ctx context.Context, tx pgx.Tx, principal auth.Principal, workspaceID, siteID string, input UpdateSiteInput, name, domain string, homepage, navigation json.RawMessage) (Site, error) {
+func applySiteUpdate(ctx context.Context, tx pgx.Tx, principal auth.Principal, workspaceID, siteID string, input UpdateSiteInput, name, domain string, homepage, navigation, style json.RawMessage) (Site, error) {
 	sets := []string{"revision = site.public_sites.revision + 1", "updated_at = now()"}
 	args := []any{principal.OrganizationID, workspaceID, siteID}
 	arg := func(value any) string {
@@ -476,6 +502,9 @@ func applySiteUpdate(ctx context.Context, tx pgx.Tx, principal auth.Principal, w
 	}
 	if input.NavigationConfig != nil {
 		sets = append(sets, "navigation_config = "+arg(string(navigation))+"::jsonb")
+	}
+	if input.StyleConfig != nil {
+		sets = append(sets, "style_config = "+arg(string(style))+"::jsonb")
 	}
 	if input.Status != nil {
 		sets = append(sets, "status = "+arg(*input.Status))
@@ -528,6 +557,18 @@ func defaultConfig(raw json.RawMessage) (json.RawMessage, error) {
 	}
 	if len(strings.TrimSpace(string(raw))) == 0 {
 		return json.RawMessage("{}"), nil
+	}
+	return raw, nil
+}
+
+// defaultStyleConfig validates one optional style document: empty stays {},
+// anything else must pass the full L1 validation (write-side gate).
+func defaultStyleConfig(raw json.RawMessage) (json.RawMessage, error) {
+	if len(strings.TrimSpace(string(raw))) == 0 {
+		return json.RawMessage("{}"), nil
+	}
+	if _, err := ParseStyleConfig(raw); err != nil {
+		return nil, err
 	}
 	return raw, nil
 }

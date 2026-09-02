@@ -1,0 +1,7 @@
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+{{range .URLs}}<url>
+<loc>{{.Loc}}</loc>
+{{with .LastmodOn}}<lastmod>{{.}}</lastmod>{{end}}
+</url>
+{{end}}
+</urlset>

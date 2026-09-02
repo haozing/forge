@@ -19,6 +19,7 @@ import (
 	"agentchunzhi/internal/automation"
 	"agentchunzhi/internal/config"
 	"agentchunzhi/internal/deletion"
+	"agentchunzhi/internal/delivery"
 	"agentchunzhi/internal/eventing"
 	"agentchunzhi/internal/modelendpoint"
 	"agentchunzhi/internal/notification"
@@ -162,7 +163,7 @@ func main() {
 	}
 	reactProcessor := &agentruntime.PersistentReActService{
 		Store: db, Cipher: checkpointCipher, Models: modelRegistry,
-		ToolFactory: agentruntime.DomainToolFactory{Store: db, Events: events, Query: queryService},
+		ToolFactory: agentruntime.DomainToolFactory{Store: db, Events: events, Query: queryService, Models: modelRegistry},
 		Coordinator: agentruntime.Coordinator{Store: db},
 	}
 	workflowRegistry, err := workflows.DefaultRegistry()
@@ -201,6 +202,7 @@ func main() {
 		Retrieval:        coordinator,
 		Transcription:    transcription.Processor{Store: db, Objects: objects, Provider: asrProvider, Timeout: time.Duration(cfg.ASRTimeoutSeconds) * time.Second},
 		AttachmentScan:   attachment.ScanProcessor{Store: db, Objects: objects, Scanner: attachmentScanner},
+		CacheInvalidator: delivery.NewInvalidator(db),
 		Lease:            10 * time.Minute,
 		RetryDelay:       10 * time.Second,
 		ProcessorVersion: "river-event-worker/v1",

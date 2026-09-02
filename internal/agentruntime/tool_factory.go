@@ -3,6 +3,7 @@ package agentruntime
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 
 	runtimetools "agentchunzhi/internal/agentruntime/tools"
@@ -22,6 +23,9 @@ type DomainToolFactory struct {
 	Store  *store.Store
 	Events eventing.EventStore
 	Query  agentquery.Service
+	// Models resolves the run's pinned structured-output endpoint for the
+	// site.style.suggest tool (nil disables the tool).
+	Models *ModelRegistry
 }
 
 func (f DomainToolFactory) Build(ctx context.Context, scope ReActToolScope, rawPolicy map[string]any) (*runtimetools.Registry, runtimetools.Policy, error) {
@@ -169,6 +173,57 @@ func (f DomainToolFactory) Build(ctx context.Context, scope ReActToolScope, rawP
 				return nil, err
 			}
 			return f.getAttachmentText(ctx, scope, stringValue(arguments["attachment_id"]), models)
+		}
+	}
+	if f.Models != nil {
+		handlers.SiteStyleSuggest = func(ctx context.Context, arguments map[string]any) (any, error) {
+			// Read-only tool (design doc §8.3): the site row is scoped to
+			// the run's organization and workspace; no site.manage involved.
+			identifier := strings.TrimSpace(stringValue(arguments["site_id"]))
+			if identifier == "" {
+				// Default to the workspace's single active site; ambiguous
+				// workspaces must address the site explicitly (the error
+				// lists the candidates so the model can retry, §8.3).
+				rows, err := f.Store.Pool.Query(ctx, `
+					SELECT slug FROM site.public_sites
+					WHERE organization_id = $1::uuid AND workspace_id = $2::uuid AND status = 'active'
+					ORDER BY created_at
+				`, scope.OrganizationID, scope.WorkspaceID)
+				if err != nil {
+					return nil, err
+				}
+				var slugs []string
+				for rows.Next() {
+					var slug string
+					if err := rows.Scan(&slug); err != nil {
+						rows.Close()
+						return nil, err
+					}
+					slugs = append(slugs, slug)
+				}
+				rows.Close()
+				if len(slugs) == 1 {
+					identifier = slugs[0]
+				} else {
+					return nil, fmt.Errorf("site_id is required (uuid or slug); workspace sites: %s", strings.Join(slugs, ", "))
+				}
+			}
+			// Accept a uuid or a slug; resolve to the row id in-scope.
+			var siteID string
+			query := `SELECT id::text FROM site.public_sites
+				WHERE organization_id = $1::uuid AND workspace_id = $2::uuid AND status = 'active' AND (`
+			args := []any{scope.OrganizationID, scope.WorkspaceID}
+			if len(identifier) == 36 {
+				query += `id = $3::uuid OR slug = $3`
+			} else {
+				query += `slug = $3`
+			}
+			args = append(args, identifier)
+			query += `)`
+			if err := f.Store.Pool.QueryRow(ctx, query, args...).Scan(&siteID); err != nil {
+				return nil, errors.New("site was not found in the run workspace")
+			}
+			return f.suggestStylePatches(ctx, scope, scope.OrganizationID, scope.WorkspaceID, siteID, stringValue(arguments["instruction"]))
 		}
 	}
 	registry := runtimetools.NewRegistry()

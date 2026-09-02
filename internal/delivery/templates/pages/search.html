@@ -1,0 +1,11 @@
+{{define "content"}}
+<h1>搜索</h1>
+<form class="search-page-form" action="{{.Site.SearchHref}}" method="get">
+  <input type="search" name="q" value="{{.Query}}" placeholder="输入关键词" aria-label="搜索关键词">
+  <button type="submit">搜索</button>
+</form>
+<div id="search-results" class="cards" data-site-slug="{{.Site.Slug}}"{{with .Query}} data-query="{{.}}"{{end}}>
+  <p class="empty">输入关键词后按回车，结果将在此显示。</p>
+</div>
+<script src="/static/delivery-search.js" defer></script>
+{{end}}

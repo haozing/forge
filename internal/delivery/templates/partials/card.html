@@ -1,0 +1,8 @@
+{{define "card"}}<article class="card">
+  <h3 class="card-title"><a href="{{.Href}}">{{.Title}}</a></h3>
+  {{with .Summary}}<p class="card-summary">{{.}}</p>{{end}}
+  <footer class="card-meta">
+    {{with .PublishedOn}}<time>{{.}}</time>{{end}}
+    {{template "tag_chips" .Tags}}
+  </footer>
+</article>{{end}}

@@ -1,0 +1,11 @@
+{{define "header"}}<header class="site-header">
+  <div class="container header-inner">
+    <a class="site-name" href="{{.Site.HomeHref}}">{{.Site.Name}}</a>
+    <nav class="site-nav">
+      {{range .Site.Nav}}<a href="{{.Href}}">{{.Label}}</a>{{end}}
+    </nav>
+    <form class="search-form" action="{{.Site.SearchHref}}" method="get">
+      <input type="search" name="q" placeholder="搜索" aria-label="搜索" value="">
+    </form>
+  </div>
+</header>{{end}}

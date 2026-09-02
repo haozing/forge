@@ -36,6 +36,7 @@ type BuiltinHandlers struct {
 	ArchiveAsset         JSONHandler
 	DeleteAsset          JSONHandler
 	ExportAssets         JSONHandler
+	SiteStyleSuggest     JSONHandler
 }
 
 type builtinSpec struct {
@@ -88,6 +89,10 @@ func builtinSpecs(handlers BuiltinHandlers) []builtinSpec {
 		{name: "archive_asset", description: "Archive a published asset", risk: HighWrite, capabilities: []string{"asset.archive"}, handler: handlers.ArchiveAsset, parameters: map[string]*schema.ParameterInfo{"asset_id": id("Asset ID")}},
 		{name: "delete_asset", description: "Delete an authorized asset", risk: HighWrite, capabilities: []string{"asset.delete"}, handler: handlers.DeleteAsset, parameters: map[string]*schema.ParameterInfo{"asset_id": id("Asset ID")}},
 		{name: "export_assets", description: "Create an export of authorized assets", risk: HighWrite, capabilities: []string{"asset.export"}, handler: handlers.ExportAssets, parameters: map[string]*schema.ParameterInfo{"format": id("Registered export format")}},
+		// Named snake_case: OpenAI-compatible providers reject dots in
+		// function names (pattern ^[a-zA-Z0-9_-]+$), the design doc's
+		// dotted spelling cannot travel to the model.
+		{name: "site_style_suggest", description: "Suggest 2-3 validated style patches for one public site from a natural-language instruction (read-only; publishing stays human)", risk: ReadOnly, capabilities: []string{"site.style"}, handler: handlers.SiteStyleSuggest, parameters: map[string]*schema.ParameterInfo{"instruction": id("Natural-language style instruction"), "site_id": {Type: schema.String, Desc: "Site ID (required when the workspace has multiple active sites)"}}},
 	}
 }
 
@@ -122,7 +127,15 @@ func (t *builtinTool) InvokableRun(ctx context.Context, argumentsInJSON string, 
 	}
 	result, err := t.handler(ctx, arguments)
 	if err != nil {
-		return structuredToolError("tool_failed"), nil
+		// The detail rides along so the model can self-heal (design doc
+		// §8.3: correction hints go back to the caller), bounded to keep
+		// provider errors from flooding the context window.
+		detail := err.Error()
+		if len(detail) > 400 {
+			detail = detail[:400]
+		}
+		body, _ := json.Marshal(map[string]any{"ok": false, "code": "tool_failed", "detail": detail})
+		return string(body), nil
 	}
 	body, err := json.Marshal(map[string]any{"ok": true, "data": result})
 	if err != nil || len(body) > maxToolResultBytes {

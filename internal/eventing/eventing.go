@@ -153,6 +153,24 @@ func DefaultRegistry() (Registry, error) {
 			IdempotencyNote: "terminal attachment scan states are idempotent",
 			FailureMode:     "retry_then_failed",
 		},
+		{
+			// SSR delivery cache invalidation (design doc §6.2): appends
+			// delivery.cache_invalidations rows; the api polls and applies.
+			Key: "delivery.cache",
+			EventVersions: map[string]int{
+				EventAssetPublished:           PayloadVersionV1,
+				EventAssetArchived:            PayloadVersionV1,
+				EventAssetVisibilityChanged:   PayloadVersionV1,
+				EventSiteChanged:              PayloadVersionV1,
+				EventSiteBindingChanged:       PayloadVersionV1,
+				EventWorkspaceMembershipChanged: PayloadVersionV1,
+				EventTagUpdated:               PayloadVersionV1,
+				EventTagArchived:              PayloadVersionV1,
+				EventTagRestored:              PayloadVersionV1,
+			},
+			IdempotencyNote: "invalidation rows are idempotent; the api poller applies prefix deletes",
+			FailureMode:     "retry_then_dead",
+		},
 	})
 }
 

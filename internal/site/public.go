@@ -204,6 +204,107 @@ func siteRef(item Site) agentquery.PublicSiteRef {
 	}
 }
 
+// SiteFacts is the delivery-facing snapshot of one public site: the site row
+// plus the effective configuration — the published release snapshot when the
+// pointer is set, the working columns otherwise (bootstrap path, design doc
+// §7.4) — and the release revision for cache keying (0 = working mode).
+type SiteFacts struct {
+	Site            Site
+	ReleaseRevision int64
+	// Effective configuration the render consumes.
+	HomepageConfig   json.RawMessage
+	NavigationConfig json.RawMessage
+	StyleConfig      json.RawMessage
+	Template         string
+}
+
+// SiteFacts resolves the delivery chrome facts of one slug without touching
+// the throttle budget (the page reads that follow are throttled reads).
+// Disabled and unknown sites collapse into the same errors as loadSite.
+func (r *PublicReader) SiteFacts(ctx context.Context, slug string) (SiteFacts, error) {
+	item, err := r.loadSite(ctx, slug)
+	if err != nil {
+		return SiteFacts{}, err
+	}
+	facts := SiteFacts{
+		Site:             item,
+		HomepageConfig:   item.HomepageConfig,
+		NavigationConfig: item.NavigationConfig,
+		StyleConfig:      item.StyleConfig,
+		Template:         item.Template,
+	}
+	if item.PublishedReleaseID != nil && r.Store != nil && r.Store.Pool != nil {
+		var revision int64
+		var config json.RawMessage
+		if err := r.Store.Pool.QueryRow(ctx, `
+			SELECT revision, config
+			FROM site.site_releases
+			WHERE organization_id = $1::uuid AND id = $2::uuid
+		`, item.OrganizationID, *item.PublishedReleaseID).Scan(&revision, &config); err == nil && len(config) > 0 {
+			var snapshot struct {
+				HomepageConfig   json.RawMessage `json:"homepage_config"`
+				NavigationConfig json.RawMessage `json:"navigation_config"`
+				StyleConfig      json.RawMessage `json:"style_config"`
+				Template         string          `json:"template"`
+			}
+			if json.Unmarshal(config, &snapshot) == nil {
+				facts.ReleaseRevision = revision
+				if len(snapshot.HomepageConfig) > 0 {
+					facts.HomepageConfig = snapshot.HomepageConfig
+				}
+				if len(snapshot.NavigationConfig) > 0 {
+					facts.NavigationConfig = snapshot.NavigationConfig
+				}
+				if len(snapshot.StyleConfig) > 0 {
+					facts.StyleConfig = snapshot.StyleConfig
+				}
+				if snapshot.Template != "" {
+					facts.Template = snapshot.Template
+				}
+			}
+		}
+	}
+	return facts, nil
+}
+
+// AllowPublic runs only the shared public_site_ip budget check (the HTML
+// delivery face applies it on every request, cache hits included).
+func (r *PublicReader) AllowPublic(ctx context.Context, visitorAddr string) error {
+	return r.allow(ctx, visitorAddr)
+}
+
+// SectionSlugs enumerates the distinct binding section slugs of one site for
+// the delivery sitemap and section navigation (binding catalog metadata, not
+// an asset content read; plan D2 keeps content reads on the query service).
+func (r *PublicReader) SectionSlugs(ctx context.Context, visitorAddr string, principal auth.Principal, slug string) ([]string, error) {
+	if err := r.allow(ctx, visitorAddr); err != nil {
+		return nil, err
+	}
+	item, err := r.loadSite(ctx, slug)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := r.Store.Pool.Query(ctx, `
+		SELECT DISTINCT section_slug
+		FROM site.site_content_bindings
+		WHERE organization_id = $1::uuid AND site_id = $2::uuid AND section_slug <> ''
+		ORDER BY section_slug
+	`, item.OrganizationID, item.ID)
+	if err != nil {
+		return nil, fmt.Errorf("load section slugs: %w", err)
+	}
+	defer rows.Close()
+	slugs := []string{}
+	for rows.Next() {
+		var section string
+		if err := rows.Scan(&section); err != nil {
+			return nil, err
+		}
+		slugs = append(slugs, section)
+	}
+	return slugs, rows.Err()
+}
+
 // ---------------------------------------------------------------------------
 // Public DTOs (plan §3.4 whitelist)
 // ---------------------------------------------------------------------------
@@ -506,12 +607,22 @@ func (r *PublicReader) loadPostRow(ctx context.Context, item Site, displayPath s
 // content (latest → query face, featured/column → binding catalog with the
 // §3.3 re-check). Unknown section types are skipped.
 func (r *PublicReader) Home(ctx context.Context, visitorAddr string, principal auth.Principal, slug string) (PublicHomeView, error) {
+	return r.HomeWithConfig(ctx, visitorAddr, principal, slug, nil)
+}
+
+// HomeWithConfig renders the homepage against one explicit homepage config
+// (the delivery face passes the effective release snapshot; nil falls back to
+// the working columns).
+func (r *PublicReader) HomeWithConfig(ctx context.Context, visitorAddr string, principal auth.Principal, slug string, homepageConfig json.RawMessage) (PublicHomeView, error) {
 	if err := r.allow(ctx, visitorAddr); err != nil {
 		return PublicHomeView{}, err
 	}
 	item, err := r.loadSite(ctx, slug)
 	if err != nil {
 		return PublicHomeView{}, err
+	}
+	if len(strings.TrimSpace(string(homepageConfig))) == 0 {
+		homepageConfig = item.HomepageConfig
 	}
 	view := PublicHomeView{
 		Site: PublicSiteInfo{
@@ -524,7 +635,7 @@ func (r *PublicReader) Home(ctx context.Context, visitorAddr string, principal a
 	}
 	visitor := r.visitor(ctx, item, principal)
 	all := []PublicPost{}
-	for _, section := range ParseHomepageConfig(item.HomepageConfig) {
+	for _, section := range ParseHomepageConfig(homepageConfig) {
 		rendered := PublicSection{
 			Type:        section.Type,
 			Title:       section.Title,

@@ -2434,6 +2434,63 @@ paths:
                 allOf:
                   - $ref: '#/components/schemas/SitePreview'
                   - $ref: '#/components/schemas/Envelope'
+    post:
+      tags: [sites]
+      operationId: previewSiteRender
+      description: 真实 Delivery 渲染预览——候选 style_config 深合并到工作配置后用线上同款 Renderer/StyleEngine 渲染指定页面，返回完整 HTML（noindex + no-store；非法补丁 422）
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/SiteId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                style_config: { type: object, description: 候选样式补丁（patch 语义） }
+                page: { type: string, enum: [home, posts, detail], description: 缺省 home }
+                display_path: { type: string, description: page=detail 时的文章路径 }
+      responses:
+        '200': { description: 预览 HTML, content: { text/html: { schema: { type: string } } } }
+        '422': { description: 样式补丁非法（style_patch_invalid 映射 validation_failed） }
+  /api/workspaces/{workspaceId}/sites/{siteId}/releases:
+    get:
+      tags: [sites]
+      operationId: listSiteReleases
+      description: 站点配置 Release 历史（revision 降序 keyset）
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/SiteId'
+        - { name: cursor, in: query, schema: { type: string } }
+        - { name: limit, in: query, schema: { type: integer } }
+      responses:
+        '200':
+          description: Release 列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+    post:
+      tags: [sites]
+      operationId: publishSiteRelease
+      description: 发布不可变配置快照（{homepage_config,navigation_config,style_config,template}）；带 base_release_id 时按历史快照重发（回退=拨指针，新 Release 留审计）。发布后公开渲染只读快照，缓存 release_rev 整体换代
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/SiteId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                base_release_id: { type: string, format: uuid, description: 回退目标历史 Release；缺省取当前工作配置 }
+      responses:
+        '201': { description: 已发布, content: { application/json: { schema: { $ref: '#/components/schemas/Envelope' } } } }
+        '404': { description: base_release_id 不存在（release_not_found） }
   /api/public/sites/{slug}:
     get:
       tags: [sites-public]

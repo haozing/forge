@@ -1,0 +1,13 @@
+{{define "content"}}
+{{with .HeroTitle}}<section class="hero"><h1>{{.}}</h1>{{with $.HeroSummary}}<p>{{.}}</p>{{end}}</section>{{end}}
+{{$showTags := .ShowTagCloud}}
+{{range .Sections}}
+<section class="home-section home-{{.Type}}">
+  <h2>{{.Title}}</h2>
+  {{if eq .Type "featured"}}<div class="cards cards-featured">{{range .Items}}<article class="card card-featured"><h3><a href="{{.Href}}">{{.Title}}</a></h3>{{with .Summary}}<p class="card-summary">{{.}}</p>{{end}}<footer class="card-meta">{{with .PublishedOn}}<time>{{.}}</time>{{end}}{{template "tag_chips" .Tags}}</footer></article>{{end}}</div>
+  {{else}}<div class="cards">{{range .Items}}{{template "card" .}}{{end}}</div>{{end}}
+</section>
+{{end}}
+{{if and $showTags .TagCloud}}<section class="home-section home-tags"><h2>标签</h2>{{template "tag_chips" .TagCloud}}</section>{{end}}
+{{if not .Sections}}{{if not .TagCloud}}{{template "empty" .}}{{end}}{{end}}
+{{end}}

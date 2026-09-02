@@ -1,0 +1,12 @@
+{{define "content"}}
+<article class="article">
+  <h1 class="article-title">{{.Title}}</h1>
+  <footer class="card-meta article-meta">
+    {{with .PublishedOn}}<time>发布于 {{.}}</time>{{end}}
+    {{with .Section}}{{if ne . ""}}<a href="{{$.SectionHref}}">{{.}}</a>{{end}}{{end}}
+    {{template "tag_chips" .Tags}}
+  </footer>
+  {{if gt (len .TOC) 1}}<nav class="toc"><h2>目录</h2><ul>{{range .TOC}}<li class="toc-l{{.Level}}"><a href="#{{.ID}}">{{.Text}}</a></li>{{end}}</ul></nav>{{end}}
+  <div class="article-body">{{noescape .ContentHTML}}</div>
+</article>
+{{end}}

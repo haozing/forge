@@ -1,0 +1,25 @@
+{{define "layout"}}<!DOCTYPE html>
+<html lang="zh-CN"{{with .Site.ModeAttribute}} data-mode="{{.}}"{{end}}>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.Title}}</title>
+{{with .Description}}<meta name="description" content="{{.}}">{{end}}
+<link rel="canonical" href="{{.Canonical}}">
+{{if .NoIndex}}<meta name="robots" content="noindex, nofollow">{{end}}
+<meta property="og:title" content="{{.Title}}">
+{{with .Description}}<meta property="og:description" content="{{.}}">{{end}}
+<meta property="og:site_name" content="{{.Site.Name}}">
+<meta property="og:type" content="{{if eq .Kind "detail"}}article{{else}}website{{end}}">
+{{with .ModifiedISO}}<meta property="article:modified_time" content="{{.}}">{{end}}
+{{with .JSONLD}}<script type="application/ld+json">{{.}}</script>{{end}}
+<style>{{.Site.StyleCSSVars}}</style>
+</head>
+<body class="{{.Site.LayoutClasses}}">
+{{template "header" .}}
+<main class="container">
+{{template "content" .}}
+</main>
+{{template "footer" .}}
+</body>
+</html>{{end}}

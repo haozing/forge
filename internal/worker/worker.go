@@ -26,6 +26,9 @@ const (
 	ProjectionConsumer     = "retrieval.projection"
 	TranscriptionConsumer  = "conversation.transcription"
 	AttachmentScanConsumer = "attachment.scan"
+	// DeliveryCacheConsumer is the SSR delivery cache invalidator key
+	// (design doc §6.2); the worker appends invalidation rows the api polls.
+	DeliveryCacheConsumer = "delivery.cache"
 )
 
 // EventProcessor is the retrieval fact consumer surface: the coordinator
@@ -45,6 +48,12 @@ type AttachmentScanProcessor interface {
 	Fail(context.Context, string, string) error
 }
 
+// CacheInvalidationProcessor appends delivery cache invalidation rows for
+// one domain fact (worker-side delivery.cache consumer).
+type CacheInvalidationProcessor interface {
+	Process(ctx context.Context, organizationID, eventType string, payload json.RawMessage) error
+}
+
 // Dispatcher keeps consumer-specific behavior, while River owns scheduling,
 // wakeups, retries, and worker process lifecycle.
 type Dispatcher struct {
@@ -52,6 +61,7 @@ type Dispatcher struct {
 	Retrieval        EventProcessor
 	Transcription    TranscriptionProcessor
 	AttachmentScan   AttachmentScanProcessor
+	CacheInvalidator CacheInvalidationProcessor
 	Lease            time.Duration
 	RetryDelay       time.Duration
 	ProcessorVersion string
@@ -104,6 +114,16 @@ func (d Dispatcher) processDelivery(ctx context.Context, delivery store.Delivery
 			return d.fail(ctx, delivery, delivery.AttemptNo >= maxAttempts, "processor_unavailable", "retrieval coordinator is not configured")
 		}
 		if err := d.Retrieval.ProcessFact(ctx, delivery.EventType, delivery.Payload); err != nil {
+			return d.fail(ctx, delivery, delivery.AttemptNo >= maxAttempts, "processor_error", err.Error())
+		}
+		return false, d.finish(ctx, delivery, false, "", "")
+	}
+
+	if delivery.ConsumerKey == DeliveryCacheConsumer {
+		if d.CacheInvalidator == nil {
+			return d.fail(ctx, delivery, delivery.AttemptNo >= maxAttempts, "processor_unavailable", "delivery cache invalidator is not configured")
+		}
+		if err := d.CacheInvalidator.Process(ctx, delivery.OrganizationID, delivery.EventType, delivery.Payload); err != nil {
 			return d.fail(ctx, delivery, delivery.AttemptNo >= maxAttempts, "processor_error", err.Error())
 		}
 		return false, d.finish(ctx, delivery, false, "", "")

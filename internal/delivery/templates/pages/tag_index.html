@@ -1,0 +1,4 @@
+{{define "content"}}
+<h1>标签</h1>
+{{if .Tags}}<div class="tag-cloud">{{range .Tags}}<a class="tag-chip" href="{{.Href}}">{{.DisplayName}}{{if .Count}}<span class="tag-count">{{.Count}}</span>{{end}}</a>{{end}}</div>{{else}}{{template "empty" .}}{{end}}
+{{end}}

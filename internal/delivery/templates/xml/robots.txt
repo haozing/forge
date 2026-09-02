@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+{{if not .ScopePublic}}Disallow: /
+{{end}}

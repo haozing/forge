@@ -26,6 +26,7 @@ import (
 	"agentchunzhi/internal/container"
 	contentservice "agentchunzhi/internal/content"
 	"agentchunzhi/internal/conversation"
+	"agentchunzhi/internal/delivery"
 	"agentchunzhi/internal/eventing"
 	"agentchunzhi/internal/httpapi"
 	"agentchunzhi/internal/identity"
@@ -258,6 +259,10 @@ func main() {
 		SearchCursorSecret:  cfg.SearchCursorSecret,
 		QueryHashSecret:     cfg.QueryHashSecret,
 	}
+	// SSR delivery face: server-rendered /sites/{slug}/... HTML pages with
+	// the page cache, StyleEngine and the real-render preview (wired after
+	// the dependencies literal so it can reference the reader and service).
+	deps.Delivery = delivery.NewService(db, deps.PublicSites, deps.Sites, 0, log.Printf)
 	server := &http.Server{
 		Addr:              cfg.HTTPAddr,
 		Handler:           httpapi.NewHandlerWithDeps(deps),
@@ -266,6 +271,10 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// The delivery cache invalidation poller drains worker-appended rows
+	// into the process-local page cache (design doc §6.2).
+	go delivery.NewPoller(db, deps.Delivery.Cache, log.Printf).Run(ctx)
 
 	go func() {
 		log.Printf("api listening on %s environment=%s", cfg.HTTPAddr, cfg.Environment)

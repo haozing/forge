@@ -1,0 +1,4 @@
+{{define "content"}}
+<h1>标签：{{.TagName}}</h1>
+{{if .Items}}<div class="cards">{{range .Items}}{{template "card" .}}{{end}}</div>{{template "pagination" .Pagination}}{{else}}{{template "empty" .}}{{end}}
+{{end}}

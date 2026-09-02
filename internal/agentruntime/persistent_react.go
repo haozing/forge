@@ -178,10 +178,10 @@ func (s PersistentReActService) loadRun(ctx context.Context, runID string) (pers
 	var resume persistentResume
 	var response []byte
 	err = s.Store.Pool.QueryRow(ctx, `
-		SELECT id::text, interrupt_id, status, COALESCE(response, '{}'::jsonb)
+		SELECT id::text, interrupt_id, status, COALESCE(response_payload, '{}'::jsonb)
 		FROM automation.interactions
 		WHERE run_id = $1::uuid AND status IN ('approved', 'rejected') AND resume_consumed_at IS NULL
-		ORDER BY responded_at DESC NULLS LAST LIMIT 1
+		ORDER BY resolved_at DESC NULLS LAST LIMIT 1
 	`, runID).Scan(&resume.ID, &resume.InterruptID, &resume.Status, &response)
 	if err == nil {
 		resume.Response = map[string]any{}

@@ -11,6 +11,7 @@ import "net/http"
 func newRouter(deps Dependencies) *http.ServeMux {
 	mux := http.NewServeMux()
 	registerSystemRoutes(deps, mux)
+	registerDeliveryRoutes(deps, mux)
 	registerPublicRoutes(deps, mux)
 	registerIdentityRoutes(deps, mux)
 	registerOrganizationRoutes(deps, mux)
@@ -37,6 +38,29 @@ func newRouter(deps Dependencies) *http.ServeMux {
 func registerSystemRoutes(deps Dependencies, mux *http.ServeMux) {
 	mux.HandleFunc("/healthz", health)
 	mux.HandleFunc("/readyz", readyRoute(deps))
+}
+
+// registerDeliveryRoutes holds the server-rendered HTML face of the public
+// sites (design doc §4.1). These routes sit outside /api on purpose: the
+// OpenAPI contract gate only covers /api, so delivery_routes_test.go pins
+// this table instead. The trailing-slash subtree registration doubles as the
+// site-scoped 404 catch-all.
+func registerDeliveryRoutes(deps Dependencies, mux *http.ServeMux) {
+	mux.HandleFunc("/sites/{slug}", deliverySiteHome(deps))
+	mux.HandleFunc("/sites/{slug}/", deliverySiteHome(deps))
+	mux.HandleFunc("/sites/{slug}/posts", deliverySitePosts(deps))
+	mux.HandleFunc("/sites/{slug}/posts/{displayPath...}", deliverySitePost(deps))
+	mux.HandleFunc("/sites/{slug}/sections/{sectionSlug}", deliverySiteSection(deps))
+	mux.HandleFunc("/sites/{slug}/sections/{sectionSlug}/", deliverySiteSection(deps))
+	mux.HandleFunc("/sites/{slug}/tags", deliverySiteTags(deps))
+	mux.HandleFunc("/sites/{slug}/tags/", deliverySiteTags(deps))
+	mux.HandleFunc("/sites/{slug}/tags/{key}", deliverySiteTagPage(deps))
+	mux.HandleFunc("/sites/{slug}/tags/{key}/", deliverySiteTagPage(deps))
+	mux.HandleFunc("/sites/{slug}/search", deliverySiteSearch(deps))
+	mux.HandleFunc("/sites/{slug}/rss.xml", deliverySiteFeed("rss")(deps))
+	mux.HandleFunc("/sites/{slug}/sitemap.xml", deliverySiteFeed("sitemap")(deps))
+	mux.HandleFunc("/sites/{slug}/robots.txt", deliverySiteFeed("robots")(deps))
+	mux.HandleFunc("/static/delivery-search.js", deliverySearchScript(deps))
 }
 
 // registerPublicRoutes holds the anonymous surface: email login, password
@@ -250,6 +274,7 @@ func registerSiteRoutes(deps Dependencies, mux *http.ServeMux) {
 	mux.HandleFunc("/api/workspaces/{workspaceId}/sites/{siteId}/bindings", SiteBindingsCollection(deps))
 	mux.HandleFunc("/api/workspaces/{workspaceId}/sites/{siteId}/bindings/{bindingId}", SiteBindingResource(deps))
 	mux.HandleFunc("/api/workspaces/{workspaceId}/sites/{siteId}/preview", SitePreview(deps))
+	mux.HandleFunc("/api/workspaces/{workspaceId}/sites/{siteId}/releases", SiteReleases(deps))
 }
 
 // registerQueryRoutes holds the unified query surface (workspace and member

@@ -1,0 +1,7 @@
+{{define "content"}}
+<div class="error-page">
+  <h1>{{.Status}}</h1>
+  <p>{{if eq .Status 404}}页面不存在或已下线。{{else if eq .Status 410}}该内容已下线。{{else if eq .Status 403}}没有访问权限。{{else}}服务暂时不可用，请稍后重试。{{end}}</p>
+  <p><a href="{{.Site.HomeHref}}">返回首页</a></p>
+</div>
+{{end}}

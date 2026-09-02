@@ -58,7 +58,9 @@ func TestDefaultRegistryMatchesDeclaredConsumers(t *testing.T) {
 		t.Fatalf("agent.task.prepare_requested consumers = %#v", consumers)
 	}
 	consumers = registry.ConsumersFor("asset.published", 1)
-	if len(consumers) != 1 || consumers[0].Key != "retrieval.projection" {
+	// The SSR delivery cache invalidator joined the asset facts (design doc
+	// §6.2); consumers are key-sorted: delivery.cache then the projector.
+	if len(consumers) != 2 || consumers[0].Key != "delivery.cache" || consumers[1].Key != "retrieval.projection" {
 		t.Fatalf("projection consumers = %#v", consumers)
 	}
 	if consumers := registry.ConsumersFor("asset.retrieval_projection_requested", 1); len(consumers) != 0 {

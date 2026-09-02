@@ -27,6 +27,7 @@ import (
 	"agentchunzhi/internal/container"
 	contentservice "agentchunzhi/internal/content"
 	"agentchunzhi/internal/conversation"
+	"agentchunzhi/internal/delivery"
 	"agentchunzhi/internal/identity"
 	"agentchunzhi/internal/modelendpoint"
 	"agentchunzhi/internal/organization"
@@ -80,6 +81,9 @@ type Dependencies struct {
 	// home/posts/detail/sections/tags/search with D4 ETags and the shared
 	// public_site_ip budget (B5).
 	PublicSites *site.PublicReader
+	// SSR delivery face: the /sites/{slug}/... HTML pages, the page cache
+	// and the real-render preview (公开站点SSR投递与样式参数空间设计方案).
+	Delivery *delivery.Service
 	// Phase 4 member suggestion review surface (queue, accept/reject, batch).
 	SuggestionReviews *assetservice.SuggestionReviewService
 	// Phase 3 retrieval operations services (projection profiles and rebuilds).
