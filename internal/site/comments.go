@@ -249,6 +249,9 @@ func (s Service) ModerateComment(ctx context.Context, principal auth.Principal, 
 	if tag.RowsAffected() == 0 {
 		return ErrCommentNotFound
 	}
+	// The moderation changed what the detail page renders — emit the site
+	// fact so the delivery cache invalidation chain runs (design §8.4).
+	s.emitSiteCommentFact(ctx, principal, workspaceID, siteID)
 	return nil
 }
 
@@ -270,5 +273,48 @@ func (s Service) DeleteComment(ctx context.Context, principal auth.Principal, wo
 	if tag.RowsAffected() == 0 {
 		return ErrCommentNotFound
 	}
+	s.emitSiteCommentFact(ctx, principal, workspaceID, siteID)
 	return nil
+}
+
+// emitSiteCommentFact records site.site_changed (action=comment_moderated)
+// in its own short transaction; a failed append falls back to the cache TTL.
+func (s Service) emitSiteCommentFact(ctx context.Context, principal auth.Principal, workspaceID, siteID string) {
+	if s.Events == nil || s.Store == nil || s.Store.Pool == nil {
+		return
+	}
+	var item Site
+	if err := s.Store.Pool.QueryRow(ctx, `
+		SELECT `+siteColumns+` FROM site.public_sites
+		WHERE organization_id = $1::uuid AND workspace_id = $2::uuid AND id = $3::uuid
+	`, principal.OrganizationID, workspaceID, siteID).Scan(
+		&item.ID, &item.OrganizationID, &item.WorkspaceID, &item.Slug, &item.Name,
+		&item.Domain, &item.Template, &item.DefaultContentScope, &item.Status, &item.Revision,
+		&item.HomepageConfig, &item.NavigationConfig, &item.StyleConfig, &item.CustomCss,
+		&item.CommentsMode, &item.PublishedReleaseID, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		return
+	}
+	tx, err := s.Store.Pool.Begin(ctx)
+	if err != nil {
+		return
+	}
+	defer tx.Rollback(ctx)
+	if _, err := s.Events.AppendTx(ctx, tx, eventing.Event{
+		OrganizationID:   item.OrganizationID,
+		WorkspaceID:      item.WorkspaceID,
+		EventType:        eventing.EventSiteChanged,
+		AggregateType:    "site",
+		AggregateID:      item.ID,
+		AggregateVersion: item.Revision,
+		PayloadVersion:   eventing.PayloadVersionV1,
+		Actor:            eventing.ActorFromPrincipal(principal),
+		Payload: eventing.SiteChangedPayload{
+			SiteID:      item.ID,
+			WorkspaceID: item.WorkspaceID,
+			Action:      "comment_moderated",
+		},
+	}); err != nil {
+		return
+	}
+	_ = tx.Commit(ctx)
 }

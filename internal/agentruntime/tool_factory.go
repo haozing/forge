@@ -221,20 +221,16 @@ func (f DomainToolFactory) Build(ctx context.Context, scope ReActToolScope, rawP
 					return nil, fmt.Errorf("site_id is required (uuid or slug); workspace sites: %s", strings.Join(slugs, ", "))
 				}
 			}
-			// Accept a uuid or a slug; resolve to the row id in-scope.
+			// Accept a uuid, slug or display name (model variance on which
+			// identifier it echoes back); all three resolve strictly inside
+			// the run's organization and workspace, so nothing widens.
 			var siteID string
-			query := `SELECT id::text FROM site.public_sites
-				WHERE organization_id = $1::uuid AND workspace_id = $2::uuid AND status = 'active' AND (`
-			args := []any{scope.OrganizationID, scope.WorkspaceID}
-			if len(identifier) == 36 {
-				query += `id = $3::uuid OR slug = $3`
-			} else {
-				query += `slug = $3`
-			}
-			args = append(args, identifier)
-			query += `)`
-			if err := f.Store.Pool.QueryRow(ctx, query, args...).Scan(&siteID); err != nil {
-				return nil, errors.New("site was not found in the run workspace")
+			if err := f.Store.Pool.QueryRow(ctx, `
+				SELECT id::text FROM site.public_sites
+				WHERE organization_id = $1::uuid AND workspace_id = $2::uuid AND status = 'active'
+				  AND (id::text = $3 OR slug = $3 OR name = $3)
+			`, scope.OrganizationID, scope.WorkspaceID, identifier).Scan(&siteID); err != nil {
+				return nil, fmt.Errorf("site %q was not found in the run workspace (pass the site slug)", clipText(identifier, 60))
 			}
 			return f.suggestStylePatches(ctx, scope, scope.OrganizationID, scope.WorkspaceID, siteID, stringValue(arguments["instruction"]))
 		}
@@ -267,15 +263,24 @@ func (f DomainToolFactory) Build(ctx context.Context, scope ReActToolScope, rawP
 				identifier = ids[0]
 			}
 			principal := auth.Principal{OrganizationID: scope.OrganizationID, UserID: scope.PrincipalID, UserType: auth.UserTypeMember}
-			row, err := f.Sites.GetSite(ctx, principal, scope.WorkspaceID, identifier)
+			// Resolve uuid/slug/name to the row and read the style bundle
+			// directly (GetSite demands a uuid and a member policy check the
+			// agent principal must not need for this read-only snapshot).
+			var styleDocument []byte
+			var customCSS string
+			err := f.Store.Pool.QueryRow(ctx, `
+				SELECT style_config, custom_css FROM site.public_sites
+				WHERE organization_id = $1::uuid AND workspace_id = $2::uuid AND status = 'active'
+				  AND (id::text = $3 OR slug = $3 OR name = $3)
+			`, scope.OrganizationID, scope.WorkspaceID, identifier).Scan(&styleDocument, &customCSS)
 			if err != nil {
-				return nil, errors.New("site was not found in the run workspace")
+				return nil, fmt.Errorf("site %q was not found in the run workspace (pass the site slug)", clipText(identifier, 60))
 			}
 			name := strings.TrimSpace(stringValue(arguments["name"]))
 			if name == "" {
 				return nil, errors.New("name is required")
 			}
-			preset, err := f.Sites.CreateStylePreset(ctx, principal, name, row.StyleConfig, row.CustomCss)
+			preset, err := f.Sites.CreateStylePreset(ctx, principal, name, styleDocument, customCSS)
 			if err != nil {
 				return nil, err
 			}
@@ -453,6 +458,13 @@ func contains(values []string, wanted string) bool {
 		}
 	}
 	return false
+}
+
+func clipText(value string, max int) string {
+	if len(value) > max {
+		return value[:max] + "…"
+	}
+	return value
 }
 
 var _ ReActToolFactory = DomainToolFactory{}
