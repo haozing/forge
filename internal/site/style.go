@@ -18,13 +18,15 @@ import (
 var (
 	stylePresets = map[string]bool{"calm": true, "magazine": true, "minimal": true, "warm": true, "archive": true}
 
-	styleColorModes     = map[string]bool{"light": true, "dark": true, "auto": true}
-	styleHeadingFonts   = map[string]bool{"serif": true, "sans": true}
-	styleDensities      = map[string]bool{"airy": true, "normal": true, "compact": true}
-	styleRadii          = map[string]bool{"sharp": true, "soft": true, "round": true}
-	styleShadows        = map[string]bool{"flat": true, "subtle": true, "lifted": true}
-	styleHomeStyles     = map[string]bool{"hero": true, "plain": true, "grid": true}
-	styleListStyles     = map[string]bool{"list": true, "grid": true}
+	styleColorModes   = map[string]bool{"light": true, "dark": true, "auto": true}
+	styleHeadingFonts = map[string]bool{"serif": true, "sans": true}
+	styleDensities    = map[string]bool{"airy": true, "normal": true, "compact": true}
+	styleRadii        = map[string]bool{"sharp": true, "soft": true, "round": true}
+	styleShadows      = map[string]bool{"flat": true, "subtle": true, "lifted": true}
+	// 二期 §3: masonry (CSS columns) and carousel (scroll-snap track) join
+	// the layout catalog.
+	styleHomeStyles = map[string]bool{"hero": true, "plain": true, "grid": true, "carousel": true}
+	styleListStyles = map[string]bool{"list": true, "grid": true, "masonry": true, "timeline": true}
 	styleCardRatios     = map[string]bool{"16:9": true, "4:3": true, "1:1": true, "text": true}
 	styleSidebars       = map[string]bool{"none": true, "toc": true, "tags": true}
 	styleHomeComponents = map[string]bool{"featured": true, "latest": true, "tag_cloud": true}
@@ -86,6 +88,11 @@ var stylePresetsDefinition = map[string]stylePreset{
 
 // DefaultStylePreset is the fallback preset name.
 const DefaultStylePreset = "calm"
+
+// ValidCommentsMode reports a valid site comment policy (二期 §8).
+func ValidCommentsMode(mode string) bool {
+	return mode == "off" || mode == "moderated" || mode == "open"
+}
 
 // ResolveStylePreset returns the preset definition by name (calm when unset
 // or unknown — unknown names never survive validation, this is the render-side

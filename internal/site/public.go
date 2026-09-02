@@ -215,7 +215,11 @@ type SiteFacts struct {
 	HomepageConfig   json.RawMessage
 	NavigationConfig json.RawMessage
 	StyleConfig      json.RawMessage
-	Template         string
+	// CustomCss arrives pre-sanitized at write time; the render sanitizes
+	// again for defense in depth (二期 §4).
+	CustomCss    string
+	CommentsMode string
+	Template     string
 }
 
 // SiteFacts resolves the delivery chrome facts of one slug without touching
@@ -231,6 +235,8 @@ func (r *PublicReader) SiteFacts(ctx context.Context, slug string) (SiteFacts, e
 		HomepageConfig:   item.HomepageConfig,
 		NavigationConfig: item.NavigationConfig,
 		StyleConfig:      item.StyleConfig,
+		CustomCss:        item.CustomCss,
+		CommentsMode:     item.CommentsMode,
 		Template:         item.Template,
 	}
 	if item.PublishedReleaseID != nil && r.Store != nil && r.Store.Pool != nil {
@@ -245,6 +251,8 @@ func (r *PublicReader) SiteFacts(ctx context.Context, slug string) (SiteFacts, e
 				HomepageConfig   json.RawMessage `json:"homepage_config"`
 				NavigationConfig json.RawMessage `json:"navigation_config"`
 				StyleConfig      json.RawMessage `json:"style_config"`
+				CustomCss        string          `json:"custom_css"`
+				CommentsMode     string          `json:"comments_mode"`
 				Template         string          `json:"template"`
 			}
 			if json.Unmarshal(config, &snapshot) == nil {
@@ -257,6 +265,12 @@ func (r *PublicReader) SiteFacts(ctx context.Context, slug string) (SiteFacts, e
 				}
 				if len(snapshot.StyleConfig) > 0 {
 					facts.StyleConfig = snapshot.StyleConfig
+				}
+				if snapshot.CustomCss != "" {
+					facts.CustomCss = snapshot.CustomCss
+				}
+				if snapshot.CommentsMode != "" {
+					facts.CommentsMode = snapshot.CommentsMode
 				}
 				if snapshot.Template != "" {
 					facts.Template = snapshot.Template
@@ -320,6 +334,9 @@ type PublicPost struct {
 	Tags        []agentquery.TagSummary `json:"tags"`
 	UpdatedAt   *time.Time              `json:"updated_at"`
 	PublishedAt *time.Time              `json:"published_at"`
+	// CoverAttachmentID is the published version's cover image (二期 §6;
+	// empty = no cover; media type is verified image at render).
+	CoverAttachmentID string `json:"cover_attachment_id"`
 }
 
 // PublicPostPage is one page of the public list face; ETag stays off the wire.
@@ -369,7 +386,9 @@ type PublicPostContent struct {
 	ContentKind string                  `json:"content_kind"`
 	UpdatedAt   *time.Time              `json:"updated_at"`
 	PublishedAt *time.Time              `json:"published_at"`
-	ETag        string                  `json:"-"`
+	// CoverAttachmentID is the published version's cover image (二期 §6).
+	CoverAttachmentID string              `json:"cover_attachment_id"`
+	ETag              string              `json:"-"`
 }
 
 // ---------------------------------------------------------------------------
@@ -505,6 +524,7 @@ type postRow struct {
 	Markdown         string
 	Fields           []byte
 	FieldSchema      []byte
+	CoverAttachmentID string
 }
 
 // Post serves the detail projection: binding → asset → live published
@@ -561,6 +581,7 @@ func (r *PublicReader) Post(ctx context.Context, visitorAddr string, principal a
 		ContentKind: row.ContentKind,
 		UpdatedAt:   timePtr(row.AssetUpdatedAt),
 		PublishedAt: publishedAt,
+		CoverAttachmentID: row.CoverAttachmentID,
 		ETag:        DetailETag(item.Revision, row.AssetRevision, row.VersionID, row.Binding.UpdatedAt),
 	}, nil
 }
@@ -575,7 +596,8 @@ func (r *PublicReader) loadPostRow(ctx context.Context, item Site, displayPath s
 		       a.revision, a.updated_at, a.published_at, rm.content_kind,
 		       COALESCE(pv.id::text, ''), COALESCE(pv.title, ''), COALESCE(pv.summary, ''),
 		       COALESCE(pv.markdown, ''), COALESCE(pv.fields, '{}'::jsonb),
-		       COALESCE(mv.field_schema, '{}'::jsonb)
+		       COALESCE(mv.field_schema, '{}'::jsonb),
+		       COALESCE(cover.id::text, '')
 		FROM site.site_content_bindings b
 		JOIN asset.assets a
 		  ON a.organization_id = b.organization_id AND a.id = b.asset_id
@@ -585,6 +607,12 @@ func (r *PublicReader) loadPostRow(ctx context.Context, item Site, displayPath s
 		  ON pv.organization_id = a.organization_id AND pv.id = a.current_published_version_id
 		LEFT JOIN model.resource_model_versions mv
 		  ON mv.organization_id = pv.organization_id AND mv.id = pv.resource_model_version_id
+		LEFT JOIN asset.asset_version_attachments cav
+		  ON cav.organization_id = pv.organization_id AND cav.asset_version_id = pv.id
+		  AND cav.role = 'cover'
+		LEFT JOIN asset.attachments cover
+		  ON cover.organization_id = cav.organization_id AND cover.id = cav.attachment_id
+		  AND cover.deleted_at IS NULL AND cover.media_type LIKE 'image/%'
 		WHERE b.organization_id = $1::uuid AND b.site_id = $2::uuid AND b.display_path = $3
 	`, item.OrganizationID, item.ID, displayPath).Scan(
 		&row.Binding.ID, &row.Binding.SiteID, &row.Binding.AssetID, &row.Binding.DisplayPath,
@@ -593,6 +621,7 @@ func (r *PublicReader) loadPostRow(ctx context.Context, item Site, displayPath s
 		&row.Binding.CreatedAt, &row.Binding.UpdatedAt,
 		&row.AssetRevision, &row.AssetUpdatedAt, &row.AssetPublishedAt, &row.ContentKind,
 		&row.VersionID, &row.Title, &row.Summary, &row.Markdown, &row.Fields, &row.FieldSchema,
+		&row.CoverAttachmentID,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return postRow{}, ErrSiteNotFound
@@ -720,9 +749,10 @@ func (r *PublicReader) latestPosts(ctx context.Context, item Site, visitor agent
 // boundFact is the display metadata of one bound hit asset: the binding plus
 // the content facts the list projection needs from the main data.
 type boundFact struct {
-	Binding     Binding
-	ContentKind string
-	UpdatedAt   time.Time
+	Binding           Binding
+	ContentKind       string
+	UpdatedAt         time.Time
+	CoverAttachmentID string
 }
 
 // loadBoundFacts fetches the binding catalog slice for the given assets in
@@ -734,12 +764,20 @@ func (r *PublicReader) loadBoundFacts(ctx context.Context, item Site, assetIDs [
 		return result, nil
 	}
 	rows, err := r.Store.Pool.Query(ctx, `
-		SELECT `+bindingColumns+`, rm.content_kind, a.updated_at
+		SELECT `+bindingColumns+`, rm.content_kind, a.updated_at,
+		       COALESCE(cover.id::text, '')
 		FROM site.site_content_bindings b
 		JOIN asset.assets a
 		  ON a.organization_id = b.organization_id AND a.id = b.asset_id
 		JOIN model.resource_models rm
 		  ON rm.organization_id = a.organization_id AND rm.id = a.resource_model_id
+		LEFT JOIN asset.asset_version_attachments cav
+		  ON cav.organization_id = a.organization_id
+		  AND cav.asset_version_id = a.current_published_version_id
+		  AND cav.role = 'cover'
+		LEFT JOIN asset.attachments cover
+		  ON cover.organization_id = cav.organization_id AND cover.id = cav.attachment_id
+		  AND cover.deleted_at IS NULL AND cover.media_type LIKE 'image/%'
 		WHERE b.organization_id = $1::uuid AND b.site_id = $2::uuid
 		  AND b.asset_id = ANY($3::uuid[])
 	`, item.OrganizationID, item.ID, assetIDs)
@@ -753,7 +791,7 @@ func (r *PublicReader) loadBoundFacts(ctx context.Context, item Site, assetIDs [
 			&fact.Binding.ContentType, &fact.Binding.SectionSlug, &fact.Binding.SortOrder, &fact.Binding.OnHomepage,
 			&fact.Binding.OnNavigation, &fact.Binding.DisplayConfig, &fact.Binding.DisplayPublishedAt,
 			&fact.Binding.CreatedAt, &fact.Binding.UpdatedAt,
-			&fact.ContentKind, &fact.UpdatedAt); err != nil {
+			&fact.ContentKind, &fact.UpdatedAt, &fact.CoverAttachmentID); err != nil {
 			return nil, fmt.Errorf("scan bound fact: %w", err)
 		}
 		result[fact.Binding.AssetID] = fact
@@ -801,14 +839,15 @@ func mergePublicPosts(hits []agentquery.Item, facts map[string]boundFact) []Publ
 		}
 		row := merged{
 			post: PublicPost{
-				AssetID:     hit.AssetID,
-				DisplayPath: fact.Binding.DisplayPath,
-				Title:       hit.Title,
-				Summary:     SafeSummary(hit.Summary, publicSummaryRunes),
-				ContentKind: fact.ContentKind,
-				Tags:        hit.Tags,
-				UpdatedAt:   timePtr(fact.UpdatedAt),
-				PublishedAt: ResolveDisplayPublishedAt(fact.Binding.DisplayPublishedAt, hit.PublishedAt),
+				AssetID:           hit.AssetID,
+				DisplayPath:       fact.Binding.DisplayPath,
+				Title:             hit.Title,
+				Summary:           SafeSummary(hit.Summary, publicSummaryRunes),
+				ContentKind:       fact.ContentKind,
+				Tags:              hit.Tags,
+				UpdatedAt:         timePtr(fact.UpdatedAt),
+				PublishedAt:       ResolveDisplayPublishedAt(fact.Binding.DisplayPublishedAt, hit.PublishedAt),
+				CoverAttachmentID: fact.CoverAttachmentID,
 			},
 			order:     fact.Binding.SortOrder,
 			hasScore:  hit.Score != nil,
@@ -852,13 +891,14 @@ func mergePublicPosts(hits []agentquery.Item, facts map[string]boundFact) []Publ
 // boundVersionRow joins one binding with the live published version main
 // data and the asset/model facts the projection needs.
 type boundVersionRow struct {
-	Binding          Binding
-	VersionID        string
-	Title            string
-	Summary          string
-	ContentKind      string
-	AssetUpdatedAt   time.Time
-	AssetPublishedAt *time.Time
+	Binding           Binding
+	VersionID         string
+	Title             string
+	Summary           string
+	ContentKind       string
+	AssetUpdatedAt    time.Time
+	AssetPublishedAt  *time.Time
+	CoverAttachmentID string
 }
 
 // boundVersionRows enumerates a binding catalog slice with the live version
@@ -880,7 +920,8 @@ func (r *PublicReader) boundVersionRows(ctx context.Context, item Site, sectionS
 	}
 	rows, err := r.Store.Pool.Query(ctx, `
 		SELECT `+bindingColumns+`, rm.content_kind, a.updated_at, a.published_at,
-		       COALESCE(pv.id::text, ''), COALESCE(pv.title, ''), COALESCE(pv.summary, '')
+		       COALESCE(pv.id::text, ''), COALESCE(pv.title, ''), COALESCE(pv.summary, ''),
+		       COALESCE(cover.id::text, '')
 		FROM site.site_content_bindings b
 		JOIN asset.assets a
 		  ON a.organization_id = b.organization_id AND a.id = b.asset_id AND a.deleted_at IS NULL
@@ -888,6 +929,12 @@ func (r *PublicReader) boundVersionRows(ctx context.Context, item Site, sectionS
 		  ON rm.organization_id = a.organization_id AND rm.id = a.resource_model_id
 		LEFT JOIN asset.asset_versions pv
 		  ON pv.organization_id = a.organization_id AND pv.id = a.current_published_version_id
+		LEFT JOIN asset.asset_version_attachments cav
+		  ON cav.organization_id = pv.organization_id AND cav.asset_version_id = pv.id
+		  AND cav.role = 'cover'
+		LEFT JOIN asset.attachments cover
+		  ON cover.organization_id = cav.organization_id AND cover.id = cav.attachment_id
+		  AND cover.deleted_at IS NULL AND cover.media_type LIKE 'image/%'
 		WHERE b.organization_id = $1::uuid AND b.site_id = $2::uuid`+clause+`
 		ORDER BY b.sort_order ASC, b.created_at ASC
 		LIMIT `+fmt.Sprint(limit)+`
@@ -904,7 +951,7 @@ func (r *PublicReader) boundVersionRows(ctx context.Context, item Site, sectionS
 			&row.Binding.OnNavigation, &row.Binding.DisplayConfig, &row.Binding.DisplayPublishedAt,
 			&row.Binding.CreatedAt, &row.Binding.UpdatedAt,
 			&row.ContentKind, &row.AssetUpdatedAt, &row.AssetPublishedAt,
-			&row.VersionID, &row.Title, &row.Summary); err != nil {
+			&row.VersionID, &row.Title, &row.Summary, &row.CoverAttachmentID); err != nil {
 			return nil, fmt.Errorf("scan bound version row: %w", err)
 		}
 		out = append(out, row)
@@ -951,9 +998,35 @@ func (r *PublicReader) projectBoundRows(ctx context.Context, item Site, visitor 
 			Tags:        summary,
 			UpdatedAt:   timePtr(row.AssetUpdatedAt),
 			PublishedAt: ResolveDisplayPublishedAt(row.Binding.DisplayPublishedAt, row.AssetPublishedAt),
+			CoverAttachmentID: row.CoverAttachmentID,
 		})
 	}
 	return items, nil
+}
+
+// About serves the site about page: the first content_type='about' binding
+// projected through the same detail pipeline (二期 §7.1). No binding answers
+// ErrSiteNotFound.
+func (r *PublicReader) About(ctx context.Context, visitorAddr string, principal auth.Principal, slug string) (PublicPostContent, error) {
+	if err := r.allow(ctx, visitorAddr); err != nil {
+		return PublicPostContent{}, err
+	}
+	item, err := r.loadSite(ctx, slug)
+	if err != nil {
+		return PublicPostContent{}, err
+	}
+	var displayPath string
+	if err := r.Store.Pool.QueryRow(ctx, `
+		SELECT b.display_path
+		FROM site.site_content_bindings b
+		WHERE b.organization_id = $1::uuid AND b.site_id = $2::uuid
+		  AND b.content_type = 'about'
+		ORDER BY b.sort_order ASC, b.created_at ASC
+		LIMIT 1
+	`, item.OrganizationID, item.ID).Scan(&displayPath); err != nil {
+		return PublicPostContent{}, ErrSiteNotFound
+	}
+	return r.Post(ctx, visitorAddr, principal, slug, displayPath)
 }
 
 // tagSummaries resolves the phase 2 tag summaries of the given versions

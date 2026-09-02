@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"agentchunzhi/internal/auth"
 	"agentchunzhi/internal/site"
@@ -19,6 +20,7 @@ import (
 // PreviewInput carries the preview request body.
 type PreviewInput struct {
 	StyleConfig json.RawMessage `json:"style_config"`
+	CustomCss   string          `json:"custom_css"`
 	Page        string          `json:"page"`
 	DisplayPath string          `json:"display_path"`
 }
@@ -47,11 +49,20 @@ func (s *Service) RenderPreview(ctx context.Context, principal auth.Principal, w
 	if err != nil {
 		return nil, err
 	}
+	customCss := row.CustomCss
+	if strings.TrimSpace(input.CustomCss) != "" {
+		clean, stripped := site.SanitizeCSS(input.CustomCss)
+		if len(stripped) > 0 && strings.TrimSpace(clean) == "" {
+			return nil, fmt.Errorf("%w: custom_css was entirely removed by the sanitizer", site.ErrInvalidInput)
+		}
+		customCss = clean
+	}
 	facts := site.SiteFacts{
 		Site:             row,
 		HomepageConfig:   row.HomepageConfig,
 		NavigationConfig: row.NavigationConfig,
 		StyleConfig:      styleDocument,
+		CustomCss:        customCss,
 		Template:         row.Template,
 	}
 	// Previews bypass the page cache by construction (no pipeline).

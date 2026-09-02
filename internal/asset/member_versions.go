@@ -160,6 +160,20 @@ func loadVersionTagIDs(ctx context.Context, tx pgx.Tx, versionID string) ([]stri
 	return ids, rows.Err()
 }
 
+// loadVersionCoverID returns the version's cover attachment id (二期 §6).
+func loadVersionCoverID(ctx context.Context, tx pgx.Tx, versionID string) (string, error) {
+	var cover string
+	err := tx.QueryRow(ctx, `
+		SELECT attachment_id::text FROM asset.asset_version_attachments
+		WHERE asset_version_id = $1::uuid AND role = 'cover'
+		LIMIT 1
+	`, versionID).Scan(&cover)
+	if err == nil || errors.Is(err, pgx.ErrNoRows) {
+		return cover, nil
+	}
+	return "", fmt.Errorf("load version cover: %w", err)
+}
+
 func loadVersionAttachmentIDs(ctx context.Context, tx pgx.Tx, versionID string) ([]string, error) {
 	rows, err := tx.Query(ctx, `SELECT attachment_id::text FROM asset.asset_version_attachments WHERE asset_version_id = $1::uuid ORDER BY attachment_id`, versionID)
 	if err != nil {

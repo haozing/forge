@@ -47,6 +47,11 @@ type Site struct {
 	HomepageConfig      json.RawMessage `json:"homepage_config"`
 	NavigationConfig    json.RawMessage `json:"navigation_config"`
 	StyleConfig         json.RawMessage `json:"style_config"`
+	// CustomCss is the sanitized L2 layer (二期 §4), rendered after the
+	// base stylesheet so the cascade overrides it.
+	CustomCss string `json:"custom_css"`
+	// CommentsMode gates the comment section (二期 §8).
+	CommentsMode string `json:"comments_mode"`
 	// PublishedReleaseID points at the live immutable config snapshot; NULL
 	// means the public render falls back to the working columns above.
 	PublishedReleaseID *string         `json:"published_release_id"`
@@ -74,6 +79,7 @@ type CreateSiteInput struct {
 // UpdateSiteInput carries the PATCH /sites/{siteId} body; nil pointers stay
 // unchanged. Slug is identity and never updatable. StyleConfig is a partial
 // document deep-merged over the stored one (null leaves reset to preset).
+// CustomCss replaces the L2 layer wholesale (CSS has no merge semantics).
 type UpdateSiteInput struct {
 	Name                *string
 	Domain              *string
@@ -82,6 +88,8 @@ type UpdateSiteInput struct {
 	HomepageConfig      *json.RawMessage
 	NavigationConfig    *json.RawMessage
 	StyleConfig         *json.RawMessage
+	CustomCss           *string
+	CommentsMode        *string
 	Status              *string
 }
 
@@ -134,15 +142,15 @@ func (s Service) require(ctx context.Context, principal auth.Principal, workspac
 
 const siteColumns = `id::text, organization_id::text, workspace_id::text, slug, name,
 	COALESCE(domain, ''), template, default_content_scope, status, revision,
-	homepage_config, navigation_config, style_config, published_release_id::text,
-	created_at, updated_at`
+	homepage_config, navigation_config, style_config, custom_css, comments_mode,
+	published_release_id::text, created_at, updated_at`
 
 func scanSiteRow(row interface{ Scan(...any) error }) (Site, error) {
 	var item Site
 	err := row.Scan(&item.ID, &item.OrganizationID, &item.WorkspaceID, &item.Slug, &item.Name,
 		&item.Domain, &item.Template, &item.DefaultContentScope, &item.Status, &item.Revision,
-		&item.HomepageConfig, &item.NavigationConfig, &item.StyleConfig, &item.PublishedReleaseID,
-		&item.CreatedAt, &item.UpdatedAt)
+		&item.HomepageConfig, &item.NavigationConfig, &item.StyleConfig, &item.CustomCss,
+		&item.CommentsMode, &item.PublishedReleaseID, &item.CreatedAt, &item.UpdatedAt)
 	if err != nil {
 		return Site{}, err
 	}
@@ -437,14 +445,39 @@ func (s Service) UpdateSite(ctx context.Context, principal auth.Principal, works
 	}
 	// style_config is a partial document deep-merged over the locked row's
 	// stored value; the merged result is re-validated (unknown keys, enums,
-	// ranges and the WCAG contrast gate all reject here).
+	// ranges and the WCAG contrast gate all reject here). An org preset
+	// reference (uuid) expands to the preset's document first — copy
+	// semantics (二期 §5).
 	var style json.RawMessage
 	if input.StyleConfig != nil {
-		merged, err := MergeStylePatch(current.StyleConfig, *input.StyleConfig)
+		overlay, presetCSS, err := s.ExpandStylePreset(ctx, principal.OrganizationID, *input.StyleConfig)
+		if err != nil {
+			return Site{}, err
+		}
+		merged, err := MergeStylePatch(current.StyleConfig, overlay)
 		if err != nil {
 			return Site{}, err
 		}
 		style = merged
+		// Applying a preset copies its custom_css too — unless this PATCH
+		// carries an explicit custom_css (that wins over the bundle).
+		if input.CustomCss == nil && strings.TrimSpace(presetCSS) != "" {
+			copied, _ := SanitizeCSS(presetCSS)
+			input.CustomCss = &copied
+		}
+	}
+	// The L2 layer is sanitized at write; the stored form is the canonical
+	// output (rendering sanitizes again for defense in depth).
+	var customCss string
+	if input.CustomCss != nil {
+		clean, stripped := SanitizeCSS(*input.CustomCss)
+		if len(stripped) > 0 && strings.TrimSpace(clean) == "" && strings.TrimSpace(*input.CustomCss) != "" {
+			return Site{}, fmt.Errorf("%w: custom_css was entirely removed by the sanitizer", ErrInvalidInput)
+		}
+		customCss = clean
+	}
+	if input.CommentsMode != nil && !ValidCommentsMode(*input.CommentsMode) {
+		return Site{}, ErrInvalidInput
 	}
 	if domain != "" && domain != current.Domain {
 		var exists bool
@@ -457,7 +490,7 @@ func (s Service) UpdateSite(ctx context.Context, principal auth.Principal, works
 			return Site{}, ErrConflict
 		}
 	}
-	item, err := applySiteUpdate(ctx, tx, principal, workspaceID, siteID, input, name, domain, homepage, navigation, style)
+	item, err := applySiteUpdate(ctx, tx, principal, workspaceID, siteID, input, name, domain, homepage, navigation, style, customCss)
 	if err != nil {
 		return Site{}, err
 	}
@@ -478,7 +511,7 @@ func (s Service) UpdateSite(ctx context.Context, principal auth.Principal, works
 
 // applySiteUpdate renders the dynamic SET clause from the non-nil pointers
 // and bumps the revision inside the caller's transaction.
-func applySiteUpdate(ctx context.Context, tx pgx.Tx, principal auth.Principal, workspaceID, siteID string, input UpdateSiteInput, name, domain string, homepage, navigation, style json.RawMessage) (Site, error) {
+func applySiteUpdate(ctx context.Context, tx pgx.Tx, principal auth.Principal, workspaceID, siteID string, input UpdateSiteInput, name, domain string, homepage, navigation, style json.RawMessage, customCss string) (Site, error) {
 	sets := []string{"revision = site.public_sites.revision + 1", "updated_at = now()"}
 	args := []any{principal.OrganizationID, workspaceID, siteID}
 	arg := func(value any) string {
@@ -505,6 +538,12 @@ func applySiteUpdate(ctx context.Context, tx pgx.Tx, principal auth.Principal, w
 	}
 	if input.StyleConfig != nil {
 		sets = append(sets, "style_config = "+arg(string(style))+"::jsonb")
+	}
+	if input.CustomCss != nil {
+		sets = append(sets, "custom_css = "+arg(customCss))
+	}
+	if input.CommentsMode != nil {
+		sets = append(sets, "comments_mode = "+arg(*input.CommentsMode))
 	}
 	if input.Status != nil {
 		sets = append(sets, "status = "+arg(*input.Status))

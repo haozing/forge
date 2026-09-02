@@ -8,11 +8,13 @@ package httpapi
 
 import (
 	"errors"
+	"io"
 	"math"
 	"net/http"
 	"strconv"
 
 	"agentchunzhi/internal/delivery"
+	"agentchunzhi/internal/objectstore"
 	"agentchunzhi/internal/site"
 
 	agentquery "agentchunzhi/internal/query"
@@ -352,5 +354,118 @@ func deliverySearchScript(deps Dependencies) http.HandlerFunc {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.WriteHeader(page.Status)
 		_, _ = w.Write(page.Body)
+	}
+}
+
+// deliverySiteAbout serves /sites/{slug}/about/ (二期 §7.1).
+func deliverySiteAbout(deps Dependencies) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		service := requireDelivery(w, deps)
+		if service == nil {
+			return
+		}
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			writeDeliveryPage(w, r, service, service.ErrorPage(http.StatusMethodNotAllowed))
+			return
+		}
+		slug := r.PathValue("slug")
+		if !site.ValidSlug(slug) {
+			writeDeliveryPage(w, r, service, service.ErrorPage(http.StatusNotFound))
+			return
+		}
+		page, err := service.About(r.Context(), effectiveClientAddr(r, deps.TrustedProxyCIDRs),
+			publicVisitorPrincipal(r, deps), slug, deliveryBaseURL(r))
+		if err != nil {
+			writeDeliveryError(w, r, service, err)
+			return
+		}
+		writeDeliveryPage(w, r, service, page)
+	}
+}
+
+// deliverySiteArchive serves /sites/{slug}/archive/ (二期 §7.2).
+func deliverySiteArchive(deps Dependencies) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		service := requireDelivery(w, deps)
+		if service == nil {
+			return
+		}
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			writeDeliveryPage(w, r, service, service.ErrorPage(http.StatusMethodNotAllowed))
+			return
+		}
+		slug := r.PathValue("slug")
+		if !site.ValidSlug(slug) {
+			writeDeliveryPage(w, r, service, service.ErrorPage(http.StatusNotFound))
+			return
+		}
+		page, err := service.Archive(r.Context(), effectiveClientAddr(r, deps.TrustedProxyCIDRs),
+			publicVisitorPrincipal(r, deps), slug, deliveryBaseURL(r))
+		if err != nil {
+			writeDeliveryError(w, r, service, err)
+			return
+		}
+		writeDeliveryPage(w, r, service, page)
+	}
+}
+
+// deliverySiteMedia serves /sites/{slug}/media/{attachmentId}: the public
+// cover stream (same-origin, immutable, Content-Type locked to images).
+func deliverySiteMedia(deps Dependencies) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		service := requireDelivery(w, deps)
+		if service == nil {
+			return
+		}
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
+			return
+		}
+		slug := r.PathValue("slug")
+		attachmentID := r.PathValue("attachmentId")
+		if !site.ValidSlug(slug) || !agentquery.ValidUUID(attachmentID) {
+			writeError(w, http.StatusNotFound, "site_not_found")
+			return
+		}
+		media, err := service.Media(r.Context(), slug, attachmentID)
+		if err != nil {
+			writeError(w, http.StatusNotFound, "site_not_found")
+			return
+		}
+		reader, err := service.Objects.Get(r.Context(), objectstore.ObjectRef{Key: media.ObjectKey})
+		if err != nil {
+			writeError(w, http.StatusNotFound, "site_not_found")
+			return
+		}
+		defer reader.Body.Close()
+		w.Header().Set("Content-Type", media.MediaType)
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		if media.ByteSize > 0 {
+			w.Header().Set("Content-Length", strconv.FormatInt(media.ByteSize, 10))
+		}
+		w.WriteHeader(http.StatusOK)
+		if r.Method != http.MethodHead {
+			_, _ = io.Copy(w, reader.Body)
+		}
+	}
+}
+
+// deliveryCarouselScript serves the embedded carousel enhancement.
+func deliveryCarouselScript(deps Dependencies) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if deps.Delivery == nil {
+			writeError(w, http.StatusInternalServerError, "internal_error")
+			return
+		}
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
+			return
+		}
+		w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+		w.Header().Set("Cache-Control", "public, max-age=3600")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(delivery.CarouselScript())
 	}
 }

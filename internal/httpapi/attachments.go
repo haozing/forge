@@ -116,6 +116,7 @@ func deleteAttachment(deps Dependencies) http.HandlerFunc {
 
 type linkAttachmentRequest struct {
 	AssetID string `json:"asset_id"`
+	Role string `json:"role"` // body | cover (二期 §6)
 }
 
 func linkAttachment(deps Dependencies) http.HandlerFunc {
@@ -139,7 +140,7 @@ func linkAttachment(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusUnprocessableEntity, "validation_failed")
 			return
 		}
-		if err := deps.AttachmentService.Link(r.Context(), principal, r.PathValue("attachmentId"), input.AssetID); err != nil {
+		if err := deps.AttachmentService.Link(r.Context(), principal, r.PathValue("attachmentId"), input.AssetID, input.Role); err != nil {
 			writeAttachmentError(w, err, "attachment_link_failed")
 			return
 		}

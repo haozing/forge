@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"agentchunzhi/internal/auth"
+	"agentchunzhi/internal/objectstore"
 	"agentchunzhi/internal/site"
 	"agentchunzhi/internal/store"
 	"agentchunzhi/internal/tag"
@@ -51,7 +52,10 @@ type Service struct {
 	Sites  *site.Service
 	Cache  *PageCache
 	Render *Renderer
-	Logf   func(string, ...any)
+	// Objects streams public cover media (二期 §6); nil disables the
+	// media route (404 parity).
+	Objects objectstore.ObjectStore
+	Logf    func(string, ...any)
 	// group collapses concurrent cold-key renders.
 	group singleflight.Group
 }
@@ -112,7 +116,16 @@ func revision(facts site.SiteFacts) string {
 	return fmt.Sprintf("w%d", facts.Site.Revision)
 }
 
-// chrome builds the page furniture from the effective facts and style.
+// sanitizedCustomCSS runs the render-side sanitizer pass (idempotent).
+func sanitizedCustomCSS(raw string) string {
+	clean, _ := site.SanitizeCSS(raw)
+	return clean
+}
+
+// chrome builds the page furniture from the effective facts and style. The
+// L2 custom CSS is sanitized again on every render (defense in depth; the
+// write side already stores the canonical output) and lands last in the
+// cascade so it overrides the base stylesheet (二期 §4.4).
 func chrome(facts site.SiteFacts, style site.StyleConfig, pageKind string) Chrome {
 	slug := facts.Site.Slug
 	return Chrome{
@@ -127,7 +140,7 @@ func chrome(facts site.SiteFacts, style site.StyleConfig, pageKind string) Chrom
 		SearchHref:    "/sites/" + slug + "/search",
 		RSSHref:       "/sites/" + slug + "/rss.xml",
 		Style:         style,
-		StyleCSSVars:  template.CSS(StyleCSS(style) + baseStyleSheet),
+		StyleCSSVars:  template.CSS(StyleCSS(style) + baseStyleSheet + sanitizedCustomCSS(facts.CustomCss)),
 		ModeAttribute: ColorModeAttribute(style),
 		LayoutClasses: LayoutClasses(style, pageKind),
 	}
@@ -379,6 +392,7 @@ func (s *Service) Post(ctx context.Context, addr string, principal auth.Principa
 		vm.NoIndex = !vm.Site.ScopePublic
 		vm.ModifiedISO = vm.UpdatedISO
 		vm.JSONLD = articleJSONLD(facts, content, baseURL+routePath)
+		s.attachDetailComments(ctx, &vm, facts, band, slug)
 		return renderOutput{kind: "detail", vm: vm, noIndex: vm.NoIndex}, nil
 	})
 }
@@ -523,6 +537,9 @@ func (s *Service) Sitemap(ctx context.Context, addr string, principal auth.Princ
 			{Loc: baseURL + "/sites/" + slug + "/"},
 			{Loc: baseURL + "/sites/" + slug + "/posts/"},
 		}}
+		if _, err := s.Reader.About(ctx, addr, principal, slug); err == nil {
+			vm.URLs = append(vm.URLs, SitemapURL{Loc: baseURL + "/sites/" + slug + "/about/"})
+		}
 		sections, err := s.Reader.SectionSlugs(ctx, addr, principal, slug)
 		if err != nil {
 			return renderOutput{}, err
@@ -538,6 +555,7 @@ func (s *Service) Sitemap(ctx context.Context, addr string, principal auth.Princ
 			vm.URLs = append(vm.URLs, SitemapURL{Loc: baseURL + "/sites/" + slug + "/tags/" + item.Tag.Key + "/"})
 		}
 		cursor := ""
+		sitemapPosts := 0
 		for round := 0; round < 10; round++ {
 			page, err := s.Reader.Posts(ctx, addr, principal, slug, site.PublicPostQuery{Cursor: cursor, Limit: 50})
 			if err != nil {
@@ -548,11 +566,15 @@ func (s *Service) Sitemap(ctx context.Context, addr string, principal auth.Princ
 					Loc:       baseURL + postHref(slug, post.DisplayPath),
 					LastmodOn: FormatISO(post.UpdatedAt),
 				})
+				sitemapPosts++
 			}
 			if !page.HasMore || page.NextCursor == "" {
 				break
 			}
 			cursor = page.NextCursor
+		}
+		if sitemapPosts > 0 {
+			vm.URLs = append(vm.URLs, SitemapURL{Loc: baseURL + "/sites/" + slug + "/archive/"})
 		}
 		body, err := s.Render.RenderXML("sitemap", vm)
 		if err != nil {

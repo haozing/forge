@@ -57,6 +57,12 @@ const (
 	EventSiteBindingChanged = "site.binding_changed"
 )
 
+// PublicSite comment facts (二期 §8): one landed comment; consumed by the
+// delivery cache invalidator.
+const (
+	EventSiteCommentCreated = "site.comment_created"
+)
+
 // Identity/organization facts (extended by phase 1).
 const (
 	EventOrganizationUpdated             = "organization.updated"
@@ -197,6 +203,12 @@ type AgentProcessingCompletedPayload struct {
 	Counts             map[string]int `json:"counts"`
 }
 
+// SiteCommentCreatedPayload marks one comment landing on a site asset.
+type SiteCommentCreatedPayload struct {
+	SiteID  string `json:"site_id"`
+	AssetID string `json:"asset_id"`
+}
+
 // KnownEvents maps every catalog event to its payload version. The registry
 // refuses to dispatch events absent from this table.
 func KnownEvents() map[string]int {
@@ -220,6 +232,7 @@ func KnownEvents() map[string]int {
 		EventAgentAccessPolicyChanged:     PayloadVersionV1,
 		EventSiteChanged:                  PayloadVersionV1,
 		EventSiteBindingChanged:           PayloadVersionV1,
+		EventSiteCommentCreated:           PayloadVersionV1,
 		EventAgentProcessingCompleted:     PayloadVersionV1,
 	}
 }

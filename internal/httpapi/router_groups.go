@@ -60,7 +60,11 @@ func registerDeliveryRoutes(deps Dependencies, mux *http.ServeMux) {
 	mux.HandleFunc("/sites/{slug}/rss.xml", deliverySiteFeed("rss")(deps))
 	mux.HandleFunc("/sites/{slug}/sitemap.xml", deliverySiteFeed("sitemap")(deps))
 	mux.HandleFunc("/sites/{slug}/robots.txt", deliverySiteFeed("robots")(deps))
+	mux.HandleFunc("/sites/{slug}/about/", deliverySiteAbout(deps))
+	mux.HandleFunc("/sites/{slug}/archive/", deliverySiteArchive(deps))
+	mux.HandleFunc("/sites/{slug}/media/{attachmentId}", deliverySiteMedia(deps))
 	mux.HandleFunc("/static/delivery-search.js", deliverySearchScript(deps))
+	mux.HandleFunc("/static/delivery-carousel.js", deliveryCarouselScript(deps))
 }
 
 // registerPublicRoutes holds the anonymous surface: email login, password
@@ -82,6 +86,7 @@ func registerPublicRoutes(deps Dependencies, mux *http.ServeMux) {
 	mux.HandleFunc("/api/public/sites/{slug}/tags", publicSiteTags(deps))
 	mux.HandleFunc("/api/public/sites/{slug}/tags/{key}", publicSiteTagPage(deps))
 	mux.HandleFunc("/api/public/sites/{slug}/search", publicSiteSearch(deps))
+	mux.HandleFunc("/api/public/sites/{slug}/comments", publicSiteCommentCreate(deps))
 }
 
 // registerIdentityRoutes holds the member identity surface: profile,
@@ -153,6 +158,8 @@ func registerOrganizationRoutes(deps Dependencies, mux *http.ServeMux) {
 		}
 		RevokeOrganizationWorkspaceMember(deps)(w, r)
 	})
+	mux.HandleFunc("/api/organization/style-presets", OrganizationStylePresets(deps))
+	mux.HandleFunc("/api/organization/style-presets/{presetId}", OrganizationStylePresetResource(deps))
 	mux.HandleFunc("/api/organization/query", OrganizationQuery(deps))
 	mux.HandleFunc("/api/organization/retrieval/profiles", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
@@ -275,6 +282,8 @@ func registerSiteRoutes(deps Dependencies, mux *http.ServeMux) {
 	mux.HandleFunc("/api/workspaces/{workspaceId}/sites/{siteId}/bindings/{bindingId}", SiteBindingResource(deps))
 	mux.HandleFunc("/api/workspaces/{workspaceId}/sites/{siteId}/preview", SitePreview(deps))
 	mux.HandleFunc("/api/workspaces/{workspaceId}/sites/{siteId}/releases", SiteReleases(deps))
+	mux.HandleFunc("/api/workspaces/{workspaceId}/sites/{siteId}/comments", SiteComments(deps))
+	mux.HandleFunc("/api/workspaces/{workspaceId}/sites/{siteId}/comments/{commentId}", SiteCommentResource(deps))
 }
 
 // registerQueryRoutes holds the unified query surface (workspace and member

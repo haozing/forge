@@ -37,6 +37,7 @@ type BuiltinHandlers struct {
 	DeleteAsset          JSONHandler
 	ExportAssets         JSONHandler
 	SiteStyleSuggest     JSONHandler
+	SiteStylePresetSave  JSONHandler
 }
 
 type builtinSpec struct {
@@ -92,6 +93,7 @@ func builtinSpecs(handlers BuiltinHandlers) []builtinSpec {
 		// Named snake_case: OpenAI-compatible providers reject dots in
 		// function names (pattern ^[a-zA-Z0-9_-]+$), the design doc's
 		// dotted spelling cannot travel to the model.
+		{name: "site_style_preset_save", description: "Save a site's current style (parameters + custom CSS) as a named org preset (low write; applying stays human)", risk: LowWrite, capabilities: []string{"site.style"}, handler: handlers.SiteStylePresetSave, parameters: map[string]*schema.ParameterInfo{"name": id("Preset name (2-32 chars)"), "site_id": {Type: schema.String, Desc: "Site ID or slug (required when the workspace has multiple active sites)"}}},
 		{name: "site_style_suggest", description: "Suggest 2-3 validated style patches for one public site from a natural-language instruction (read-only; publishing stays human)", risk: ReadOnly, capabilities: []string{"site.style"}, handler: handlers.SiteStyleSuggest, parameters: map[string]*schema.ParameterInfo{"instruction": id("Natural-language style instruction"), "site_id": {Type: schema.String, Desc: "Site ID (required when the workspace has multiple active sites)"}}},
 	}
 }

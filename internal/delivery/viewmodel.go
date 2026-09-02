@@ -92,6 +92,8 @@ type CardVM struct {
 	PublishedOn string
 	UpdatedOn   string
 	Tags        []TagChip
+	// CoverURL is the same-origin media route of the version cover (二期 §6).
+	CoverURL string
 }
 
 // PaginationVM is the cursor pagination footer.
@@ -127,6 +129,7 @@ type ListVM struct {
 // DetailVM renders one post detail page.
 type DetailVM struct {
 	Page
+	AssetID     string
 	Section     string
 	SectionHref string
 	ContentHTML string
@@ -134,6 +137,35 @@ type DetailVM struct {
 	PublishedOn string
 	UpdatedISO  string
 	Tags        []TagChip
+	CoverURL    string
+	// Comments (二期 §8): enabled by the site mode, listed newest-last,
+	// writable by members (the form posts through the JS-free fallback: the
+	// console owns the rich UX; the page renders the plain form).
+	CommentsEnabled bool
+	Comments        []CommentVM
+	CanComment      bool
+	Moderation      string
+	PostPath        string
+}
+
+// CommentVM is one rendered comment (plain text, escaped by the template).
+type CommentVM struct {
+	Author  string
+	Body    string
+	Created string
+}
+
+// ArchiveYearVM groups the archive listing (二期 §7.2).
+type ArchiveYearVM struct {
+	Year    string
+	Months  []ArchiveMonthVM
+}
+
+// ArchiveMonthVM lists one month's entries.
+type ArchiveMonthVM struct {
+	Month string
+	Label string
+	Items []CardVM
 }
 
 // TagsVM renders the tag index.
@@ -230,7 +262,7 @@ func cardVM(slug string, post site.PublicPost, summaryRunes int) CardVM {
 	if summaryRunes > 0 {
 		summary = site.SafeSummary(post.Summary, summaryRunes)
 	}
-	return CardVM{
+	card := CardVM{
 		Title:       post.Title,
 		Href:        postHref(slug, post.DisplayPath),
 		Summary:     summary,
@@ -238,6 +270,10 @@ func cardVM(slug string, post site.PublicPost, summaryRunes int) CardVM {
 		UpdatedOn:   FormatDate(post.UpdatedAt),
 		Tags:        tagChips(slug, post.Tags),
 	}
+	if post.CoverAttachmentID != "" {
+		card.CoverURL = "/sites/" + slug + "/media/" + post.CoverAttachmentID
+	}
+	return card
 }
 
 // ResolveHome projects the reader home view into the home VM, honoring the
@@ -340,8 +376,9 @@ func ResolveList(slug, heading, basePath string, page site.PublicPostPage, style
 // sanitized markdown body and the extracted TOC.
 func ResolveDetail(slug string, content site.PublicPostContent) DetailVM {
 	markdown := RenderMarkdown(content.Markdown)
-	return DetailVM{
+	detail := DetailVM{
 		Page:        Page{Kind: "detail", Title: content.Title, Description: content.Summary},
+		AssetID:     content.AssetID,
 		Section:     content.Section,
 		SectionHref: sectionHref(slug, content.Section),
 		ContentHTML: markdown.HTML,
@@ -349,7 +386,12 @@ func ResolveDetail(slug string, content site.PublicPostContent) DetailVM {
 		PublishedOn: FormatDate(content.PublishedAt),
 		UpdatedISO:  FormatISO(content.UpdatedAt),
 		Tags:        tagChips(slug, content.Tags),
+		PostPath:    postHref(slug, content.DisplayPath),
 	}
+	if content.CoverAttachmentID != "" {
+		detail.CoverURL = "/sites/" + slug + "/media/" + content.CoverAttachmentID
+	}
+	return detail
 }
 
 // ResolveTags projects the facet cloud into the tag index VM.

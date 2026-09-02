@@ -40,6 +40,8 @@ func SiteError(w http.ResponseWriter, err error, conflictCode string) {
 		writeError(w, http.StatusNotFound, "binding_not_found")
 	case errors.Is(err, site.ErrReleaseNotFound):
 		writeError(w, http.StatusNotFound, "release_not_found")
+	case errors.Is(err, site.ErrCommentNotFound):
+		writeError(w, http.StatusNotFound, "comment_not_found")
 	case errors.Is(err, site.ErrSlugInvalid):
 		writeError(w, http.StatusUnprocessableEntity, "slug_invalid")
 	case errors.Is(err, site.ErrPathInvalid):
@@ -78,6 +80,8 @@ type UpdateSiteRequest struct {
 	HomepageConfig      *json.RawMessage `json:"homepage_config"`
 	NavigationConfig    *json.RawMessage `json:"navigation_config"`
 	StyleConfig         *json.RawMessage `json:"style_config"`
+	CustomCss           *string          `json:"custom_css"`
+	CommentsMode        *string          `json:"comments_mode"`
 	Status              *string          `json:"status"`
 }
 
@@ -194,6 +198,8 @@ func SiteResource(deps Dependencies) http.HandlerFunc {
 					HomepageConfig:      input.HomepageConfig,
 					NavigationConfig:    input.NavigationConfig,
 					StyleConfig:         input.StyleConfig,
+					CustomCss:           input.CustomCss,
+					CommentsMode:        input.CommentsMode,
 					Status:              input.Status,
 				})
 			if err != nil {

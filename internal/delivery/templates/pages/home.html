@@ -10,4 +10,5 @@
 {{end}}
 {{if and $showTags .TagCloud}}<section class="home-section home-tags"><h2>标签</h2>{{template "tag_chips" .TagCloud}}</section>{{end}}
 {{if not .Sections}}{{if not .TagCloud}}{{template "empty" .}}{{end}}{{end}}
+{{if eq .Site.Style.HomeStyle "carousel"}}<script src="/static/delivery-carousel.js" defer></script>{{end}}
 {{end}}

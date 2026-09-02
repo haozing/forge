@@ -270,6 +270,9 @@ type VersionMaterial struct {
 	// the first version before their draft exists). Empty means "manual".
 	TagSource        string
 	AttachmentIDs    []string           // must reference clean, unexpired attachments
+	// CoverAttachmentID marks one of AttachmentIDs as the version cover
+	// (二期 §6); it flows into asset_version_attachments.role.
+	CoverAttachmentID string
 	Relations        []RelationMaterial // materialize as asset_relations rows (source='ai')
 	SourceRawInputID string
 	CreatedBy        string
@@ -411,11 +414,15 @@ func createVersionTx(ctx context.Context, tx pgx.Tx, material VersionMaterial) (
 		}
 	}
 	for _, attachmentID := range dedupeSort(material.AttachmentIDs) {
+		role := "body"
+		if attachmentID == material.CoverAttachmentID {
+			role = "cover"
+		}
 		if _, err := tx.Exec(ctx, `
-			INSERT INTO asset.asset_version_attachments (organization_id, workspace_id, asset_version_id, attachment_id, created_by)
-			VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, NULLIF($5,'')::uuid)
+			INSERT INTO asset.asset_version_attachments (organization_id, workspace_id, asset_version_id, attachment_id, created_by, role)
+			VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, NULLIF($5,'')::uuid, $6)
 			ON CONFLICT DO NOTHING
-		`, material.OrganizationID, material.WorkspaceID, versionID, attachmentID, material.CreatedBy); err != nil {
+		`, material.OrganizationID, material.WorkspaceID, versionID, attachmentID, material.CreatedBy, role); err != nil {
 			return "", 0, nil, fmt.Errorf("insert version attachment: %w", err)
 		}
 	}
@@ -596,9 +603,18 @@ func commitDraftTx(ctx context.Context, tx pgx.Tx, events *eventing.EventStore, 
 	if err != nil {
 		return CommitResult{}, err
 	}
-	attachmentIDs, err := loadDraftAttachmentIDs(ctx, tx, draft.DraftID)
+	attachmentIDs, draftCover, err := loadDraftAttachments(ctx, tx, draft.DraftID)
 	if err != nil {
 		return CommitResult{}, err
+	}
+	// The draft's explicit cover wins; otherwise the previous version's
+	// cover carries into the new snapshot (republishing keeps the image).
+	coverID := draftCover
+	if coverID == "" && row.CurrentWorkingVersionID != "" {
+		coverID, err = loadVersionCoverID(ctx, tx, row.CurrentWorkingVersionID)
+		if err != nil {
+			return CommitResult{}, err
+		}
 	}
 	relations, err := loadDraftRelationMaterials(ctx, tx, row.OrganizationID, draft.DraftID)
 	if err != nil {
@@ -616,6 +632,7 @@ func commitDraftTx(ctx context.Context, tx pgx.Tx, events *eventing.EventStore, 
 		Fields:          draft.Fields,
 		TagIDs:          tagIDs,
 		AttachmentIDs:   attachmentIDs,
+		CoverAttachmentID: coverID,
 		Relations:       relations,
 		CreatedBy:       principal.UserID,
 	}
@@ -779,20 +796,31 @@ func loadDraftTagIDs(ctx context.Context, tx pgx.Tx, draftID string) ([]string, 
 }
 
 func loadDraftAttachmentIDs(ctx context.Context, tx pgx.Tx, draftID string) ([]string, error) {
-	rows, err := tx.Query(ctx, `SELECT attachment_id::text FROM asset.asset_draft_attachments WHERE asset_draft_id = $1::uuid ORDER BY attachment_id`, draftID)
+	ids, _, err := loadDraftAttachments(ctx, tx, draftID)
+	return ids, err
+}
+
+// loadDraftAttachments returns the draft's attachment ids and its explicit
+// cover id (二期 §6: the cover rides the commit into the sealed version).
+func loadDraftAttachments(ctx context.Context, tx pgx.Tx, draftID string) ([]string, string, error) {
+	rows, err := tx.Query(ctx, `SELECT attachment_id::text, role FROM asset.asset_draft_attachments WHERE asset_draft_id = $1::uuid ORDER BY attachment_id`, draftID)
 	if err != nil {
-		return nil, fmt.Errorf("load draft attachments: %w", err)
+		return nil, "", fmt.Errorf("load draft attachments: %w", err)
 	}
 	defer rows.Close()
 	ids := []string{}
+	cover := ""
 	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
+		var id, role string
+		if err := rows.Scan(&id, &role); err != nil {
+			return nil, "", err
 		}
 		ids = append(ids, id)
+		if role == "cover" {
+			cover = id
+		}
 	}
-	return ids, rows.Err()
+	return ids, cover, rows.Err()
 }
 
 // loadDraftRelationMaterials reads the AI relations accepted onto the draft,

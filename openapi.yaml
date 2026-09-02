@@ -2491,6 +2491,115 @@ paths:
       responses:
         '201': { description: 已发布, content: { application/json: { schema: { $ref: '#/components/schemas/Envelope' } } } }
         '404': { description: base_release_id 不存在（release_not_found） }
+  /api/organization/style-presets:
+    get:
+      tags: [sites]
+      operationId: listOrgStylePresets
+      description: 组织级自定义样式预设目录（二期 §5；另存为预设/套用走拷贝语义）
+      responses:
+        '200': { description: 预设列表, content: { application/json: { schema: { $ref: '#/components/schemas/Envelope' } } } }
+    post:
+      tags: [sites]
+      operationId: createOrgStylePreset
+      description: 另存为组织预设（style_config 必须锚定内置 preset；custom_css 经白名单清理）
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+                style_config: { type: object }
+                custom_css: { type: string }
+      responses:
+        '201': { description: 已保存, content: { application/json: { schema: { $ref: '#/components/schemas/Envelope' } } } }
+        '422': { description: 文档非法（validation_failed） }
+  /api/organization/style-presets/{presetId}:
+    delete:
+      tags: [sites]
+      operationId: deleteOrgStylePreset
+      description: 删除组织预设（创建者或组织 admin；站点悬挂引用渲染侧回退内置默认）
+      parameters:
+        - name: presetId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200': { description: 已删除, content: { application/json: { schema: { $ref: '#/components/schemas/Envelope' } } } }
+  /api/workspaces/{workspaceId}/sites/{siteId}/comments:
+    get:
+      tags: [sites]
+      operationId: listSiteComments
+      description: 评论审核队列（二期 §8；status=pending|visible|rejected|all）
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/SiteId'
+        - { name: status, in: query, schema: { type: string } }
+      responses:
+        '200': { description: 评论列表, content: { application/json: { schema: { $ref: '#/components/schemas/Envelope' } } } }
+  /api/workspaces/{workspaceId}/sites/{siteId}/comments/{commentId}:
+    patch:
+      tags: [sites]
+      operationId: moderateSiteComment
+      description: 审核评论（status=visible|rejected|pending；site.manage）
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/SiteId'
+        - name: commentId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, enum: [visible, rejected, pending] }
+      responses:
+        '200': { description: 已更新, content: { application/json: { schema: { $ref: '#/components/schemas/Envelope' } } } }
+    delete:
+      tags: [sites]
+      operationId: deleteSiteComment
+      description: 删除评论（site.manage）
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/SiteId'
+        - name: commentId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200': { description: 已删除, content: { application/json: { schema: { $ref: '#/components/schemas/Envelope' } } } }
+  /api/public/sites/{slug}/comments:
+    post:
+      tags: [sites-public]
+      operationId: createPublicSiteComment
+      description: 成员在公开面发表评论（二期 §8；moderated 站点先审后显，open 立即显示；每成员每资产 10s 冷却）
+      parameters:
+        - $ref: '#/components/parameters/PublicSiteSlug'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [display_path, body]
+              properties:
+                display_path: { type: string }
+                body: { type: string, maxLength: 2000 }
+      responses:
+        '201': { description: 已提交, content: { application/json: { schema: { $ref: '#/components/schemas/Envelope' } } } }
+        '401': { description: 未登录（评论仅对成员开放） }
+        '404': { description: 站点/路径不存在或评论已关闭（防探测同码） }
   /api/public/sites/{slug}:
     get:
       tags: [sites-public]

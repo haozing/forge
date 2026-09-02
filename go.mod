@@ -8,7 +8,9 @@ require (
 	github.com/cloudwego/eino-ext/components/model/openai v0.1.13
 	github.com/eino-contrib/jsonschema v1.0.3
 	github.com/google/uuid v1.6.0
+	github.com/gorilla/css v1.0.1
 	github.com/jackc/pgx/v5 v5.7.2
+	github.com/microcosm-cc/bluemonday v1.0.27
 	github.com/riverqueue/river v0.18.0
 	github.com/riverqueue/river/riverdriver/riverpgxv5 v0.18.0
 	github.com/riverqueue/river/rivertype v0.18.0
@@ -31,7 +33,6 @@ require (
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/evanphx/json-patch v0.5.2 // indirect
 	github.com/goph/emperror v0.17.2 // indirect
-	github.com/gorilla/css v1.0.1 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
 	github.com/jackc/puddle/v2 v2.2.2 // indirect
@@ -39,7 +40,6 @@ require (
 	github.com/klauspost/cpuid/v2 v2.2.9 // indirect
 	github.com/mailru/easyjson v0.7.7 // indirect
 	github.com/meguminnnnnnnnn/go-openai v0.1.2 // indirect
-	github.com/microcosm-cc/bluemonday v1.0.27 // indirect
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
 	github.com/modern-go/reflect2 v1.0.2 // indirect
 	github.com/nikolalohinski/gonja v1.5.3 // indirect

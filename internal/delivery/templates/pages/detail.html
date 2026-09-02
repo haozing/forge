@@ -2,6 +2,7 @@
 <div class="article-layout{{if ne .Site.Style.Sidebar "none"}} has-sidebar{{end}}">
 <article class="article">
   <h1 class="article-title">{{.Title}}</h1>
+  {{with .CoverURL}}<div class="article-cover"><img src="{{.}}" alt="{{$.Title}}" loading="lazy"></div>{{end}}
   <footer class="card-meta article-meta">
     {{with .PublishedOn}}<time>发布于 {{.}}</time>{{end}}
     {{with .Section}}{{if ne . ""}}<a href="{{$.SectionHref}}">{{.}}</a>{{end}}{{end}}
@@ -9,6 +10,23 @@
   </footer>
   {{if and (ne .Site.Style.Sidebar "toc") (gt (len .TOC) 1)}}<nav class="toc"><h2>目录</h2><ul>{{range .TOC}}<li class="toc-l{{.Level}}"><a href="#{{.ID}}">{{.Text}}</a></li>{{end}}</ul></nav>{{end}}
   <div class="article-body">{{noescape .ContentHTML}}</div>
+  {{if .CommentsEnabled}}
+  <section class="comments" id="comments">
+    <h2>评论</h2>
+    {{if .Comments}}
+    <div class="comment-list">
+      {{range .Comments}}<div class="comment"><div class="comment-meta">{{.Author}} · {{.Created}}</div><p>{{.Body}}</p></div>{{end}}
+    </div>
+    {{else}}<p class="empty">还没有评论。</p>{{end}}
+    {{if .CanComment}}
+    <form class="comment-form" method="post" action="{{.PostPath}}/comments">
+      <textarea name="body" required maxlength="2000" placeholder="写下评论（纯文本）" aria-label="评论内容"></textarea>
+      <button type="submit">发表评论</button>
+      <span class="comment-hint">提交后{{if eq .Moderation "moderated"}}经管理员审核后显示{{else}}立即显示{{end}}。</span>
+    </form>
+    {{else}}<p class="comment-hint">登录成员后可评论。</p>{{end}}
+  </section>
+  {{end}}
 </article>
 {{if ne .Site.Style.Sidebar "none"}}<aside class="sidebar">
   {{if eq .Site.Style.Sidebar "toc"}}{{if gt (len .TOC) 1}}<nav class="toc"><h2>目录</h2><ul>{{range .TOC}}<li class="toc-l{{.Level}}"><a href="#{{.ID}}">{{.Text}}</a></li>{{end}}</ul></nav>{{end}}{{end}}

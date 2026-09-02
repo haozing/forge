@@ -43,7 +43,7 @@ func (i *Invalidator) Process(ctx context.Context, organizationID, eventType str
 			GROUP BY b.site_id
 		`, organizationID, assetID)
 		return logInvalidation(i.Logf, eventType, tag, err)
-	case eventing.EventSiteChanged, eventing.EventSiteBindingChanged:
+	case eventing.EventSiteChanged, eventing.EventSiteBindingChanged, eventing.EventSiteCommentCreated:
 		siteID, err := payloadString(payload, "site_id")
 		if err != nil {
 			return err

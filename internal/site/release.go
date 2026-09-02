@@ -38,11 +38,15 @@ type ReleasePage struct {
 	NextCursor string
 }
 
-// ReleaseConfig is the snapshot document of one release.
+// ReleaseConfig is the snapshot document of one release. CustomCss and
+// CommentsMode ride the snapshot (二期: the whole user-adjustable surface is
+// versioned together).
 type ReleaseConfig struct {
 	HomepageConfig   json.RawMessage `json:"homepage_config"`
 	NavigationConfig json.RawMessage `json:"navigation_config"`
 	StyleConfig      json.RawMessage `json:"style_config"`
+	CustomCss        string          `json:"custom_css"`
+	CommentsMode     string          `json:"comments_mode"`
 	Template         string          `json:"template"`
 }
 
@@ -162,6 +166,8 @@ func (s Service) PublishRelease(ctx context.Context, principal auth.Principal, w
 			HomepageConfig:   current.HomepageConfig,
 			NavigationConfig: current.NavigationConfig,
 			StyleConfig:      current.StyleConfig,
+			CustomCss:        current.CustomCss,
+			CommentsMode:     current.CommentsMode,
 			Template:         current.Template,
 		}
 	}

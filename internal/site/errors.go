@@ -33,4 +33,7 @@ var (
 	// ErrReleaseNotFound reports a release id that does not exist under the
 	// addressed site (rollback base resolution).
 	ErrReleaseNotFound = errors.New("site release not found")
+	// ErrCommentNotFound reports a comment id that does not exist under the
+	// addressed site (moderation surface).
+	ErrCommentNotFound = errors.New("site comment not found")
 )

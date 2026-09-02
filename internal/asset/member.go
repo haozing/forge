@@ -1084,6 +1084,10 @@ func (s MemberService) ConfirmVersion(ctx context.Context, principal auth.Princi
 	if err != nil {
 		return MemberAssetVersion{}, err
 	}
+	coverID, err := loadVersionCoverID(ctx, tx, versionID)
+	if err != nil {
+		return MemberAssetVersion{}, err
+	}
 	// The derived snapshot binds the model head's current version; its field
 	// schema gates the carried-over fields inside the same transaction.
 	var modelVersionID string
@@ -1116,6 +1120,7 @@ func (s MemberService) ConfirmVersion(ctx context.Context, principal auth.Princi
 		Fields:                 decodedFields,
 		TagIDs:                 tagIDs,
 		AttachmentIDs:          attachmentIDs,
+		CoverAttachmentID:      coverID,
 		CreatedBy:              principal.UserID,
 	})
 	if err != nil {

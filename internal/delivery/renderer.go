@@ -30,6 +30,15 @@ func readBaseStyles() string {
 	return string(body)
 }
 
+// CarouselScript serves the carousel enhancement script bytes.
+func CarouselScript() []byte {
+	body, err := templateFS.ReadFile("templates/static/carousel.js")
+	if err != nil {
+		panic("delivery: carousel script missing: " + err.Error())
+	}
+	return body
+}
+
 // SearchJavaScript serves the search island script bytes.
 func SearchJavaScript() []byte {
 	body, err := templateFS.ReadFile("templates/static/search.js")
@@ -53,6 +62,8 @@ var pageSets = map[string]string{
 	"tag_page":  "templates/pages/tag_page.html",
 	"search":    "templates/pages/search.html",
 	"gate":      "templates/pages/gate.html",
+	"about":     "templates/pages/about.html",
+	"archive":   "templates/pages/archive.html",
 	"error":     "templates/errors/error.html",
 }
 

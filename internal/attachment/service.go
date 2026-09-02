@@ -28,6 +28,7 @@ import (
 )
 
 var ErrNotFound = errors.New("attachment not found")
+var ErrInvalidInput = errors.New("attachment input invalid")
 var ErrInvalidUpload = errors.New("invalid attachment upload")
 var ErrUploadTooLarge = errors.New("attachment is too large")
 var ErrForbidden = errors.New("attachment access denied")
@@ -385,26 +386,52 @@ func (s Service) Delete(ctx context.Context, principal auth.Principal, attachmen
 
 // Link attaches a clean attachment to the asset's shared draft. The binding is
 // materialized into versions only through a commit transaction.
-func (s Service) Link(ctx context.Context, principal auth.Principal, attachmentID, assetID string) error {
+func (s Service) Link(ctx context.Context, principal auth.Principal, attachmentID, assetID, role string) error {
 	if !validID(attachmentID) || !validID(assetID) {
 		return ErrNotFound
+	}
+	if role == "" {
+		role = "body"
+	}
+	if role != "body" && role != "cover" {
+		return ErrInvalidInput
 	}
 	if err := s.validateStore(); err != nil {
 		return err
 	}
+	// Cover eligibility (二期 §6): clean image attachments within 5MB; one
+	// cover per draft (the unique index on versions is the final backstop).
+	extraClause := ""
+	if role == "cover" {
+		extraClause = ` AND at.media_type LIKE 'image/%' AND at.byte_size <= 5242880
+		  AND NOT EXISTS (
+			SELECT 1 FROM asset.asset_draft_attachments dc
+			WHERE dc.asset_draft_id = d.id AND dc.role = 'cover'
+			  AND dc.attachment_id <> at.id
+		  )`
+	}
+	// A changed attachment set (new link or role change) must dirty the
+	// draft — commit short-circuits on revision == committed_revision, so
+	// without the bump a cover link would never materialize into a version.
 	tag, err := s.Store.Pool.Exec(ctx, `
-		INSERT INTO asset.asset_draft_attachments
-			(organization_id, workspace_id, asset_draft_id, attachment_id, added_by)
-		SELECT d.organization_id, d.workspace_id, d.id, at.id, $3::uuid
-		FROM asset.attachments at
-		JOIN asset.asset_drafts d ON d.organization_id = at.organization_id AND d.workspace_id = at.workspace_id
-		JOIN asset.assets a ON a.organization_id = d.organization_id AND a.id = d.asset_id
-		WHERE at.organization_id = $1::uuid AND at.id = $2::uuid
-		  AND a.id = $4::uuid
-		  AND at.deleted_at IS NULL AND at.status = 'clean'
-		  AND (at.expires_at IS NULL OR at.expires_at > now())
-		ON CONFLICT (asset_draft_id, attachment_id) DO NOTHING
-	`, principal.OrganizationID, attachmentID, principal.UserID, assetID)
+		WITH linked AS (
+			INSERT INTO asset.asset_draft_attachments
+				(organization_id, workspace_id, asset_draft_id, attachment_id, added_by, role)
+			SELECT d.organization_id, d.workspace_id, d.id, at.id, $3::uuid, $5
+			FROM asset.attachments at
+			JOIN asset.asset_drafts d ON d.organization_id = at.organization_id AND d.workspace_id = at.workspace_id
+			JOIN asset.assets a ON a.organization_id = d.organization_id AND a.id = d.asset_id
+			WHERE at.organization_id = $1::uuid AND at.id = $2::uuid
+			  AND a.id = $4::uuid
+			  AND at.deleted_at IS NULL AND at.status = 'clean'
+			  AND (at.expires_at IS NULL OR at.expires_at > now())`+extraClause+`
+			ON CONFLICT (asset_draft_id, attachment_id) DO UPDATE SET role = EXCLUDED.role
+			RETURNING asset_draft_id
+		)
+		UPDATE asset.asset_drafts d
+		SET revision = d.revision + 1
+		WHERE d.id IN (SELECT asset_draft_id FROM linked)
+	`, principal.OrganizationID, attachmentID, principal.UserID, assetID, role)
 	if err != nil {
 		return fmt.Errorf("link attachment: %w", err)
 	}

@@ -100,3 +100,52 @@ h2 { font-size: 1.35em; }
   .search-form { margin-left: 0; width: 100%; }
   .article { padding: calc(var(--space) * 1.4); }
 }
+
+/* ---- 二期 §3: layout catalog extensions ---- */
+/* masonry: CSS multi-column; cards avoid splitting across columns. */
+.list--masonry .cards { columns: 3; column-gap: calc(var(--space) * 1.6); display: block; }
+.list--masonry .card, .list--masonry .cards > .card { break-inside: avoid; margin: 0 0 calc(var(--space) * 1.6); }
+@media (max-width: 920px) { .list--masonry .cards { columns: 2; } }
+@media (max-width: 640px) { .list--masonry .cards { columns: 1; } }
+
+/* timeline: vertical rail with dot anchors on the card edge. */
+.list--timeline .cards { position: relative; display: block; padding-left: calc(var(--space) * 3); }
+.list--timeline .cards::before { content: ""; position: absolute; left: calc(var(--space) * 1.2); top: 0; bottom: 0; width: 2px; background: var(--c-border); }
+.list--timeline .card { position: relative; margin-bottom: calc(var(--space) * 2); }
+.list--timeline .card::before { content: ""; position: absolute; left: calc(var(--space) * -2.4); top: calc(var(--space) * 1.6); width: calc(var(--space) * 1.1); height: calc(var(--space) * 1.1); border-radius: 999px; background: var(--c-primary); box-shadow: 0 0 0 3px var(--c-surface); }
+.list--timeline .card time { display: block; font-size: .82em; color: var(--c-muted); }
+
+/* carousel: horizontal scroll-snap track; JS adds controls progressively. */
+.home--carousel .cards-featured { display: flex; overflow-x: auto; scroll-snap-type: x mandatory; gap: calc(var(--space) * 1.6); padding-bottom: var(--space); scrollbar-width: thin; }
+.home--carousel .cards-featured > .card { flex: 0 0 min(72vw, 420px); scroll-snap-align: center; }
+.carousel-controls { display: flex; gap: var(--space); margin: 0 0 calc(var(--space) * 2); }
+.carousel-controls button { border: 1px solid var(--c-border); border-radius: 999px; background: var(--c-surface); color: var(--c-text); width: calc(var(--space) * 4); height: calc(var(--space) * 4); cursor: pointer; font-size: 1.1em; }
+.carousel-controls button:focus-visible { outline: 2px solid var(--c-primary); }
+@media (prefers-reduced-motion: reduce) { .home--carousel .cards-featured { scroll-behavior: auto; } }
+
+/* ---- 二期 §6: cover images + card ratio tokens ---- */
+.card-cover { margin: 0 0 var(--space); }
+.card-cover img { width: 100%; height: auto; display: block; border-radius: var(--radius); object-fit: cover; }
+.ratio--16-9 .card-cover { aspect-ratio: 16 / 9; }
+.ratio--4-3 .card-cover { aspect-ratio: 4 / 3; }
+.ratio--1-1 .card-cover { aspect-ratio: 1 / 1; }
+.ratio--16-9 .card-cover img, .ratio--4-3 .card-cover img, .ratio--1-1 .card-cover img { height: 100%; }
+.article-cover img { width: 100%; height: auto; border-radius: var(--radius); margin-bottom: calc(var(--space) * 2); }
+
+/* ---- 二期 §7: about + archive ---- */
+.archive-year { margin: calc(var(--space) * 3) 0 calc(var(--space) * 1); }
+.archive-year h2 { border-bottom: 1px solid var(--c-border); padding-bottom: calc(var(--space) * .5); }
+.archive-month { margin: calc(var(--space) * 1.5) 0; }
+.archive-month h3 { font-size: 1em; color: var(--c-muted); margin-bottom: var(--space); }
+.archive-list { list-style: none; margin: 0; padding: 0; }
+.archive-list li { padding: calc(var(--space) * .5) 0; border-bottom: 1px dashed var(--c-border); display: flex; justify-content: space-between; gap: var(--space); }
+.archive-list time { color: var(--c-muted); font-size: .85em; white-space: nowrap; }
+
+/* ---- 二期 §8: comments ---- */
+.comments { margin-top: calc(var(--space) * 3); border-top: 1px solid var(--c-border); padding-top: calc(var(--space) * 2); }
+.comment { padding: calc(var(--space) * 1.2) 0; border-bottom: 1px dashed var(--c-border); }
+.comment-meta { color: var(--c-muted); font-size: .85em; margin-bottom: calc(var(--space) * .4); }
+.comment-form { margin-top: calc(var(--space) * 2); display: grid; gap: var(--space); }
+.comment-form textarea { border: 1px solid var(--c-border); border-radius: var(--radius); background: var(--c-bg); color: var(--c-text); padding: var(--space); font: inherit; min-height: 96px; resize: vertical; }
+.comment-form button { justify-self: start; border: none; border-radius: var(--radius); background: var(--c-primary); color: var(--c-on-primary); padding: calc(var(--space) * .7) calc(var(--space) * 2); font: inherit; cursor: pointer; }
+.comment-form .comment-hint { color: var(--c-muted); font-size: .85em; }
