@@ -571,6 +571,7 @@ func (s MemberService) Create(ctx context.Context, principal auth.Principal, wor
 	`, resourceModelVersionID).Scan(&schemaBytes); err != nil {
 		return MemberAsset{}, err
 	}
+	fields = applyDefaults(schemaBytes, fields)
 	if err := ValidateFields(schemaBytes, fields); err != nil {
 		return MemberAsset{}, ErrInvalidInput
 	}
@@ -1141,6 +1142,7 @@ func (s MemberService) ConfirmVersion(ctx context.Context, principal auth.Princi
 	}
 	decodedFields := map[string]any{}
 	_ = json.Unmarshal(fields, &decodedFields)
+	decodedFields = applyDefaults(schemaBytes, decodedFields)
 	if err := ValidateFields(schemaBytes, decodedFields); err != nil {
 		return MemberAssetVersion{}, ErrInvalidInput
 	}

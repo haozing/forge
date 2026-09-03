@@ -16,6 +16,7 @@ import (
 	"agentchunzhi/internal/authz"
 	"agentchunzhi/internal/eventing"
 	agentquery "agentchunzhi/internal/query"
+	"agentchunzhi/internal/resourcemodel"
 	"agentchunzhi/internal/store"
 
 	"github.com/cloudwego/eino/compose"
@@ -110,6 +111,55 @@ func (f DomainToolFactory) Build(ctx context.Context, scope ReActToolScope, rawP
 		GetTaskStatus: func(ctx context.Context, arguments map[string]any) (any, error) {
 			return tasks.Get(ctx, principal, stringValue(arguments["task_id"]))
 		},
+		SuggestResourceModel: func(ctx context.Context, arguments map[string]any) (any, error) {
+			return f.suggestResourceModel(ctx, scope, stringValue(arguments["intent"]), stringListValue(arguments["samples"]), stringValue(arguments["extend_model_id"]))
+		},
+		CreateResourceModel: func(ctx context.Context, arguments map[string]any) (any, error) {
+			fieldSchema, _ := arguments["field_schema"].(map[string]any)
+			if fieldSchema == nil {
+				return nil, errors.New("field_schema is required")
+			}
+			form, list, policy := defaultModelSchemas(fieldSchema)
+			if value, ok := arguments["form_schema"].(map[string]any); ok {
+				form = value
+			}
+			if value, ok := arguments["list_schema"].(map[string]any); ok {
+				list = value
+			}
+			if value, ok := arguments["policy"].(map[string]any); ok {
+				policy = value
+			}
+			model, err := (resourcemodel.AgentDraftService{Store: f.Store}).AgentCreateDraft(ctx, principal, scope.WorkspaceID, resourcemodel.CreateInput{
+				ModelKey: stringValue(arguments["model_key"]), Name: stringValue(arguments["name"]),
+				Description: stringValue(arguments["description"]), ContentKind: stringValue(arguments["content_kind"]),
+				InitialVersion: resourcemodel.InitialVersion{FieldSchema: fieldSchema, FormSchema: form, ListSchema: list, Policy: policy},
+			})
+			if err != nil {
+				return nil, modelDraftToolError(err)
+			}
+			return model, nil
+		},
+		UpdateModelDraft: func(ctx context.Context, arguments map[string]any) (any, error) {
+			input := resourcemodel.VersionPatchInput{}
+			if value, ok := arguments["field_schema"].(map[string]any); ok {
+				input.FieldSchema = &value
+			}
+			if value, ok := arguments["form_schema"].(map[string]any); ok {
+				input.FormSchema = &value
+			}
+			if value, ok := arguments["list_schema"].(map[string]any); ok {
+				input.ListSchema = &value
+			}
+			if value, ok := arguments["policy"].(map[string]any); ok {
+				input.Policy = &value
+			}
+			version, err := (resourcemodel.AgentDraftService{Store: f.Store}).AgentPatchDraftVersion(ctx, principal, scope.WorkspaceID,
+				stringValue(arguments["version_id"]), stringValue(arguments["expected_schema_checksum"]), input)
+			if err != nil {
+				return nil, modelDraftToolError(err)
+			}
+			return version, nil
+		},
 		CreateInternalAsset: func(ctx context.Context, arguments map[string]any) (any, error) {
 			models, err := allowed(ctx, "asset.create")
 			if err != nil {
@@ -123,6 +173,7 @@ func (f DomainToolFactory) Build(ctx context.Context, scope ReActToolScope, rawP
 				ResourceModelID: stringValue(arguments["resource_model_id"]),
 				WorkspaceID:     scope.WorkspaceID,
 				Fields:          fields,
+				TagIDs:          stringListValue(arguments["tag_ids"]),
 			})
 		},
 		UpdateInternalAsset: func(ctx context.Context, arguments map[string]any) (any, error) {
@@ -139,6 +190,10 @@ func (f DomainToolFactory) Build(ctx context.Context, scope ReActToolScope, rawP
 			}
 			if value, ok := arguments["fields"].(map[string]any); ok {
 				input.Fields = &value
+			}
+			if items, ok := arguments["tag_ids"].([]any); ok {
+				ids := value2stringList(items)
+				input.TagIDs = &ids
 			}
 			return assets.Update(ctx, principal, models, idempotencyKey("update", ctx),
 				stringValue(arguments["asset_id"]), stringValue(arguments["expected_version_id"]), input)
@@ -453,6 +508,35 @@ func boundedInt(value any, fallback, minimum, maximum int) int {
 	result := int(number)
 	if result < minimum || result > maximum {
 		return fallback
+	}
+	return result
+}
+
+// modelDraftToolError renders model-draft failures so the react model can
+// self-heal: schema issues travel as JSON, everything else stays a plain
+// message.
+func modelDraftToolError(err error) error {
+	var schemaErr *resourcemodel.SchemaValidationError
+	if errors.As(err, &schemaErr) {
+		issues, _ := json.Marshal(schemaErr.Issues)
+		return fmt.Errorf("model_schema_invalid: %s", issues)
+	}
+	return err
+}
+
+// stringListValue coerces a tool argument to a string slice; a non-array
+// argument yields nil so callers keep their "omitted" semantics.
+func stringListValue(value any) []string {
+	items, _ := value.([]any)
+	return value2stringList(items)
+}
+
+func value2stringList(items []any) []string {
+	result := make([]string, 0, len(items))
+	for _, item := range items {
+		if text, ok := item.(string); ok {
+			result = append(result, text)
+		}
 	}
 	return result
 }

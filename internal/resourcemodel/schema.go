@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 )
 
 var ErrSchemaInvalid = errors.New("resource model schema is invalid")
@@ -303,6 +304,10 @@ func fieldDefinitions(schema map[string]any, issues *[]ValidationIssue) map[stri
 }
 
 func validateField(key string, definition map[string]any, path string, issues *[]ValidationIssue) {
+	validateFieldAt(key, definition, path, false, issues)
+}
+
+func validateFieldAt(key string, definition map[string]any, path string, nested bool, issues *[]ValidationIssue) {
 	if !fieldKeyPattern.MatchString(key) {
 		*issues = append(*issues, issue(path+".key", "invalid_key", "field key must match ^[a-z][a-z0-9_]{1,63}$"))
 	}
@@ -332,6 +337,9 @@ func validateField(key string, definition map[string]any, path string, issues *[
 		validateOptions(definition["options"], path+".options", issues)
 	} else if _, exists := definition["options"]; exists {
 		*issues = append(*issues, issue(path+".options", "unexpected_options", "options are only allowed for enum and multiselect fields"))
+	}
+	if defaultValue, exists := definition["default"]; exists {
+		validateFieldDefault(fieldType, defaultValue, definition["options"], path+".default", nested, issues)
 	}
 	if unique, exists := definition["unique"]; exists {
 		if _, ok := unique.(bool); !ok {
@@ -366,13 +374,103 @@ func validateField(key string, definition map[string]any, path string, issues *[
 	}
 }
 
+// validateFieldDefault checks a field's optional default value against its own
+// type. Object/array/asset_reference and nested (object property / array item)
+// definitions reject defaults outright: only top-level scalar-ish fields carry
+// write-time fill semantics (asset.ApplyDefaults).
+func validateFieldDefault(fieldType string, defaultValue any, rawOptions any, path string, nested bool, issues *[]ValidationIssue) {
+	if nested {
+		*issues = append(*issues, issue(path, "unsupported_default", "default is only allowed on top-level fields"))
+		return
+	}
+	bad := func(message string) {
+		*issues = append(*issues, issue(path, "invalid_default", message))
+	}
+	switch fieldType {
+	case "string", "text", "markdown":
+		if _, ok := defaultValue.(string); !ok {
+			bad("default must be a string")
+		}
+	case "integer", "number":
+		number, ok := defaultValue.(float64)
+		if !ok {
+			bad("default must be a number")
+			return
+		}
+		if fieldType == "integer" && number != float64(int64(number)) {
+			bad("default must be an integer")
+		}
+	case "boolean":
+		if _, ok := defaultValue.(bool); !ok {
+			bad("default must be a boolean")
+		}
+	case "date":
+		text, ok := defaultValue.(string)
+		if !ok {
+			bad("default must be a string")
+			return
+		}
+		if _, err := time.Parse("2006-01-02", text); err != nil {
+			bad("default must be an ISO date (YYYY-MM-DD)")
+		}
+	case "datetime":
+		text, ok := defaultValue.(string)
+		if !ok {
+			bad("default must be a string")
+			return
+		}
+		if _, err := time.Parse(time.RFC3339, text); err != nil {
+			bad("default must be an RFC3339 datetime")
+		}
+	case "enum":
+		if !defaultInOptions(defaultValue, rawOptions) {
+			bad("default must be one of the field options")
+		}
+	case "multiselect":
+		values, ok := defaultValue.([]any)
+		if !ok {
+			bad("default must be an array of option values")
+			return
+		}
+		for _, value := range values {
+			if !defaultInOptions(value, rawOptions) {
+				bad("default values must all be field options")
+				return
+			}
+		}
+	default:
+		*issues = append(*issues, issue(path, "unsupported_default", "fields of this type cannot carry a default"))
+	}
+}
+
+func defaultInOptions(defaultValue any, rawOptions any) bool {
+	text, ok := defaultValue.(string)
+	if !ok {
+		return false
+	}
+	options, ok := rawOptions.([]any)
+	if !ok {
+		return false
+	}
+	for _, rawOption := range options {
+		option, ok := rawOption.(map[string]any)
+		if !ok {
+			continue
+		}
+		if value, _ := option["value"].(string); value == text {
+			return true
+		}
+	}
+	return false
+}
+
 func validateNestedField(key string, definition map[string]any, path string, issues *[]ValidationIssue) {
 	copy := make(map[string]any, len(definition)+1)
 	for name, value := range definition {
 		copy[name] = value
 	}
 	copy["key"] = key
-	validateField(key, copy, path, issues)
+	validateFieldAt(key, copy, path, true, issues)
 }
 
 func validateOptions(raw any, path string, issues *[]ValidationIssue) {

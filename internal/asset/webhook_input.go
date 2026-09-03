@@ -295,6 +295,7 @@ func (s Service) CreateFromWebhook(ctx context.Context, principal auth.Principal
 			return replay, false, ErrInvalidInput
 		}
 	}
+	fields = applyDefaults(fieldSchema, fields)
 	if err := validateFields(fieldSchema, fields); err != nil {
 		return replay, false, err
 	}

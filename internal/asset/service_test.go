@@ -81,3 +81,72 @@ func TestArchiveRejectsInvalidScopeOrID(t *testing.T) {
 		t.Fatalf("expected not found, got %v", err)
 	}
 }
+
+func TestApplyDefaultsSemantics(t *testing.T) {
+	schema := []byte(`{
+		"additional_properties": false,
+		"fields": [
+			{"key": "status", "type": "enum", "options": [{"value": "draft", "label": "Draft"}, {"value": "done", "label": "Done"}], "default": "draft"},
+			{"key": "seats", "type": "integer", "default": 4},
+			{"key": "tags", "type": "multiselect", "options": [{"value": "a", "label": "A"}, {"value": "b", "label": "B"}], "default": ["a"]},
+			{"key": "notes", "type": "string"},
+			{"key": "active", "type": "boolean", "default": true}
+		]
+	}`)
+
+	t.Run("fills absent keys only", func(t *testing.T) {
+		fields := applyDefaults(schema, map[string]any{"notes": "kept"})
+		if fields["status"] != "draft" || fields["seats"] != 4.0 || fields["active"] != true {
+			t.Fatalf("defaults not filled: %+v", fields)
+		}
+		if fields["notes"] != "kept" {
+			t.Fatalf("explicit value overridden: %+v", fields)
+		}
+	})
+
+	t.Run("explicit null is user intent", func(t *testing.T) {
+		fields := applyDefaults(schema, map[string]any{"seats": nil})
+		if value, exists := fields["seats"]; !exists || value != nil {
+			t.Fatalf("explicit null must not be replaced, got %+v", fields)
+		}
+	})
+
+	t.Run("nil map gets all defaults", func(t *testing.T) {
+		fields := applyDefaults(schema, nil)
+		if fields["status"] != "draft" {
+			t.Fatalf("nil map should receive defaults, got %+v", fields)
+		}
+	})
+
+	t.Run("result passes validation", func(t *testing.T) {
+		fields := applyDefaults(schema, nil)
+		if err := validateFields(schema, fields); err != nil {
+			t.Fatalf("merged fields must validate: %v", err)
+		}
+	})
+
+	t.Run("invalid default fails write wholesale", func(t *testing.T) {
+		bad := []byte(`{"additional_properties": false, "fields": [{"key": "status", "type": "enum", "options": [{"value": "draft", "label": "Draft"}], "default": "gone"}]}`)
+		fields := applyDefaults(bad, map[string]any{})
+		if err := validateFields(bad, fields); err == nil {
+			t.Fatal("default outside options must fail validation")
+		}
+	})
+
+	t.Run("empty schema is a no-op", func(t *testing.T) {
+		fields := map[string]any{"x": 1}
+		if got := applyDefaults([]byte("{}"), fields); got["x"] != 1 || len(got) != 1 {
+			t.Fatalf("empty schema must not touch fields, got %+v", got)
+		}
+	})
+
+	t.Run("defaults are deep-copied", func(t *testing.T) {
+		fields := applyDefaults(schema, nil)
+		list, _ := fields["tags"].([]any)
+		list[0] = "mutated"
+		fresh := applyDefaults(schema, nil)
+		if fresh["tags"].([]any)[0] != "a" {
+			t.Fatal("default arrays must be copied per application")
+		}
+	})
+}

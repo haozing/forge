@@ -884,6 +884,7 @@ func commitDraftTx(ctx context.Context, tx pgx.Tx, events *eventing.EventStore, 
 	if material.ResourceModelVersionID == "" {
 		return CommitResult{}, ErrConflict
 	}
+	material.Fields = applyDefaults(schemaBytes, material.Fields)
 	if err := ValidateFields(schemaBytes, material.Fields); err != nil {
 		return CommitResult{}, ErrInvalidInput
 	}

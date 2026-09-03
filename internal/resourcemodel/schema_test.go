@@ -159,3 +159,98 @@ func mustFormSchema() map[string]any {
 func mustListSchema() map[string]any {
 	return map[string]any{"columns": []any{}, "filters": []any{}}
 }
+
+func TestValidateFieldDefaultMatrix(t *testing.T) {
+	basePolicy := func() map[string]any {
+		_, _, _, p := validSchemas()
+		return p
+	}
+	cases := []struct {
+		name    string
+		field   map[string]any
+		wantErr bool
+		code    string
+	}{
+		{"string_ok", map[string]any{"key": "demo", "type": "string", "default": "draft"}, false, ""},
+		{"text_ok", map[string]any{"key": "demo", "type": "text", "default": "notes"}, false, ""},
+		{"markdown_ok", map[string]any{"key": "demo", "type": "markdown", "default": "**hi**"}, false, ""},
+		{"string_number_rejected", map[string]any{"key": "demo", "type": "string", "default": 3.0}, true, "invalid_default"},
+		{"integer_ok", map[string]any{"key": "demo", "type": "integer", "default": 7.0}, false, ""},
+		{"integer_fraction_rejected", map[string]any{"key": "demo", "type": "integer", "default": 7.5}, true, "invalid_default"},
+		{"integer_string_rejected", map[string]any{"key": "demo", "type": "integer", "default": "7"}, true, "invalid_default"},
+		{"number_ok", map[string]any{"key": "demo", "type": "number", "default": 2.5}, false, ""},
+		{"boolean_ok", map[string]any{"key": "demo", "type": "boolean", "default": true}, false, ""},
+		{"boolean_string_rejected", map[string]any{"key": "demo", "type": "boolean", "default": "yes"}, true, "invalid_default"},
+		{"date_ok", map[string]any{"key": "demo", "type": "date", "default": "2026-09-03"}, false, ""},
+		{"date_format_rejected", map[string]any{"key": "demo", "type": "date", "default": "09/03/2026"}, true, "invalid_default"},
+		{"datetime_ok", map[string]any{"key": "demo", "type": "datetime", "default": "2026-09-03T10:00:00Z"}, false, ""},
+		{"datetime_format_rejected", map[string]any{"key": "demo", "type": "datetime", "default": "2026-09-03"}, true, "invalid_default"},
+		{"enum_ok", map[string]any{"key": "demo", "type": "enum", "options": []any{map[string]any{"value": "a", "label": "A"}}, "default": "a"}, false, ""},
+		{"enum_not_option_rejected", map[string]any{"key": "demo", "type": "enum", "options": []any{map[string]any{"value": "a", "label": "A"}}, "default": "b"}, true, "invalid_default"},
+		{"multiselect_ok", map[string]any{"key": "demo", "type": "multiselect", "options": []any{map[string]any{"value": "a", "label": "A"}, map[string]any{"value": "b", "label": "B"}}, "default": []any{"a", "b"}}, false, ""},
+		{"multiselect_offoption_rejected", map[string]any{"key": "demo", "type": "multiselect", "options": []any{map[string]any{"value": "a", "label": "A"}}, "default": []any{"a", "z"}}, true, "invalid_default"},
+		{"multiselect_scalar_rejected", map[string]any{"key": "demo", "type": "multiselect", "options": []any{map[string]any{"value": "a", "label": "A"}}, "default": "a"}, true, "invalid_default"},
+		{"object_default_rejected", map[string]any{"key": "demo", "type": "object", "properties": map[string]any{"x": map[string]any{"type": "string"}}, "default": map[string]any{"x": "y"}}, true, "unsupported_default"},
+		{"array_default_rejected", map[string]any{"key": "demo", "type": "array", "items": map[string]any{"type": "string"}, "default": []any{"a"}}, true, "unsupported_default"},
+		{"asset_reference_default_rejected", map[string]any{"key": "demo", "type": "asset_reference", "default": map[string]any{"asset_id": "x", "asset_version_id": "y"}}, true, "unsupported_default"},
+	}
+	for _, testCase := range cases {
+		schema := map[string]any{"fields": []any{testCase.field}, "additional_properties": false}
+		err := Validate("record", schema, mustFormSchema(), mustListSchema(), basePolicy())
+		if testCase.wantErr {
+			if !errors.Is(err, ErrSchemaInvalid) {
+				t.Fatalf("%s: expected schema error, got %v", testCase.name, err)
+			}
+			schemaErr := err.(*SchemaValidationError)
+			found := false
+			for _, item := range schemaErr.Issues {
+				if strings.HasSuffix(item.Path, ".default") && item.Code == testCase.code {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("%s: expected issue code %s on .default, got %+v", testCase.name, testCase.code, schemaErr.Issues)
+			}
+		} else if err != nil {
+			t.Fatalf("%s: unexpected error %v", testCase.name, err)
+		}
+	}
+}
+
+func TestValidateNestedFieldDefaultRejected(t *testing.T) {
+	_, _, _, policy := validSchemas()
+	schema := map[string]any{"fields": []any{map[string]any{
+		"key": "demo", "type": "object",
+		"properties": map[string]any{"child": map[string]any{"type": "string", "default": "x"}},
+	}}, "additional_properties": false}
+	err := Validate("record", schema, mustFormSchema(), mustListSchema(), policy)
+	if !errors.Is(err, ErrSchemaInvalid) {
+		t.Fatalf("nested default should be rejected, got %v", err)
+	}
+	found := false
+	for _, item := range err.(*SchemaValidationError).Issues {
+		if strings.Contains(item.Path, "properties.child.default") && item.Code == "unsupported_default" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected unsupported_default on nested path, got %+v", err.(*SchemaValidationError).Issues)
+	}
+}
+
+func TestSchemaChecksumChangesWithDefault(t *testing.T) {
+	fieldSchema := map[string]any{"fields": []any{map[string]any{"key": "demo", "type": "string"}}, "additional_properties": false}
+	_, _, _, policy := validSchemas()
+	before, err := SchemaChecksum("record", fieldSchema, mustFormSchema(), mustListSchema(), policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fieldSchema["fields"].([]any)[0].(map[string]any)["default"] = "seed"
+	after, err := SchemaChecksum("record", fieldSchema, mustFormSchema(), mustListSchema(), policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before == after {
+		t.Fatal("checksum must change when a default is added")
+	}
+}

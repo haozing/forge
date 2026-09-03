@@ -249,6 +249,7 @@ func (p TransferProcessor) processImportRow(ctx context.Context, header importBa
 		}
 		return tx.Commit(ctx)
 	}
+	fields = applyDefaults(header.fieldSchema, fields)
 	if err := ValidateFields(header.fieldSchema, fields); err != nil {
 		if err := reject([]ImportRowError{{Code: "invalid_fields"}}); err != nil {
 			return err

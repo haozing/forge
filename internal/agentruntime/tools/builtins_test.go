@@ -59,3 +59,54 @@ func TestBuiltinWriteToolsRemainDisabledByDefault(t *testing.T) {
 		t.Fatal("low-risk write tools must require an explicit application policy")
 	}
 }
+
+func TestModelDraftToolsRequireExplicitCapabilityAndHighWrite(t *testing.T) {
+	registry := NewRegistry()
+	if err := RegisterBuiltins(registry, BuiltinHandlers{
+		SuggestResourceModel: func(context.Context, map[string]any) (any, error) { return nil, nil },
+		CreateResourceModel:  func(context.Context, map[string]any) (any, error) { return nil, nil },
+		UpdateModelDraft:     func(context.Context, map[string]any) (any, error) { return nil, nil },
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Default read capabilities surface only the suggester.
+	names := func(policy Policy) map[string]bool {
+		available, err := registry.Tools(context.Background(), policy)
+		if err != nil {
+			t.Fatal(err)
+		}
+		result := map[string]bool{}
+		for _, item := range available {
+			if invokable, ok := item.(tool.InvokableTool); ok {
+				info, err := invokable.Info(context.Background())
+				if err != nil {
+					t.Fatal(err)
+				}
+				result[info.Name] = true
+			}
+		}
+		return result
+	}
+	defaults := names(Policy{AllowedCapabilities: map[string]bool{
+		"query.read": true, "asset.read": true, "schema.read": true, "attachment.read": true, "task.read": true,
+	}})
+	if !defaults["suggest_resource_model"] {
+		t.Fatal("suggest_resource_model must ride the default schema.read capability")
+	}
+	if defaults["create_resource_model"] || defaults["update_resource_model_draft"] {
+		t.Fatal("model draft write tools must stay hidden under default capabilities")
+	}
+	// model.manage alone is not enough without high-write.
+	capOnly := names(Policy{AllowedCapabilities: map[string]bool{"model.manage": true}, AllowHighWrite: false})
+	if capOnly["create_resource_model"] {
+		t.Fatal("model.manage capability without allow_high_write must not surface the write tools")
+	}
+	// Full explicit grant surfaces both write tools.
+	full := names(Policy{AllowedCapabilities: map[string]bool{"model.manage": true}, AllowHighWrite: true})
+	if !full["create_resource_model"] || !full["update_resource_model_draft"] {
+		t.Fatal("explicit model.manage + high-write must surface both model draft tools")
+	}
+	if full["suggest_resource_model"] {
+		t.Fatal("suggest tool needs schema.read, not model.manage")
+	}
+}

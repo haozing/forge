@@ -19,6 +19,7 @@ import (
 
 	"agentchunzhi/internal/auth"
 	"agentchunzhi/internal/eventing"
+	"agentchunzhi/internal/tag"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -47,6 +48,10 @@ type CreateInput struct {
 	Title       *string
 	Markdown    *string
 	Fields      map[string]any
+	// TagIDs attaches existing workspace tags to the first version; nil means
+	// none. Tags keep TagService rules (workspace identity, active-only,
+	// MaxTagsPerDraft) — agents cannot create tags implicitly.
+	TagIDs []string
 	// Source carries optional channel provenance. It is preserved in the
 	// raw_inputs payload only; version snapshots record no channel JSON.
 	Source map[string]any
@@ -56,6 +61,9 @@ type UpdateInput struct {
 	Title    *string
 	Markdown *string
 	Fields   *map[string]any
+	// TagIDs replaces the draft's tag selection when non-nil (an empty slice
+	// clears it); nil leaves tags untouched.
+	TagIDs *[]string
 }
 
 func (s Service) Create(ctx context.Context, principal auth.Principal, allowedModelIDs []string, idempotencyKey string, input CreateInput) (AssetResult, error) {
@@ -144,11 +152,18 @@ func (s Service) Create(ctx context.Context, principal auth.Principal, allowedMo
 		}
 		workspaceID = input.WorkspaceID
 	}
+	// Defaults enter the version snapshot only; the raw-input payload above
+	// keeps exactly what the caller sent (doc §5.3 raw/materialized split).
+	fields = applyDefaults(fieldSchema, fields)
 	if err := validateFields(fieldSchema, fields); err != nil {
 		return AssetResult{}, err
 	}
 	if err := validateAssetReferences(ctx, tx, principal, workspaceID, fieldSchema, fields); err != nil {
 		return AssetResult{}, err
+	}
+	tagIDs, tagErr := resolveActiveTagIDsTx(ctx, tx, principal.OrganizationID, workspaceID, input.TagIDs)
+	if tagErr != nil {
+		return AssetResult{}, tagErr
 	}
 	var rawInputID string
 	if err := tx.QueryRow(ctx, `
@@ -162,7 +177,7 @@ func (s Service) Create(ctx context.Context, principal auth.Principal, allowedMo
 	assetID, versionID, versionNo, err := createAssetWithFirstVersionTx(ctx, tx,
 		principal.OrganizationID, workspaceID, input.ResourceModelID, modelVersionID,
 		rawInputID, OriginAIGenerated, derefString(input.Title), "", derefString(input.Markdown),
-		fields, nil, "", principal.UserID)
+		fields, tagIDs, tag.SourceAPI, principal.UserID)
 	if err != nil {
 		return AssetResult{}, err
 	}
@@ -267,7 +282,7 @@ func (s Service) Update(ctx context.Context, principal auth.Principal, allowedMo
 	if len(allowedModelIDs) == 0 || !validID(assetID) || !validDraftRevision(expectedRevision) || !validIdempotencyKey(idempotencyKey) {
 		return AssetResult{}, ErrInvalidInput
 	}
-	if input.Title == nil && input.Markdown == nil && input.Fields == nil {
+	if input.Title == nil && input.Markdown == nil && input.Fields == nil && input.TagIDs == nil {
 		return AssetResult{}, ErrInvalidInput
 	}
 	if err := validateContent(input.Title, input.Markdown, input.Fields); err != nil {
@@ -355,6 +370,11 @@ func (s Service) Update(ctx context.Context, principal auth.Principal, allowedMo
 	if err := validateAssetReferences(ctx, tx, principal, workspaceID, fieldSchema, draft.Fields); err != nil {
 		return AssetResult{}, err
 	}
+	if input.TagIDs != nil {
+		if err := replaceDraftTagIDsTx(ctx, tx, principal, workspaceID, draft, *input.TagIDs); err != nil {
+			return AssetResult{}, err
+		}
+	}
 	if err := persistDraftPatch(ctx, tx, principal.OrganizationID, draft, principal.UserID); err != nil {
 		return AssetResult{}, err
 	}
@@ -369,6 +389,87 @@ func (s Service) Update(ctx context.Context, principal auth.Principal, allowedMo
 		return AssetResult{}, fmt.Errorf("commit asset update: %w", err)
 	}
 	return result, nil
+}
+
+// resolveActiveTagIDsTx validates a create-time tag selection against the
+// TagService rules agents must honor: workspace identity, active status and
+// the shared per-version cap. It returns the deduplicated, sorted ID list.
+func resolveActiveTagIDsTx(ctx context.Context, tx pgx.Tx, organizationID, workspaceID string, tagIDs []string) ([]string, error) {
+	ids := dedupeSort(tagIDs)
+	if len(ids) == 0 {
+		return ids, nil
+	}
+	if len(ids) > MaxTagsPerDraft {
+		return nil, ErrTooManyTags
+	}
+	for _, id := range ids {
+		if !validID(id) {
+			return nil, ErrInvalidInput
+		}
+	}
+	var bad int
+	if err := tx.QueryRow(ctx, `
+		SELECT count(*) FROM asset.tags
+		WHERE organization_id = $1::uuid AND workspace_id = $2::uuid
+		  AND id = ANY($3::uuid[]) AND status <> 'active'
+	`, organizationID, workspaceID, ids).Scan(&bad); err != nil {
+		return nil, fmt.Errorf("verify create tags: %w", err)
+	}
+	if bad > 0 {
+		return nil, ErrTagArchived
+	}
+	return ids, nil
+}
+
+// replaceDraftTagIDsTx swaps the draft's tag selection for the given ID list
+// (agent surface: fixed 'api' provenance, no confidence semantics). It mirrors
+// the member SetDraftTags rules — same workspace, active unless already on the
+// draft — and keeps the cap uniform.
+func replaceDraftTagIDsTx(ctx context.Context, tx pgx.Tx, principal auth.Principal, workspaceID string, draft Draft, tagIDs []string) error {
+	ids := dedupeSort(tagIDs)
+	if len(ids) > MaxTagsPerDraft {
+		return ErrTooManyTags
+	}
+	for _, id := range ids {
+		if !validID(id) {
+			return ErrInvalidInput
+		}
+	}
+	for _, id := range ids {
+		var ok bool
+		if err := tx.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM asset.tags t
+				WHERE t.organization_id = $1::uuid AND t.workspace_id = $2::uuid AND t.id = $3::uuid
+				  AND (t.status = 'active'
+				       OR EXISTS (SELECT 1 FROM asset.asset_draft_tags dt
+					        WHERE dt.asset_draft_id = $4::uuid AND dt.tag_id = t.id))
+			)
+		`, principal.OrganizationID, workspaceID, id, draft.DraftID).Scan(&ok); err != nil {
+			return fmt.Errorf("verify draft tag: %w", err)
+		}
+		if !ok {
+			return ErrTagArchived
+		}
+	}
+	if _, err := tx.Exec(ctx, `
+		DELETE FROM asset.asset_draft_tags
+		WHERE organization_id = $1::uuid AND asset_draft_id = $2::uuid
+		  AND NOT (tag_id = ANY($3::uuid[]))
+	`, principal.OrganizationID, draft.DraftID, ids); err != nil {
+		return fmt.Errorf("remove draft tags: %w", err)
+	}
+	for _, id := range ids {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO asset.asset_draft_tags
+				(organization_id, workspace_id, asset_draft_id, tag_id, source, added_by)
+			VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6::uuid)
+			ON CONFLICT (asset_draft_id, tag_id) DO NOTHING
+		`, principal.OrganizationID, workspaceID, draft.DraftID, id, tag.SourceAPI, principal.UserID); err != nil {
+			return fmt.Errorf("insert draft tag: %w", err)
+		}
+	}
+	return nil
 }
 
 // validDraftRevision reports whether value is a positive decimal draft
@@ -476,6 +577,63 @@ func loadAssetTx(ctx context.Context, tx pgx.Tx, organizationID, assetID string)
 // ValidateFields exposes the model contract to Agent candidate processors.
 func ValidateFields(schemaBytes []byte, fields map[string]any) error {
 	return validateFields(schemaBytes, fields)
+}
+
+// applyDefaults fills absent top-level field keys from the model schema's
+// per-field default values. Explicit values — including explicit nulls, which
+// are user intent — are never overridden, and defaults are deep-copied so
+// drafts never alias schema JSON. The merged result still flows through
+// validateFields: an invalid default fails the write wholesale.
+func applyDefaults(schemaBytes []byte, fields map[string]any) map[string]any {
+	if len(schemaBytes) == 0 || string(schemaBytes) == "{}" || string(schemaBytes) == "null" {
+		return fields
+	}
+	var schema map[string]any
+	if err := json.Unmarshal(schemaBytes, &schema); err != nil {
+		return fields
+	}
+	rawFields, ok := schema["fields"].([]any)
+	if !ok {
+		return fields
+	}
+	if fields == nil {
+		fields = map[string]any{}
+	}
+	for _, raw := range rawFields {
+		definition, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		name, _ := definition["key"].(string)
+		defaultValue, exists := definition["default"]
+		if name == "" || !exists {
+			continue
+		}
+		if _, present := fields[name]; present {
+			continue
+		}
+		fields[name] = deepCopyJSON(defaultValue)
+	}
+	return fields
+}
+
+func deepCopyJSON(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		clone := make(map[string]any, len(typed))
+		for key, item := range typed {
+			clone[key] = deepCopyJSON(item)
+		}
+		return clone
+	case []any:
+		clone := make([]any, len(typed))
+		for index, item := range typed {
+			clone[index] = deepCopyJSON(item)
+		}
+		return clone
+	default:
+		return typed
+	}
 }
 
 // ValidateContent exposes common asset content limits to background processors.

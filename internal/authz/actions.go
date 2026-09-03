@@ -61,9 +61,12 @@ var AllActions = []string{
 	ActionAuditRead,
 }
 
-// agentAllowedActions is the controlled subset an AgentAccessPolicy may grant.
-// Agents never approve PublicationRequests and never manage models, tags,
-// sites or workspaces.
+// agentAllowedActions is the controlled subset an AgentAccessPolicy may grant
+// through the authz Require path. Agents never approve PublicationRequests
+// and never manage models, tags, sites or workspaces here: the one model
+// write exception — draft-only model creation — deliberately bypasses this
+// list via resourcemodel.AgentDraftService with its own workspace-scoped
+// model.manage grant check (产品文档-v2 §8.3, 2026-09-03).
 var agentAllowedActions = map[string]bool{
 	ActionAssetRead:         true,
 	ActionAssetWrite:        true,
