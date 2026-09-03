@@ -633,17 +633,23 @@ func (s Service) FinalizeDerivation(ctx context.Context, principal auth.Principa
 	}
 	var sourceVersionID, sourceModelID, sourceModelVersionID, sourceTitle string
 	var sourceMarkdown, sourceFields []byte
+	// Harvest reads the DERIVED conversation's note (target): the derivation
+	// exists so its discussion can grow into a result; the trunk note was
+	// already harvested when the derivation was created.
 	if err := tx.QueryRow(ctx, `
 		SELECT av.id::text, av.resource_model_id::text, av.resource_model_version_id::text,
 		       COALESCE(av.title, ''), COALESCE(av.markdown, ''), av.fields
 		FROM asset.assets a JOIN asset.asset_versions av ON av.organization_id = a.organization_id AND av.id = a.current_working_version_id
 		WHERE a.organization_id = $1::uuid AND a.id = $2::uuid
 		FOR UPDATE OF a, av
-	`, principal.OrganizationID, sourceNoteAssetID).Scan(&sourceVersionID, &sourceModelID, &sourceModelVersionID, &sourceTitle, &sourceMarkdown, &sourceFields); err != nil {
-		return FinalizeResult{}, fmt.Errorf("load source note version: %w", err)
+	`, principal.OrganizationID, targetNoteAssetID).Scan(&sourceVersionID, &sourceModelID, &sourceModelVersionID, &sourceTitle, &sourceMarkdown, &sourceFields); err != nil {
+		return FinalizeResult{}, fmt.Errorf("load derivation note version: %w", err)
 	}
 	if input.ExpectedSourceAssetVersionID != "" && input.ExpectedSourceAssetVersionID != sourceVersionID {
-		return FinalizeResult{}, fmt.Errorf("%w: source version changed", ErrConflict)
+		return FinalizeResult{}, fmt.Errorf("%w: derivation note version changed", ErrConflict)
+	}
+	if strings.TrimSpace(string(sourceMarkdown)) == "" {
+		return FinalizeResult{}, fmt.Errorf("%w: derivation note is empty; sync the derived conversation into its note first", ErrConflict)
 	}
 	result := FinalizeResult{DerivationID: derivationID, Disposition: input.Disposition, Status: "completed"}
 	if input.Disposition == "merge" {
@@ -694,7 +700,7 @@ func (s Service) FinalizeDerivation(ctx context.Context, principal auth.Principa
 			Markdown:               mergedMarkdown,
 			Fields:                 targetFieldsMap,
 			CreatedBy:              principal.UserID,
-			Relations:              []assetservice.RelationMaterial{derivationRelation(sourceNoteAssetID, assetservice.RelationContinuesFrom, derivationID)},
+			Relations:              []assetservice.RelationMaterial{derivationRelation(targetNoteAssetID, assetservice.RelationContinuesFrom, derivationID)},
 		})
 		if err != nil {
 			return FinalizeResult{}, fmt.Errorf("create merge version: %w", err)
@@ -736,7 +742,7 @@ func (s Service) FinalizeDerivation(ctx context.Context, principal auth.Principa
 		}
 		relations := []assetservice.RelationMaterial(nil)
 		if input.Disposition == "reference" {
-			relations = append(relations, derivationRelation(sourceNoteAssetID, assetservice.RelationDerivedFrom, derivationID))
+			relations = append(relations, derivationRelation(targetNoteAssetID, assetservice.RelationDerivedFrom, derivationID))
 		}
 		resultVersionID, _, err := assetservice.CreateVersionTx(ctx, tx, assetservice.VersionMaterial{
 			OrganizationID:         principal.OrganizationID,
@@ -841,7 +847,7 @@ func (s Service) SyncNote(ctx context.Context, principal auth.Principal, idempot
 		JOIN asset.assets a ON a.id = nb.note_asset_id AND a.organization_id = $1::uuid
 		JOIN asset.asset_versions av ON av.organization_id = a.organization_id AND av.id = a.current_working_version_id
                 WHERE nb.organization_id = $1::uuid AND nb.conversation_id = $2::uuid
-                  AND wm.role <> 'viewer' AND (c.visibility = 'workspace' OR c.initiator_user_id = $3::uuid)
+                  AND wm.role <> 'viewer'
 		FOR UPDATE OF nb, a
 	`, principal.OrganizationID, conversationID, principal.UserID).Scan(&workspaceID, &noteContainerID, &noteAssetID, &resourceModelID, &resourceModelVersionID, &workingVersionID, &lastSynced); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -1055,7 +1061,7 @@ func (s Service) AppendMessage(ctx context.Context, principal auth.Principal, id
 		FROM content.conversations c
 				JOIN content.workspace_members wm ON wm.workspace_id = c.workspace_id AND wm.user_id = $3::uuid
 				WHERE c.organization_id = $1::uuid AND c.id = $2::uuid AND c.status = 'active'
-				  AND wm.role <> 'viewer' AND (c.visibility = 'workspace' OR c.initiator_user_id = $3::uuid)
+				  AND wm.role <> 'viewer'
 				FOR UPDATE OF c
 	`, principal.OrganizationID, input.ConversationID, principal.UserID).Scan(&workspaceID, &containerID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -1191,7 +1197,6 @@ func (s Service) ListMessages(ctx context.Context, principal auth.Principal, con
 		JOIN content.conversations c ON c.id = mb.conversation_id
 		JOIN content.workspace_members wm ON wm.workspace_id = c.workspace_id AND wm.user_id = $3::uuid
 		WHERE mb.organization_id = $1::uuid AND mb.conversation_id = $2::uuid
-		  AND (c.visibility = 'workspace' OR c.initiator_user_id = $3::uuid)
 		ORDER BY mb.sequence_no
 	`, principal.OrganizationID, conversationID, principal.UserID)
 	if err != nil {
@@ -1223,7 +1228,6 @@ func (s Service) ListMessages(ctx context.Context, principal auth.Principal, con
 				SELECT 1 FROM content.conversations c
 				JOIN content.workspace_members wm ON wm.workspace_id = c.workspace_id AND wm.user_id = $3::uuid
 					WHERE c.organization_id = $1::uuid AND c.id = $2::uuid
-					  AND (c.visibility = 'workspace' OR c.initiator_user_id = $3::uuid)
 			)
 		`, principal.OrganizationID, conversationID, principal.UserID).Scan(&exists); err != nil {
 			return nil, fmt.Errorf("check conversation access: %w", err)
@@ -1247,12 +1251,12 @@ func (s Service) CreateConversation(ctx context.Context, principal auth.Principa
 		input.Source = "chat_interface"
 	}
 	if input.Visibility == "" {
-		input.Visibility = "private"
+		input.Visibility = "workspace"
 	}
 	if input.Source != "chat_interface" && input.Source != "document" && input.Source != "asset" && input.Source != "automation" {
 		return ConversationResult{}, ErrInvalidInput
 	}
-	if input.Visibility != "private" && input.Visibility != "workspace" {
+	if input.Visibility != "workspace" && input.Visibility != "organization" && input.Visibility != "public" {
 		return ConversationResult{}, ErrInvalidInput
 	}
 	if input.AgentApplicationID != "" && !validID(input.AgentApplicationID) {
@@ -1424,7 +1428,6 @@ func (s Service) GetConversation(ctx context.Context, principal auth.Principal, 
 		JOIN content.note_bindings nb ON nb.conversation_id = c.id
 		JOIN content.workspace_members wm ON wm.workspace_id = c.workspace_id AND wm.user_id = $3::uuid
 		WHERE c.organization_id = $1::uuid AND c.id = $2::uuid
-		  AND (c.visibility = 'workspace' OR c.initiator_user_id = $3::uuid)
 	`, principal.OrganizationID, conversationID, principal.UserID).Scan(
 		&result.ConversationID, &result.WorkspaceID, &result.ContainerID, &result.NoteContainerID,
 		&result.NoteAssetID, &result.AgentApplicationID, &result.BoundAgentUserID, &result.Status,
@@ -1478,7 +1481,7 @@ func (s Service) RegisterMedia(ctx context.Context, principal auth.Principal, id
 			FROM content.conversations c
 			JOIN content.workspace_members wm ON wm.workspace_id = c.workspace_id AND wm.user_id = $3::uuid
 			WHERE c.organization_id = $1::uuid AND c.id = $2::uuid AND c.status = 'active'
-			  AND wm.role <> 'viewer' AND (c.visibility = 'workspace' OR c.initiator_user_id = $3::uuid)
+			  AND wm.role <> 'viewer'
 		)
 	`, principal.OrganizationID, input.ConversationID, principal.UserID).Scan(&conversationActive); err != nil {
 		return MediaResult{}, fmt.Errorf("load media conversation: %w", err)
@@ -1542,7 +1545,6 @@ func (s Service) GetMedia(ctx context.Context, principal auth.Principal, mediaID
 		JOIN content.conversations c ON c.id = cm.conversation_id
                 JOIN content.workspace_members wm ON wm.workspace_id = c.workspace_id AND wm.user_id = $3::uuid
                 WHERE cm.organization_id = $1::uuid AND cm.id = $2::uuid
-                  AND (c.visibility = 'workspace' OR c.initiator_user_id = $3::uuid)
 	`, principal.OrganizationID, mediaID, principal.UserID).Scan(
 		&result.MediaID, &result.ConversationID, &result.AttachmentID, &result.MediaKind, &result.Status,
 		&result.Language, &result.DurationMS, &result.TranscriptionBlockRevisionID, &result.CreatedAt, &result.UpdatedAt)
@@ -1588,7 +1590,7 @@ func (s Service) RequestTranscription(ctx context.Context, principal auth.Princi
 		JOIN content.conversations c ON c.id = cm.conversation_id
                 JOIN content.workspace_members wm ON wm.workspace_id = c.workspace_id AND wm.user_id = $3::uuid
                 WHERE cm.organization_id = $1::uuid AND cm.id = $2::uuid
-                  AND wm.role <> 'viewer' AND (c.visibility = 'workspace' OR c.initiator_user_id = $3::uuid)
+                  AND wm.role <> 'viewer'
 		FOR UPDATE OF cm
 	`, principal.OrganizationID, mediaID, principal.UserID).Scan(
 		&result.MediaID, &result.ConversationID, &result.AttachmentID, &result.MediaKind, &result.Status,

@@ -7,6 +7,7 @@ import (
 	"sort"
 
 	"agentchunzhi/internal/auth"
+	"agentchunzhi/internal/eventing"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -18,9 +19,10 @@ type DeleteResult struct {
 }
 
 // Delete removes a conversation. Thoughts are the process layer, so this is a
-// hard delete inside one transaction; note assets, attachments and asset
-// relations survive (the curated layer outlives the conversation that produced
-// them - only the derivation pointer on relations is nulled).
+// hard delete inside one transaction. The bound note assets soft-delete with
+// it (the conversation was their only entry point; harvest outputs live on as
+// separate assets); asset relation edges survive with the derivation pointer
+// nulled.
 //
 // Deleting a thought with derived children is blocked (container-delete
 // precedent: not-empty refuses) unless cascade is requested, in which case the
@@ -47,7 +49,6 @@ func (s Service) Delete(ctx context.Context, principal auth.Principal, conversat
 		FROM content.conversations c
 		JOIN content.workspace_members wm ON wm.workspace_id = c.workspace_id AND wm.user_id = $3::uuid
 		WHERE c.organization_id = $1::uuid AND c.id = $2::uuid
-		  AND (c.visibility = 'workspace' OR c.initiator_user_id = $3::uuid)
 	`, principal.OrganizationID, conversationID, principal.UserID).Scan(&workspaceID, &role)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return DeleteResult{}, ErrNotFound
@@ -174,8 +175,87 @@ func (s Service) Delete(ctx context.Context, principal auth.Principal, conversat
 	`, principal.OrganizationID, ids).Scan(&containerIDs); err != nil {
 		return DeleteResult{}, fmt.Errorf("collect containers: %w", err)
 	}
+	// Note assets bound to the subtree die with it: the conversation was their
+	// only entry point (harvest outputs survive as separate assets). Soft
+	// delete keeps version history auditable; pending publication requests of
+	// those assets are cancelled, and one asset.archived fact per asset fans
+	// out to the retrieval projection and site cache invalidation.
+	var noteAssets []struct {
+		id          string
+		revision    int64
+		workspaceID string
+		published   string
+	}
+	noteRows, err := tx.Query(ctx, `
+		SELECT a.id::text, a.revision, a.workspace_id::text, COALESCE(a.current_published_version_id::text, '')
+		FROM content.note_bindings nb
+		JOIN asset.assets a ON a.organization_id = nb.organization_id AND a.id = nb.note_asset_id
+		WHERE nb.organization_id = $1::uuid AND nb.conversation_id = ANY($2::uuid[]) AND a.deleted_at IS NULL
+	`, principal.OrganizationID, ids)
+	if err != nil {
+		return DeleteResult{}, fmt.Errorf("collect note assets: %w", err)
+	}
+	for noteRows.Next() {
+		var item struct {
+			id          string
+			revision    int64
+			workspaceID string
+			published   string
+		}
+		if err := noteRows.Scan(&item.id, &item.revision, &item.workspaceID, &item.published); err != nil {
+			noteRows.Close()
+			return DeleteResult{}, fmt.Errorf("scan note asset: %w", err)
+		}
+		noteAssets = append(noteAssets, item)
+	}
+	noteRows.Close()
+	if err := noteRows.Err(); err != nil {
+		return DeleteResult{}, fmt.Errorf("iterate note assets: %w", err)
+	}
 	if _, err := tx.Exec(ctx, `DELETE FROM content.note_bindings WHERE conversation_id = ANY($1::uuid[])`, ids); err != nil {
 		return DeleteResult{}, fmt.Errorf("delete note bindings: %w", err)
+	}
+	if len(noteAssets) > 0 {
+		assetIDs := make([]string, 0, len(noteAssets))
+		for _, item := range noteAssets {
+			assetIDs = append(assetIDs, item.id)
+		}
+		if _, err := tx.Exec(ctx, `
+			UPDATE asset.assets
+			SET deleted_at = now(), publication_status = 'archived',
+			    current_published_version_id = NULL, published_at = NULL, updated_at = now()
+			WHERE organization_id = $1::uuid AND id = ANY($2::uuid[]) AND deleted_at IS NULL
+		`, principal.OrganizationID, assetIDs); err != nil {
+			return DeleteResult{}, fmt.Errorf("archive note assets: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `
+			UPDATE asset.publication_requests
+			SET status = 'cancelled', cancelled_by = $3::uuid, cancel_reason = 'asset_archived', decided_at = now(), revision = revision + 1
+			WHERE organization_id = $1::uuid AND asset_id = ANY($2::uuid[]) AND status = 'pending'
+		`, principal.OrganizationID, assetIDs, principal.UserID); err != nil {
+			return DeleteResult{}, fmt.Errorf("cancel note publication requests: %w", err)
+		}
+		if s.Content.Events.Queue != nil {
+			for _, item := range noteAssets {
+				if _, err := s.Content.Events.AppendTx(ctx, tx, eventing.Event{
+					OrganizationID:   principal.OrganizationID,
+					WorkspaceID:      item.workspaceID,
+					EventType:        eventing.EventAssetArchived,
+					AggregateType:    "asset",
+					AggregateID:      item.id,
+					AggregateVersion: item.revision,
+					PayloadVersion:   eventing.PayloadVersionV1,
+					Actor:            eventing.ActorFromPrincipal(principal),
+					Payload: eventing.AssetArchivedPayload{
+						AssetID:           item.id,
+						PreviousVersionID: item.published,
+						WorkspaceID:       item.workspaceID,
+					},
+				}); err != nil {
+					return DeleteResult{}, fmt.Errorf("record note archive fact: %w", err)
+				}
+			}
+		}
 	}
 	containerIDs = nonEmpty(containerIDs)
 	if len(containerIDs) > 0 {

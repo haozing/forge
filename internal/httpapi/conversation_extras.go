@@ -59,7 +59,7 @@ func conversationResource(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusUnprocessableEntity, "validation_failed")
 			return
 		}
-		if input.Visibility != nil && *input.Visibility != "private" && *input.Visibility != "workspace" {
+		if input.Visibility != nil && *input.Visibility != "workspace" && *input.Visibility != "organization" && *input.Visibility != "public" {
 			writeError(w, http.StatusUnprocessableEntity, "invalid_visibility")
 			return
 		}
@@ -219,7 +219,6 @@ func conversationNote(deps Dependencies) http.HandlerFunc {
 			LEFT JOIN asset.asset_versions v ON v.id = a.current_working_version_id
 			LEFT JOIN content.message_blocks mb ON mb.organization_id = c.organization_id AND mb.conversation_id = c.id
                         WHERE nb.organization_id = $1::uuid AND nb.conversation_id = $2::uuid
-                          AND (c.visibility = 'workspace' OR c.initiator_user_id = $3::uuid)
 			GROUP BY nb.note_asset_id, nb.note_container_id, a.current_working_version_id, v.title, v.markdown, v.fields, a.publication_status, v.confirmation_status`,
 			principal.OrganizationID, r.PathValue("conversationId"), principal.UserID).Scan(&noteAssetID, &noteContainerID, &versionID, &title, &markdown, &fields, &publicationStatus, &confirmationStatus, &messageCount)
 		if errors.Is(err, pgx.ErrNoRows) {
