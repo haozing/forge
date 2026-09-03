@@ -8,6 +8,7 @@ import (
 
 	"agentchunzhi/internal/auth"
 	"agentchunzhi/internal/eventing"
+	assetservice "agentchunzhi/internal/asset"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -120,6 +121,12 @@ func (s Service) Delete(ctx context.Context, principal auth.Principal, conversat
 		return DeleteResult{}, fmt.Errorf("begin conversation delete: %w", err)
 	}
 	defer tx.Rollback(ctx)
+	// Lock order is conversation -> tree container -> asset -> draft (the
+	// edit and commit paths take the same order), so a concurrent message
+	// append or note freeze can never cycle with the subtree delete.
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM content.conversations WHERE organization_id = $1::uuid AND id = ANY($2::uuid[]) FOR UPDATE`, principal.OrganizationID, ids); err != nil {
+		return DeleteResult{}, fmt.Errorf("lock conversations for delete: %w", err)
+	}
 
 	// Derivations touching the subtree (as source or target) lose their rows.
 	// Asset relation edges are sealed facts on asset.asset_versions and stay;
@@ -155,6 +162,7 @@ func (s Service) Delete(ctx context.Context, principal auth.Principal, conversat
 	`, principal.OrganizationID, ids).Scan(&messageRevisions); err != nil {
 		return DeleteResult{}, fmt.Errorf("collect message revisions: %w", err)
 	}
+	_ = messageRevisions
 	if _, err := tx.Exec(ctx, `DELETE FROM content.message_blocks WHERE organization_id = $1::uuid AND conversation_id = ANY($2::uuid[])`, principal.OrganizationID, ids); err != nil {
 		return DeleteResult{}, fmt.Errorf("delete message blocks: %w", err)
 	}
@@ -169,6 +177,12 @@ func (s Service) Delete(ctx context.Context, principal auth.Principal, conversat
 		WHERE nb.organization_id = $1::uuid AND nb.conversation_id = ANY($2::uuid[])
 	`, principal.OrganizationID, ids).Scan(&containerIDs); err != nil {
 		return DeleteResult{}, fmt.Errorf("collect containers: %w", err)
+	}
+	containerIDs = nonEmpty(containerIDs)
+	if len(containerIDs) > 0 {
+		if _, err := tx.Exec(ctx, `SELECT 1 FROM content.containers WHERE organization_id = $1::uuid AND id = ANY($2::uuid[]) FOR UPDATE`, principal.OrganizationID, containerIDs); err != nil {
+			return DeleteResult{}, fmt.Errorf("lock note containers for delete: %w", err)
+		}
 	}
 	// Note assets bound to the subtree die with it: the conversation was their
 	// only entry point (harvest outputs survive as separate assets). Soft
@@ -223,12 +237,12 @@ func (s Service) Delete(ctx context.Context, principal auth.Principal, conversat
 		`, principal.OrganizationID, assetIDs); err != nil {
 			return DeleteResult{}, fmt.Errorf("archive note assets: %w", err)
 		}
-		if _, err := tx.Exec(ctx, `
-			UPDATE asset.publication_requests
-			SET status = 'cancelled', cancelled_by = $3::uuid, cancel_reason = 'asset_archived', decided_at = now(), revision = revision + 1
-			WHERE organization_id = $1::uuid AND asset_id = ANY($2::uuid[]) AND status = 'pending'
-		`, principal.OrganizationID, assetIDs, principal.UserID); err != nil {
-			return DeleteResult{}, fmt.Errorf("cancel note publication requests: %w", err)
+		for _, item := range noteAssets {
+			if _, err := assetservice.CancelPendingRequestsTx(ctx, tx, &s.Content.Events, assetservice.LifecycleRow{
+				ID: item.id, OrganizationID: principal.OrganizationID, WorkspaceID: item.workspaceID, Revision: item.revision,
+			}, principal, "asset_archived"); err != nil {
+				return DeleteResult{}, fmt.Errorf("cancel note publication requests: %w", err)
+			}
 		}
 		if s.Content.Events.Queue != nil {
 			for _, item := range noteAssets {
@@ -252,7 +266,6 @@ func (s Service) Delete(ctx context.Context, principal auth.Principal, conversat
 			}
 		}
 	}
-	containerIDs = nonEmpty(containerIDs)
 	if len(containerIDs) > 0 {
 		// An asset may have been moved into one of these containers; unlink it
 		// (the asset itself survives) before the container row goes.
@@ -273,29 +286,10 @@ func (s Service) Delete(ctx context.Context, principal auth.Principal, conversat
 		messageRevisions = append(messageRevisions, nonEmpty(placedRevisions)...)
 	}
 
-	// Revisions are now unreferenced: message blocks, derivation sources and
-	// placements are gone.
-	revisions := nonEmpty(messageRevisions)
-	if len(revisions) > 0 {
-		var blockIDs []string
-		if err := tx.QueryRow(ctx, `
-			SELECT COALESCE(array_agg(DISTINCT block_id::text), '{}')
-			FROM content.block_revisions
-			WHERE organization_id = $1::uuid AND id = ANY($2::uuid[])
-		`, principal.OrganizationID, revisions).Scan(&blockIDs); err != nil {
-			return DeleteResult{}, fmt.Errorf("collect block ids: %w", err)
-		}
-		if _, err := tx.Exec(ctx, `DELETE FROM content.block_revisions WHERE organization_id = $1::uuid AND id = ANY($2::uuid[])`, principal.OrganizationID, revisions); err != nil {
-			return DeleteResult{}, fmt.Errorf("delete block revisions: %w", err)
-		}
-		if _, err := tx.Exec(ctx, `
-			DELETE FROM content.blocks
-			WHERE organization_id = $1::uuid AND id = ANY($2::uuid[])
-			  AND NOT EXISTS (SELECT 1 FROM content.block_revisions br WHERE br.organization_id = $1::uuid AND br.block_id = content.blocks.id)
-		`, principal.OrganizationID, nonEmpty(blockIDs)); err != nil {
-			return DeleteResult{}, fmt.Errorf("delete orphan blocks: %w", err)
-		}
-	}
+	// Block revisions and blocks survive the subtree: the frozen version
+	// snapshots (asset_versions.blocks) reference them by id and the note
+	// assets keep their version history for audit. Reclaiming them needs a
+	// reference-counting GC (design §8), not a cascade delete.
 
 	// Self-referencing parent FK validates per row, so drop deepest levels
 	// first; within one level order is irrelevant.

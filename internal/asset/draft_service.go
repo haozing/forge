@@ -588,6 +588,15 @@ func (s MemberService) CommitDraft(ctx context.Context, principal auth.Principal
 		return CommitResult{}, err
 	}
 	defer tx.Rollback(ctx)
+	// Lock order is tree container -> asset -> draft (edit paths take the
+	// same order), so a concurrent tree edit can never cycle with a freeze.
+	if _, isNote, noteErr := noteContainerIDTx(ctx, tx, principal.OrganizationID, assetID); noteErr != nil {
+		return CommitResult{}, noteErr
+	} else if isNote {
+		if _, _, err := noteblocks.LoadTreeByAssetTx(ctx, tx, principal.OrganizationID, assetID); err != nil {
+			return CommitResult{}, err
+		}
+	}
 	row, err := LoadLifecycleTx(ctx, tx, principal.OrganizationID, assetID)
 	if err != nil {
 		return CommitResult{}, err
@@ -658,6 +667,14 @@ type CommitResult struct {
 func (s MemberService) CommitDraftForReviewTx(ctx context.Context, tx pgx.Tx, principal auth.Principal, workspaceID, assetID string, expectedDraftRevision int64) (CommitResult, error) {
 	if s.Store == nil || s.Store.Pool == nil || s.Policy == nil {
 		return CommitResult{}, ErrForbidden
+	}
+	// Same lock order as CommitDraft: tree container before asset/draft.
+	if _, isNote, noteErr := noteContainerIDTx(ctx, tx, principal.OrganizationID, assetID); noteErr != nil {
+		return CommitResult{}, noteErr
+	} else if isNote {
+		if _, _, err := noteblocks.LoadTreeByAssetTx(ctx, tx, principal.OrganizationID, assetID); err != nil {
+			return CommitResult{}, err
+		}
 	}
 	row, err := LoadLifecycleTx(ctx, tx, principal.OrganizationID, assetID)
 	if err != nil {

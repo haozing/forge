@@ -601,7 +601,7 @@ sync 无 body，生成/更新 note asset，返回 `{conversation_id,note_asset_i
 
 **笔记发布没有捷径端点**（`note/publish` 已作为治理旁路移除，2026-09-03）：笔记发布与其他资产同链路——`POST /api/assets/{note_asset_id}/asset-versions/{version_id}/confirm`（builtin_note 要求人工确认，confirm 派生 human_confirmed 子版本）后 `POST /api/assets/{note_asset_id}/publish`（body `{draft_revision}`，草稿乐观锁）。审核制模型则走 `POST /api/workspaces/{ws}/publication-requests`。
 
-GET note 返回 `{conversation_id,note_asset_id,note_container_id,asset_version_id,title,markdown,fields,publication_status,confirmation_status,message_count}`：`confirmation_status` 为当前工作版本的确认状态（`unconfirmed|human_confirmed`），无工作版本时 `title`/`markdown` 为 null、`confirmation_status` 为空字符串。会话不存在或未绑定笔记 404 `conversation_or_note_not_found`。
+GET note 返回（0019 块树模型）`{conversation_id,note_asset_id,container_id,asset_version_id,title,markdown,fields,revision,committed_revision,draft_markdown,dirty,publication_status,confirmation_status,message_count}`：`markdown` 为当前工作版本的冻结产物，`draft_markdown` 为活块树实时渲染（只读），`dirty` 表示活树较最近固化有变化，`revision` 即提交乐观锁 `draft_revision`。笔记编辑走 `GET/POST /api/frontend/conversations/{id}/note/blocks`、`PATCH/DELETE .../note/blocks/{blockId}`（消息块不可改不可删）；"保存"= `POST /api/assets/{note_asset_id}/commit-draft`。会话不存在或未绑定笔记 404 `conversation_or_note_not_found`。
 
 ### 12.2 派生内容
 
@@ -626,7 +626,7 @@ finalize：
   "disposition":"create_new|merge_existing|discard",
   "target_asset_id":null, "target_block_id":null,
   "expected_source_asset_version_id":null, "expected_target_asset_version_id":null,
-  "expected_container_version_id":null, "merge_mode":"append|replace"
+  "已废弃（容器版本已随 0019 移除）":null, "merge_mode":"append|replace"
 }
 ```
 

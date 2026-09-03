@@ -69,7 +69,7 @@ func conversationResource(deps Dependencies) http.HandlerFunc {
 			UPDATE content.conversations c
 			SET title = COALESCE($3, c.title), visibility = COALESCE($4, c.visibility), updated_at = now()
 			WHERE c.organization_id = $1::uuid AND c.id = $2::uuid
-			  AND EXISTS (SELECT 1 FROM content.workspace_members wm WHERE wm.organization_id = c.organization_id AND wm.workspace_id = c.workspace_id AND wm.user_id = $5::uuid)`,
+			  AND EXISTS (SELECT 1 FROM content.workspace_members wm WHERE wm.organization_id = c.organization_id AND wm.workspace_id = c.workspace_id AND wm.user_id = $5::uuid AND wm.role <> 'viewer')`,
 			principal.OrganizationID, r.PathValue("conversationId"), input.Title, input.Visibility, principal.UserID)
 		if err != nil || result.RowsAffected() != 1 {
 			writeError(w, http.StatusInternalServerError, "conversation_update_failed")
@@ -110,7 +110,12 @@ func archiveConversation(deps Dependencies) http.HandlerFunc {
 			}
 			return
 		}
-		if _, err := deps.Store.Pool.Exec(r.Context(), `UPDATE content.conversations SET status = 'archived', completed_at = COALESCE(completed_at, now()), updated_at = now() WHERE organization_id = $1::uuid AND id = $2::uuid`, principal.OrganizationID, r.PathValue("conversationId")); err != nil {
+		if _, err := deps.Store.Pool.Exec(r.Context(), `
+			UPDATE content.conversations c
+			SET status = 'archived', completed_at = COALESCE(completed_at, now()), updated_at = now()
+			WHERE c.organization_id = $1::uuid AND c.id = $2::uuid
+			  AND EXISTS (SELECT 1 FROM content.workspace_members wm WHERE wm.organization_id = c.organization_id AND wm.workspace_id = c.workspace_id AND wm.user_id = $3::uuid AND wm.role <> 'viewer')`,
+			principal.OrganizationID, r.PathValue("conversationId"), principal.UserID); err != nil {
 			writeError(w, http.StatusInternalServerError, "conversation_archive_failed")
 			return
 		}

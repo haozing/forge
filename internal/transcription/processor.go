@@ -39,10 +39,10 @@ func (p Processor) Process(ctx context.Context, jobID, mediaID string) error {
 		jobCtx, cancel = context.WithTimeout(ctx, p.Timeout)
 		defer cancel()
 	}
-	var organizationID, conversationID, containerID, attachmentID, objectKey, filename, mediaType, language, createdBy, status string
+	var organizationID, conversationID, containerID, noteAssetID, attachmentID, objectKey, filename, mediaType, language, createdBy, status string
 	var bodyRevision string
 	err := p.Store.Pool.QueryRow(jobCtx, `
-		SELECT j.organization_id::text, cm.conversation_id::text, cc.id::text, cm.attachment_id::text,
+		SELECT j.organization_id::text, cm.conversation_id::text, cc.id::text, nb.note_asset_id::text, cm.attachment_id::text,
 		       at.object_key, at.original_filename, at.media_type, COALESCE(cm.language, ''),
 		       cm.created_by::text, cm.status, COALESCE(cm.transcription_block_revision_id::text, '')
 		FROM content.processing_jobs j
@@ -52,7 +52,7 @@ func (p Processor) Process(ctx context.Context, jobID, mediaID string) error {
 		JOIN content.containers cc ON cc.organization_id = nb.organization_id AND cc.asset_id = nb.note_asset_id
 		JOIN asset.attachments at ON at.id = cm.attachment_id
 		WHERE j.id = $1::uuid AND j.job_type = 'transcription' AND j.source_id = $2::uuid
-	`, jobID, mediaID).Scan(&organizationID, &conversationID, &containerID, &attachmentID, &objectKey, &filename, &mediaType, &language, &createdBy, &status, &bodyRevision)
+	`, jobID, mediaID).Scan(&organizationID, &conversationID, &containerID, &noteAssetID, &attachmentID, &objectKey, &filename, &mediaType, &language, &createdBy, &status, &bodyRevision)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("transcription job not found")
 	}
@@ -135,6 +135,16 @@ func (p Processor) Process(ctx context.Context, jobID, mediaID string) error {
 		}
 		if _, err := tx.Exec(jobCtx, `UPDATE content.containers SET revision = revision + 1, updated_at = now() WHERE id = $1::uuid`, containerID); err != nil {
 			return fmt.Errorf("advance transcription container: %w", err)
+		}
+		// The tree moved: advance the note's draft epoch so the next freeze
+		// sees dirty state and the transcription reaches a frozen version.
+		if tag, err := tx.Exec(jobCtx, `
+			UPDATE asset.asset_drafts SET revision = revision + 1, updated_at = now()
+			WHERE organization_id = $1::uuid AND asset_id = $2::uuid
+		`, organizationID, noteAssetID); err != nil {
+			return fmt.Errorf("advance transcription draft epoch: %w", err)
+		} else if tag.RowsAffected() == 0 {
+			return fmt.Errorf("note draft row missing for transcription epoch advance")
 		}
 		if _, err := tx.Exec(jobCtx, `
 			INSERT INTO content.message_blocks (organization_id, block_revision_id, conversation_id, role, status, sequence_no, reference_metadata)

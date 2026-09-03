@@ -142,6 +142,9 @@ func (s Service) ListPage(ctx context.Context, principal auth.Principal, workspa
 		LEFT JOIN LATERAL (SELECT br.content FROM content.message_blocks mb JOIN content.block_revisions br ON br.id = mb.block_revision_id WHERE mb.conversation_id = c.id ORDER BY mb.sequence_no DESC LIMIT 1) last_message ON true
 		LEFT JOIN LATERAL (SELECT count(*) AS message_count FROM content.message_blocks mb WHERE mb.conversation_id = c.id) message_counts ON true
 		WHERE c.organization_id = $1::uuid AND c.workspace_id = $2::uuid AND c.status <> 'archived'
+		  AND EXISTS (SELECT 1 FROM content.workspace_members wm
+		              WHERE wm.organization_id = c.organization_id AND wm.workspace_id = c.workspace_id
+		                AND wm.user_id = $3::uuid)
 		  AND ($4 = '' OR c.title ILIKE '%' || $4 || '%' OR last_message.content ILIKE '%' || $4 || '%')
 		  AND ($5 = '' OR c.updated_at < NULLIF($5, '')::timestamptz OR (c.updated_at = NULLIF($5, '')::timestamptz AND c.id > NULLIF($6, '')::uuid))
 		ORDER BY c.updated_at DESC, c.id LIMIT $7
@@ -192,6 +195,7 @@ func (s Service) ListChildren(ctx context.Context, principal auth.Principal, con
 		       COALESCE(c.parent_conversation_id::text, ''), COALESCE(c.origin_derivation_id::text, ''),
 		       COALESCE(last_message.content, ''), COALESCE(message_counts.message_count, 0), c.updated_at
 		FROM content.conversations c
+		JOIN content.workspace_members wm ON wm.organization_id = c.organization_id AND wm.workspace_id = c.workspace_id AND wm.user_id = $3::uuid
 		LEFT JOIN content.note_bindings nb ON nb.conversation_id = c.id
 		LEFT JOIN content.containers cc ON cc.organization_id = nb.organization_id AND cc.asset_id = nb.note_asset_id
 		LEFT JOIN LATERAL (SELECT br.content FROM content.message_blocks mb JOIN content.block_revisions br ON br.id = mb.block_revision_id WHERE mb.conversation_id = c.id ORDER BY mb.sequence_no DESC LIMIT 1) last_message ON true

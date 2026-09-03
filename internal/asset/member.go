@@ -1,6 +1,7 @@
 package asset
 
 import (
+	"agentchunzhi/internal/noteblocks"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -258,6 +259,11 @@ func (s MemberService) ListPage(ctx context.Context, principal auth.Principal, w
 		"a.workspace_id = $2::uuid",
 		"a.deleted_at IS NULL",
 		"w.status = 'active'",
+		// Conversation-bound notes stay out of the document library until
+		// they are published or harvested into standalone documents.
+		`NOT (a.publication_status = 'draft' AND EXISTS (
+			SELECT 1 FROM content.note_bindings nb
+			WHERE nb.organization_id = a.organization_id AND nb.note_asset_id = a.id))`,
 	}
 	args := []any{principal.OrganizationID, workspaceID}
 	arg := func(value any) string {
@@ -881,6 +887,15 @@ func (s MemberService) Publish(ctx context.Context, principal auth.Principal, wo
 		return MemberAsset{}, err
 	}
 	defer tx.Rollback(ctx)
+	// Lock order is tree container -> asset -> draft (edit paths take the
+	// same order), matching CommitDraft.
+	if _, isNote, noteErr := noteContainerIDTx(ctx, tx, principal.OrganizationID, assetID); noteErr != nil {
+		return MemberAsset{}, noteErr
+	} else if isNote {
+		if _, _, err := noteblocks.LoadTreeByAssetTx(ctx, tx, principal.OrganizationID, assetID); err != nil {
+			return MemberAsset{}, err
+		}
+	}
 	row, err := LoadLifecycleTx(ctx, tx, principal.OrganizationID, assetID)
 	if err != nil {
 		return MemberAsset{}, err

@@ -221,9 +221,7 @@ type finalizeDerivationRequest struct {
 	TargetAssetID                string `json:"target_asset_id"`
 	ExpectedSourceAssetVersionID string `json:"expected_source_asset_version_id"`
 	ExpectedTargetAssetVersionID string `json:"expected_target_asset_version_id"`
-	ExpectedContainerVersionID   string `json:"expected_container_version_id"`
 	MergeMode                    string `json:"merge_mode"`
-	TargetBlockID                string `json:"target_block_id"`
 	AutoArchive                  *bool  `json:"auto_archive"`
 }
 
@@ -527,7 +525,7 @@ func finalizeDerivation(deps Dependencies) http.HandlerFunc {
 		result, err := deps.ConversationService.FinalizeDerivation(r.Context(), principal, idempotencyKey, r.PathValue("derivationId"), contentservice.FinalizeDerivationInput{
 			Disposition: input.Disposition, TargetAssetID: input.TargetAssetID,
 			ExpectedSourceAssetVersionID: input.ExpectedSourceAssetVersionID, ExpectedTargetAssetVersionID: input.ExpectedTargetAssetVersionID,
-			ExpectedContainerVersionID: input.ExpectedContainerVersionID, MergeMode: input.MergeMode, TargetBlockID: input.TargetBlockID,
+			MergeMode: input.MergeMode,
 			AutoArchive: input.AutoArchive,
 		})
 		if errors.Is(err, contentservice.ErrInvalidInput) {

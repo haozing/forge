@@ -180,7 +180,7 @@ func (s Service) List(ctx context.Context, principal auth.Principal) ([]Summary,
 		          WHERE c.organization_id = w.organization_id AND c.workspace_id = w.id AND c.status = 'active'),
 		       (SELECT count(*) FROM content.containers c
 		          WHERE c.organization_id = w.organization_id AND c.workspace_id = w.id
-		            AND c.kind = 'document' AND c.status = 'active'),
+		            AND c.kind = 'note' AND c.status = 'active'),
 		       (SELECT count(*) FROM asset.publication_requests pr
 		          WHERE pr.organization_id = w.organization_id AND pr.workspace_id = w.id AND pr.status = 'pending'),
 		       (SELECT count(*) FROM automation.runs r
@@ -221,7 +221,7 @@ func (s Service) Get(ctx context.Context, principal auth.Principal, workspaceID 
 		       COALESCE(w.default_resource_model_id::text, ''),
 		       w.updated_at,
 		       (SELECT count(*) FROM content.conversations c WHERE c.organization_id = w.organization_id AND c.workspace_id = w.id AND c.status = 'active'),
-		       (SELECT count(*) FROM content.containers c WHERE c.organization_id = w.organization_id AND c.workspace_id = w.id AND c.kind = 'document' AND c.status = 'active'),
+		       (SELECT count(*) FROM content.containers c WHERE c.organization_id = w.organization_id AND c.workspace_id = w.id AND c.kind = 'note' AND c.status = 'active'),
 		       (SELECT count(*) FROM asset.publication_requests pr WHERE pr.organization_id = w.organization_id AND pr.workspace_id = w.id AND pr.status = 'pending'),
 		       (SELECT count(*) FROM automation.runs r WHERE r.organization_id = w.organization_id AND r.workspace_id = w.id AND r.status IN ('queued', 'running'))
 		FROM content.workspaces w
@@ -408,7 +408,7 @@ func (s Service) Stats(ctx context.Context, principal auth.Principal, workspaceI
 		  (SELECT count(*) FROM asset.assets WHERE organization_id = $1::uuid AND workspace_id = $2::uuid AND publication_status = 'published'),
 		  (SELECT count(*) FROM asset.publication_requests WHERE organization_id = $1::uuid AND workspace_id = $2::uuid AND status = 'pending'),
 		  (SELECT count(*) FROM asset.assets WHERE organization_id = $1::uuid AND workspace_id = $2::uuid AND created_at >= date_trunc('month', now())),
-		  (SELECT count(*) FROM content.containers WHERE organization_id = $1::uuid AND workspace_id = $2::uuid AND kind = 'document' AND status = 'active'),
+		  (SELECT count(*) FROM content.containers WHERE organization_id = $1::uuid AND workspace_id = $2::uuid AND kind = 'note' AND status = 'active'),
 		  COALESCE((SELECT count(*) FILTER (WHERE status = 'succeeded')::float8 / NULLIF(count(*) FILTER (WHERE status IN ('succeeded', 'failed')), 0) FROM automation.runs WHERE organization_id = $1::uuid AND workspace_id = $2::uuid), 0)
 	`, principal.OrganizationID, workspaceID).Scan(&result.AssetsTotal, &result.AssetsPublished, &result.AssetsPendingReview, &result.AssetsCreatedThisMonth, &result.DocumentsTotal, &result.TaskRunSuccessRate)
 	if err != nil {

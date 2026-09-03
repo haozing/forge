@@ -88,7 +88,7 @@ func (s Service) NoteView(ctx context.Context, principal auth.Principal, convers
 	}
 	view.Fields = decoded
 	view.DraftRevision, view.CommittedRevision = revision, committed
-	tree, found, err := noteblocks.LoadTreeByAssetTx(ctx, s.Store.Pool, principal.OrganizationID, view.NoteAssetID)
+	tree, found, err := noteblocks.LoadTreeByAssetView(ctx, s.Store.Pool, principal.OrganizationID, view.NoteAssetID)
 	if err != nil {
 		return NoteView{}, err
 	}
@@ -154,7 +154,7 @@ func (s Service) NoteBlocks(ctx context.Context, principal auth.Principal, conve
 
 // AddNoteBlock appends a manual block to the live tree.
 func (s Service) AddNoteBlock(ctx context.Context, principal auth.Principal, idempotencyKey, conversationID, kind, content string) (NoteBlockEntry, error) {
-	if err := s.noteBlockGuard(principal, idempotencyKey, conversationID, kind); err != nil {
+	if err := s.noteBlockGuard(principal, idempotencyKey, conversationID, kind, content); err != nil {
 		return NoteBlockEntry{}, err
 	}
 	tx, err := s.Store.Pool.Begin(ctx)
@@ -162,6 +162,22 @@ func (s Service) AddNoteBlock(ctx context.Context, principal auth.Principal, ide
 		return NoteBlockEntry{}, fmt.Errorf("begin note block add: %w", err)
 	}
 	defer tx.Rollback(ctx)
+	state, err := reserveIdempotency(ctx, tx, principal, "conversation.note.block.add", idempotencyKey,
+		hashRequest(struct {
+			ConversationID string
+			Kind           string
+			Content        string
+		}{conversationID, kind, content}))
+	if err != nil {
+		return NoteBlockEntry{}, err
+	}
+	if state.replay {
+		var replayed NoteBlockEntry
+		if err := json.Unmarshal(state.body, &replayed); err != nil {
+			return NoteBlockEntry{}, fmt.Errorf("decode idempotent note block add: %w", err)
+		}
+		return replayed, nil
+	}
 	containerID, noteAssetID, revision, err := lockNoteContainer(ctx, tx, principal, conversationID)
 	if err != nil {
 		return NoteBlockEntry{}, err
@@ -192,6 +208,22 @@ func (s Service) UpdateNoteBlock(ctx context.Context, principal auth.Principal, 
 		return NoteBlockEntry{}, fmt.Errorf("begin note block update: %w", err)
 	}
 	defer tx.Rollback(ctx)
+	state, err := reserveIdempotency(ctx, tx, principal, "conversation.note.block.update", idempotencyKey,
+		hashRequest(struct {
+			ConversationID string
+			BlockID        string
+			Content        string
+		}{conversationID, blockID, content}))
+	if err != nil {
+		return NoteBlockEntry{}, err
+	}
+	if state.replay {
+		var replayed NoteBlockEntry
+		if err := json.Unmarshal(state.body, &replayed); err != nil {
+			return NoteBlockEntry{}, fmt.Errorf("decode idempotent note block update: %w", err)
+		}
+		return replayed, nil
+	}
 	containerID, noteAssetID, revision, err := lockNoteContainer(ctx, tx, principal, conversationID)
 	if err != nil {
 		return NoteBlockEntry{}, err
@@ -272,9 +304,40 @@ func (s Service) DeleteNoteBlock(ctx context.Context, principal auth.Principal, 
 		return "", fmt.Errorf("begin note block delete: %w", err)
 	}
 	defer tx.Rollback(ctx)
+	state, err := reserveIdempotency(ctx, tx, principal, "conversation.note.block.delete", idempotencyKey,
+		hashRequest(struct {
+			ConversationID string
+			BlockID        string
+		}{conversationID, blockID}))
+	if err != nil {
+		return "", err
+	}
+	if state.replay {
+		var replayed struct {
+			BlockID string `json:"block_id"`
+		}
+		if err := json.Unmarshal(state.body, &replayed); err != nil {
+			return "", fmt.Errorf("decode idempotent note block delete: %w", err)
+		}
+		return replayed.BlockID, nil
+	}
 	containerID, noteAssetID, revision, err := lockNoteContainer(ctx, tx, principal, conversationID)
 	if err != nil {
 		return "", err
+	}
+	// Message blocks are conversation records; removal from the tree is an
+	// editor action reserved for manual blocks.
+	var isMessageBlock bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM content.message_blocks mb
+			JOIN content.block_revisions br ON br.organization_id = mb.organization_id AND br.id = mb.block_revision_id
+			WHERE mb.organization_id = $1::uuid AND mb.conversation_id = $2::uuid AND br.block_id = $3::uuid)
+	`, principal.OrganizationID, conversationID, blockID).Scan(&isMessageBlock); err != nil {
+		return "", fmt.Errorf("load block message flag: %w", err)
+	}
+	if isMessageBlock {
+		return "", fmt.Errorf("%w: message blocks are immutable", ErrConflict)
 	}
 	tag, err := tx.Exec(ctx, `
 		DELETE FROM content.block_placements bp
@@ -309,12 +372,12 @@ func (s Service) DeleteNoteBlock(ctx context.Context, principal auth.Principal, 
 	return blockID, nil
 }
 
-func (s Service) noteBlockGuard(principal auth.Principal, idempotencyKey, conversationID, kind string) error {
+func (s Service) noteBlockGuard(principal auth.Principal, idempotencyKey, conversationID, kind, content string) error {
 	if principal.UserType != "member" || !validID(principal.OrganizationID) || !validID(principal.UserID) ||
 		!validID(conversationID) || !validIdempotencyKey(idempotencyKey) {
 		return ErrInvalidInput
 	}
-	if !editableNoteKind(kind) {
+	if !editableNoteKind(kind) || strings.TrimSpace(content) == "" {
 		return ErrInvalidInput
 	}
 	if s.Store == nil || s.Store.Pool == nil {
@@ -407,11 +470,13 @@ func touchNoteTree(ctx context.Context, tx pgx.Tx, organizationID, containerID, 
 	`, containerID); err != nil {
 		return NoteBlockEntry{}, fmt.Errorf("advance note tree: %w", err)
 	}
-	if _, err := tx.Exec(ctx, `
+	if tag, err := tx.Exec(ctx, `
 		UPDATE asset.asset_drafts SET revision = revision + 1, updated_at = now()
 		WHERE organization_id = $1::uuid AND asset_id = $2::uuid
 	`, organizationID, noteAssetID); err != nil {
 		return NoteBlockEntry{}, fmt.Errorf("advance note draft epoch: %w", err)
+	} else if tag.RowsAffected() == 0 {
+		return NoteBlockEntry{}, errors.New("note draft row missing for epoch advance")
 	}
 	var content string
 	var position float64

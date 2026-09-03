@@ -11,6 +11,7 @@ import (
 	"time"
 
 	assetservice "agentchunzhi/internal/asset"
+	"agentchunzhi/internal/noteblocks"
 	"agentchunzhi/internal/auth"
 	"agentchunzhi/internal/eventing"
 	"agentchunzhi/internal/store"
@@ -211,16 +212,16 @@ func (s Service) CreateDerivation(ctx context.Context, principal auth.Principal,
 		}
 		return result, nil
 	}
-	var workspaceID, sourceContainerID, sourceTitle, sourceVisibility, appID, boundAgent string
+	var workspaceID, sourceContainerID, sourceTitle, sourceVisibility, appID, boundAgent, sourceNoteAsset string
 	var noteModelID, noteModelVersionID string
 	var sourceMarkdown string
 	err = tx.QueryRow(ctx, `
 		SELECT c.workspace_id::text, cc.id::text, c.title, c.visibility,
 		       c.agent_application_id::text, c.bound_agent_user_id::text,
-		       COALESCE(av.markdown, ''),
+		       nb.note_asset_id::text, COALESCE(av.markdown, ''),
 		       av.resource_model_id::text, av.resource_model_version_id::text
 		FROM content.conversations c
-                JOIN content.workspace_members wm ON wm.workspace_id = c.workspace_id AND wm.user_id = $3::uuid
+                JOIN content.workspace_members wm ON wm.workspace_id = c.workspace_id AND wm.user_id = $3::uuid AND wm.role <> 'viewer'
 		JOIN content.note_bindings nb ON nb.conversation_id = c.id
 		JOIN content.containers cc ON cc.organization_id = nb.organization_id AND cc.asset_id = nb.note_asset_id
 		JOIN asset.assets a ON a.id = nb.note_asset_id AND a.organization_id = c.organization_id
@@ -229,8 +230,17 @@ func (s Service) CreateDerivation(ctx context.Context, principal auth.Principal,
 		FOR UPDATE OF c, cc, nb, a
 	`, principal.OrganizationID, input.SourceConversationID, principal.UserID).Scan(
 		&workspaceID, &sourceContainerID, &sourceTitle, &sourceVisibility, &appID, &boundAgent,
-		&sourceMarkdown,
+		&sourceNoteAsset, &sourceMarkdown,
 		&noteModelID, &noteModelVersionID)
+	if err == nil {
+		// The seeding context reads the LIVE tree render, not the last frozen
+		// markdown, so unsaved messages and manual blocks travel too.
+		if sourceTree, found, treeErr := noteblocks.LoadTreeByAssetTx(ctx, tx, principal.OrganizationID, sourceNoteAsset); treeErr != nil {
+			return DerivationResult{}, treeErr
+		} else if found {
+			sourceMarkdown = noteblocks.RenderMarkdown(sourceTree)
+		}
+	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		return DerivationResult{}, ErrNotFound
 	}
@@ -406,10 +416,12 @@ func appendMessageBlockTx(ctx context.Context, tx pgx.Tx, organizationID, conver
 		return MessageResult{}, fmt.Errorf("advance note tree: %w", err)
 	}
 	if noteAssetID != "" {
-		if _, err := tx.Exec(ctx, `
+		if tag, err := tx.Exec(ctx, `
 			UPDATE asset.asset_drafts SET revision = revision + 1, updated_at = now() WHERE organization_id = $1::uuid AND asset_id = $2::uuid
 		`, organizationID, noteAssetID); err != nil {
 			return MessageResult{}, fmt.Errorf("advance note draft epoch: %w", err)
+		} else if tag.RowsAffected() == 0 {
+			return MessageResult{}, errors.New("note draft row missing for epoch advance")
 		}
 	}
 	if _, err := tx.Exec(ctx, `
@@ -545,9 +557,7 @@ type FinalizeDerivationInput struct {
 	TargetAssetID                string
 	ExpectedSourceAssetVersionID string
 	ExpectedTargetAssetVersionID string
-	ExpectedContainerVersionID   string
 	MergeMode                    string
-	TargetBlockID                string
 	// AutoArchive archives the derived conversation after a successful
 	// harvest; nil counts as true.
 	AutoArchive *bool
@@ -581,12 +591,6 @@ func (s Service) FinalizeDerivation(ctx context.Context, principal auth.Principa
 	if input.ExpectedTargetAssetVersionID != "" && !validID(input.ExpectedTargetAssetVersionID) {
 		return FinalizeResult{}, ErrInvalidInput
 	}
-	if input.ExpectedContainerVersionID != "" && !validID(input.ExpectedContainerVersionID) {
-		return FinalizeResult{}, ErrInvalidInput
-	}
-	if input.TargetBlockID != "" && !validID(input.TargetBlockID) {
-		return FinalizeResult{}, ErrInvalidInput
-	}
 	if input.Disposition == "merge" && (input.TargetAssetID == "" || input.ExpectedTargetAssetVersionID == "" || input.MergeMode == "") {
 		return FinalizeResult{}, ErrInvalidInput
 	}
@@ -617,11 +621,12 @@ func (s Service) FinalizeDerivation(ctx context.Context, principal auth.Principa
 		SELECT d.workspace_id::text, d.source_conversation_id::text, d.target_conversation_id::text,
 		       snb.note_asset_id::text, tnb.note_asset_id::text, d.status
 		FROM content.derivations d
-		JOIN content.workspace_members wm ON wm.workspace_id = d.workspace_id AND wm.user_id = $3::uuid
+		JOIN content.workspace_members wm ON wm.workspace_id = d.workspace_id AND wm.user_id = $3::uuid AND wm.role <> 'viewer'
 		JOIN content.note_bindings snb ON snb.conversation_id = d.source_conversation_id
 		JOIN content.note_bindings tnb ON tnb.conversation_id = d.target_conversation_id
+		JOIN content.conversations tc ON tc.id = d.target_conversation_id AND tc.organization_id = d.organization_id
 		WHERE d.organization_id = $1::uuid AND d.id = $2::uuid
-		FOR UPDATE OF d, snb, tnb
+		FOR UPDATE OF d, snb, tnb, tc
 	`, principal.OrganizationID, derivationID, principal.UserID).Scan(&workspaceID, &sourceConversationID, &targetConversationID, &sourceNoteAssetID, &targetNoteAssetID, &derivationStatus); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return FinalizeResult{}, ErrNotFound
@@ -633,6 +638,11 @@ func (s Service) FinalizeDerivation(ctx context.Context, principal auth.Principa
 	}
 	if derivationStatus != "discussing" && derivationStatus != "result_ready" && derivationStatus != "finalizing" {
 		return FinalizeResult{}, fmt.Errorf("%w: derivation is not ready", ErrConflict)
+	}
+	// Lock order is conversation -> tree container -> asset -> draft (the
+	// edit paths take the same order); the tree lock precedes the asset lock.
+	if _, _, err := noteblocks.LoadTreeByAssetTx(ctx, tx, principal.OrganizationID, targetNoteAssetID); err != nil {
+		return FinalizeResult{}, err
 	}
 	// The harvest output must be the committed state of the derivation's
 	// discussion: freeze its note first when the live tree moved since the
@@ -690,6 +700,30 @@ func (s Service) FinalizeDerivation(ctx context.Context, principal auth.Principa
 	}
 	result := FinalizeResult{DerivationID: derivationID, Disposition: input.Disposition, Status: "completed"}
 	if input.Disposition == "merge" {
+		// The merge target must be a form-authored asset of the derivation's
+		// own workspace: conversation notes are block-managed (a markdown
+		// merge into one would be silently wiped by the next freeze), and
+		// cross-workspace targets would be a same-organization write escape.
+		var targetWorkspace string
+		var isNoteTarget bool
+		if err := tx.QueryRow(ctx, `
+			SELECT a.workspace_id::text,
+			       EXISTS (SELECT 1 FROM content.containers c
+			               WHERE c.organization_id = a.organization_id AND c.asset_id = a.id)
+			FROM asset.assets a
+			WHERE a.organization_id = $1::uuid AND a.id = $2::uuid AND a.deleted_at IS NULL
+		`, principal.OrganizationID, input.TargetAssetID).Scan(&targetWorkspace, &isNoteTarget); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return FinalizeResult{}, ErrNotFound
+			}
+			return FinalizeResult{}, fmt.Errorf("load merge target guard: %w", err)
+		}
+		if targetWorkspace != workspaceID {
+			return FinalizeResult{}, ErrNotFound
+		}
+		if isNoteTarget {
+			return FinalizeResult{}, fmt.Errorf("%w: merge target is a conversation note (block-managed)", ErrConflict)
+		}
 		var targetVersionID, targetModelID, targetModelVersionID, targetTitle string
 		var targetMarkdown, targetFields []byte
 		if err := tx.QueryRow(ctx, `
@@ -796,7 +830,7 @@ func (s Service) FinalizeDerivation(ctx context.Context, principal auth.Principa
 		if _, err := tx.Exec(ctx, `
 			UPDATE content.conversations
 			SET status = 'archived', completed_at = COALESCE(completed_at, now()), updated_at = now()
-			WHERE organization_id = $1::uuid AND id = $2::uuid
+			WHERE organization_id = $1::uuid AND id = $2::uuid AND status = 'active'
 		`, principal.OrganizationID, targetConversationID); err != nil {
 			return FinalizeResult{}, fmt.Errorf("archive derived conversation: %w", err)
 		}
@@ -1432,20 +1466,6 @@ func saveIdempotency(ctx context.Context, tx pgx.Tx, principal auth.Principal, o
 	return nil
 }
 
-func createEmptyContainerVersion(ctx context.Context, tx pgx.Tx, organizationID, containerID, userID, checksum string) error {
-	var versionID string
-	if err := tx.QueryRow(ctx, `
-		INSERT INTO content.container_versions (organization_id, container_id, version_no, created_by, content_checksum)
-		VALUES ($1::uuid, $2::uuid, 1, $3::uuid, $4) RETURNING id::text
-	`, organizationID, containerID, userID, checksum).Scan(&versionID); err != nil {
-		return fmt.Errorf("create initial container version: %w", err)
-	}
-	if _, err := tx.Exec(ctx, `UPDATE content.containers SET current_version_id = $2::uuid WHERE id = $1::uuid`, containerID, versionID); err != nil {
-		return fmt.Errorf("set initial container version: %w", err)
-	}
-	return nil
-}
-
 // createAssetVersionWithDraft seeds a freshly inserted asset with its first
 // immutable working version and the shared draft. Version creation goes
 // through asset.CreateVersionTx; the draft starts at revision 1.
@@ -1512,11 +1532,6 @@ func insertAssetDraft(ctx context.Context, tx pgx.Tx, organizationID, workspaceI
 		return fmt.Errorf("bind asset draft: %w", err)
 	}
 	return nil
-}
-
-func emptyChecksum() string {
-	sum := sha256.Sum256([]byte(""))
-	return hex.EncodeToString(sum[:])
 }
 
 func hashBytes(value string) string {

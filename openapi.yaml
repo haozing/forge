@@ -4293,7 +4293,7 @@ paths:
             application/json:
               schema:
                 allOf:
-                  - $ref: '#/components/schemas/NoteDetail'
+                  - $ref: '#/components/schemas/NoteView'
                   - $ref: '#/components/schemas/Envelope'
         '404': { $ref: '#/components/responses/Error' }
   /api/conversations/{conversationId}/note/blocks:
@@ -5562,7 +5562,7 @@ components:
         workspace_id: { type: string, format: uuid }
         title: { type: string }
         source: { type: string, enum: [chat_interface, document, asset, automation] }
-        visibility: { type: string, enum: [private, workspace] }
+        visibility: { type: string, enum: [workspace, organization, public] }
         status: { type: string, enum: [active, completed, archived, failed] }
         container_id: { type: string, format: uuid }
         note_asset_id: { type: string }
@@ -5578,7 +5578,7 @@ components:
         agent_application_id: { type: string, format: uuid }
         title: { type: string }
         source: { type: string, enum: [chat_interface, document, asset, automation] }
-        visibility: { type: string, enum: [private, workspace] }
+        visibility: { type: string, enum: [workspace, organization, public] }
         container_id: { type: string, format: uuid }
     ConversationResult:
       type: object
@@ -5586,7 +5586,6 @@ components:
         conversation_id: { type: string, format: uuid }
         workspace_id: { type: string, format: uuid }
         container_id: { type: string, format: uuid }
-        note_container_id: { type: string, format: uuid }
         note_asset_id: { type: string, format: uuid }
         agent_application_id: { type: string, format: uuid }
         bound_agent_user_id: { type: string, format: uuid }
@@ -5598,7 +5597,7 @@ components:
           properties:
             title: { type: string }
             source: { type: string, enum: [chat_interface, document, asset, automation] }
-            visibility: { type: string, enum: [private, workspace] }
+            visibility: { type: string, enum: [workspace, organization, public] }
             parent_conversation_id: { type: string, description: 来源思考 ID，根思考为空字符串 }
             origin_derivation_id: { type: string, description: 产生本思考的派生记录 ID，根思考为空字符串 }
             created_at: { type: string }
@@ -5607,7 +5606,7 @@ components:
       type: object
       properties:
         title: { type: string }
-        visibility: { type: string, enum: [private, workspace] }
+        visibility: { type: string, enum: [workspace, organization, public] }
     ConversationDeleteResult:
       type: object
       properties:
@@ -5763,10 +5762,8 @@ components:
       properties:
         disposition: { type: string, enum: [independent, reference, merge] }
         target_asset_id: { type: string, format: uuid, nullable: true }
-        target_block_id: { type: string, format: uuid, nullable: true }
         expected_source_asset_version_id: { type: string, format: uuid, nullable: true }
         expected_target_asset_version_id: { type: string, format: uuid, nullable: true }
-        expected_container_version_id: { type: string, format: uuid, nullable: true }
         merge_mode: { type: string }
         auto_archive: { type: boolean, nullable: true, description: 收割成功后归档派生会话（默认 true） }
     DerivationFinalizeResult:

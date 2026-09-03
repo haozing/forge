@@ -84,6 +84,28 @@ func LoadTreeByAssetTx(ctx context.Context, tx Querier, organizationID, assetID 
 	return tree, true, err
 }
 
+// LoadTreeByAssetView is the lock-free read for composed views; tree writers
+// take the FOR UPDATE path instead.
+func LoadTreeByAssetView(ctx context.Context, q Querier, organizationID, assetID string) (Tree, bool, error) {
+	var containerID string
+	var revision int64
+	err := q.QueryRow(ctx, `
+		SELECT id::text, revision FROM content.containers
+		WHERE organization_id = $1::uuid AND asset_id = $2::uuid AND kind = 'note'
+	`, organizationID, assetID).Scan(&containerID, &revision)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return Tree{}, false, nil
+		}
+		return Tree{}, false, fmt.Errorf("resolve note container: %w", err)
+	}
+	blocks, err := loadBlocks(ctx, q, organizationID, containerID)
+	if err != nil {
+		return Tree{}, false, err
+	}
+	return Tree{ContainerID: containerID, Revision: revision, Blocks: blocks}, true, nil
+}
+
 func loadBlocks(ctx context.Context, tx Querier, organizationID, containerID string) ([]Block, error) {
 	rows, err := tx.Query(ctx, `
 		SELECT bp.position, br.id::text, b.block_type,
@@ -127,6 +149,13 @@ func RenderMarkdown(tree Tree) string {
 	var builder strings.Builder
 	for _, block := range tree.Blocks {
 		switch {
+		case block.Kind == "message" && block.Role == "transcription":
+			if block.Status != "completed" {
+				continue
+			}
+			// Transcripts are document content, not dialogue turns.
+			builder.WriteString(strings.TrimRight(block.Content, "\n"))
+			builder.WriteString("\n\n")
 		case block.Kind == "message":
 			if block.Status != "completed" {
 				continue

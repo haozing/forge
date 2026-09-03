@@ -319,6 +319,16 @@ func (s Service) Update(ctx context.Context, principal auth.Principal, allowedMo
 	if err != nil {
 		return AssetResult{}, err
 	}
+	if input.Markdown != nil {
+		// Conversation notes are block-managed: their markdown is a frozen
+		// render, never an editable draft field (member surface guards the
+		// same way via AutosaveDraft).
+		if _, isNote, noteErr := noteContainerIDTx(ctx, tx, principal.OrganizationID, assetID); noteErr != nil {
+			return AssetResult{}, noteErr
+		} else if isNote {
+			return AssetResult{}, ErrNoteBlocksManaged
+		}
+	}
 	if input.Title != nil {
 		draft.Title = strings.TrimSpace(*input.Title)
 	}
