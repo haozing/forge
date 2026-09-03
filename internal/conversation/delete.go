@@ -120,8 +120,9 @@ func (s Service) Delete(ctx context.Context, principal auth.Principal, conversat
 	}
 	defer tx.Rollback(ctx)
 
-	// Derivations touching the subtree (as source or target) lose their rows;
-	// asset relations keep their lineage with the dead pointer nulled.
+	// Derivations touching the subtree (as source or target) lose their rows.
+	// Asset relation edges are sealed facts on asset.asset_versions and stay;
+	// the citation payload keeps the (now dangling) derivation id.
 	var derivationIDs []string
 	if err := tx.QueryRow(ctx, `
 		SELECT COALESCE(array_agg(id::text), '{}') FROM content.derivations
@@ -132,9 +133,6 @@ func (s Service) Delete(ctx context.Context, principal auth.Principal, conversat
 	}
 	derivationIDs = nonEmpty(derivationIDs)
 	if len(derivationIDs) > 0 {
-		if _, err := tx.Exec(ctx, `UPDATE content.asset_relations SET derivation_id = NULL WHERE organization_id = $1::uuid AND derivation_id = ANY($2::uuid[])`, principal.OrganizationID, derivationIDs); err != nil {
-			return DeleteResult{}, fmt.Errorf("detach asset relations: %w", err)
-		}
 		if _, err := tx.Exec(ctx, `DELETE FROM content.derivation_sources WHERE derivation_id = ANY($1::uuid[])`, derivationIDs); err != nil {
 			return DeleteResult{}, fmt.Errorf("delete derivation sources: %w", err)
 		}
@@ -212,7 +210,7 @@ func (s Service) Delete(ctx context.Context, principal auth.Principal, conversat
 	}
 
 	// Revisions are now unreferenced: message blocks, derivation sources and
-	// placements are gone; asset_relation_blocks cascades by schema.
+	// placements are gone.
 	revisions := nonEmpty(messageRevisions)
 	if len(revisions) > 0 {
 		var blockIDs []string

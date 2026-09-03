@@ -78,7 +78,7 @@ func conversationResource(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusInternalServerError, "conversation_load_failed")
 			return
 		}
-		writeJSON(w, http.StatusOK, item)
+		writeData(w, r, http.StatusOK, item)
 	}
 }
 
@@ -117,7 +117,7 @@ func archiveConversation(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusInternalServerError, "conversation_load_failed")
 			return
 		}
-		writeJSON(w, http.StatusOK, item)
+		writeData(w, r, http.StatusOK, item)
 	}
 }
 
@@ -158,7 +158,7 @@ func deleteConversation(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusInternalServerError, "conversation_delete_failed")
 			return
 		}
-		writeJSON(w, http.StatusOK, result)
+		writeData(w, r, http.StatusOK, result)
 	}
 }
 
@@ -185,7 +185,7 @@ func conversationBlocks(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusInternalServerError, "conversation_blocks_failed")
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"items": items, "blocks": items, "has_more": false})
+		writeData(w, r, http.StatusOK, map[string]any{"items": items, "blocks": items, "has_more": false})
 	}
 }
 
@@ -234,7 +234,7 @@ func conversationNote(deps Dependencies) http.HandlerFunc {
 		if len(fields) > 0 {
 			_ = json.Unmarshal(fields, &decodedFields)
 		}
-		writeJSON(w, http.StatusOK, map[string]any{
+		writeData(w, r, http.StatusOK, map[string]any{
 			"conversation_id": r.PathValue("conversationId"), "note_asset_id": noteAssetID, "note_container_id": noteContainerID,
 			"asset_version_id": versionID, "title": title, "markdown": markdown, "fields": decodedFields,
 			"publication_status": publicationStatus, "confirmation_status": confirmationStatus, "message_count": messageCount,
@@ -283,6 +283,6 @@ func conversationTranscript(deps Dependencies) http.HandlerFunc {
 			result["props"] = decodedProps
 			result["created_at"] = createdAt
 		}
-		writeJSON(w, http.StatusOK, result)
+		writeData(w, r, http.StatusOK, result)
 	}
 }

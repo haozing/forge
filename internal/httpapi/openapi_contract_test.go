@@ -113,7 +113,6 @@ var routerTruth = map[string][]string{
 	"/api/conversations/{conversationId}/chat/stream":                         {"post"},
 	"/api/conversations/{conversationId}/note/sync":                           {"post"},
 	"/api/conversations/{conversationId}/note":                                {"get"},
-	"/api/conversations/{conversationId}/note/publish":                        {"post"},
 	"/api/conversations/{conversationId}/derivations":                         {"post"},
 	"/api/conversations/{conversationId}/media":                               {"post"},
 	"/api/derivations/{derivationId}":                                         {"get"},

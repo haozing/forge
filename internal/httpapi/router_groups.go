@@ -307,8 +307,10 @@ func registerAttachmentRoutes(deps Dependencies, mux *http.ServeMux) {
 }
 
 // registerConversationRoutes holds the note/conversation surface: collections,
-// messages, blocks, chat (sync and SSE stream), note sync/publish,
-// derivations and media transcription.
+// messages, blocks, chat (sync and SSE stream), note sync, derivations and
+// media transcription. Note publishing has no shortcut here — it goes through
+// the shared asset governance chain (commit-draft → confirm → publish /
+// publication-requests).
 func registerConversationRoutes(deps Dependencies, mux *http.ServeMux) {
 	mux.HandleFunc("/api/workspaces/{workspaceId}/conversations", conversationsCollection(deps))
 	mux.HandleFunc("/api/conversations/{conversationId}", conversationResource(deps))
@@ -319,7 +321,6 @@ func registerConversationRoutes(deps Dependencies, mux *http.ServeMux) {
 	mux.HandleFunc("/api/conversations/{conversationId}/chat/stream", conversationChat(deps, true))
 	mux.HandleFunc("/api/conversations/{conversationId}/note/sync", syncConversationNote(deps))
 	mux.HandleFunc("/api/conversations/{conversationId}/note", conversationNote(deps))
-	mux.HandleFunc("/api/conversations/{conversationId}/note/publish", publishConversationNote(deps))
 	mux.HandleFunc("/api/conversations/{conversationId}/derivations", createDerivation(deps))
 	mux.HandleFunc("/api/conversations/{conversationId}/children", conversationChildren(deps))
 	mux.HandleFunc("/api/conversations/{conversationId}/media", registerConversationMedia(deps))

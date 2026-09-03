@@ -56,9 +56,6 @@ func (s Service) AppendMessage(ctx context.Context, principal auth.Principal, ke
 func (s Service) SyncNote(ctx context.Context, principal auth.Principal, key, id string) (contentservice.NoteSyncResult, error) {
 	return s.contentService().SyncNote(ctx, principal, key, id)
 }
-func (s Service) PublishNote(ctx context.Context, principal auth.Principal, key, id, expectedVersion string) (contentservice.NotePublishResult, error) {
-	return s.contentService().PublishNote(ctx, principal, key, id, expectedVersion)
-}
 func (s Service) CreateDerivation(ctx context.Context, principal auth.Principal, key string, input contentservice.CreateDerivationInput) (contentservice.DerivationResult, error) {
 	return s.contentService().CreateDerivation(ctx, principal, key, input)
 }

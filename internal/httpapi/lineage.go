@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"encoding/json"
+	"log"
 	"errors"
 	"net/http"
 	"strings"
@@ -35,7 +36,7 @@ func assetLineage(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusInternalServerError, "asset_lineage_failed")
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"asset": asset, "versions": versions, "raw_inputs": rawInputs})
+		writeData(w, r, http.StatusOK, map[string]any{"asset": asset, "versions": versions, "raw_inputs": rawInputs})
 	}
 }
 
@@ -54,10 +55,11 @@ func assetRelations(deps Dependencies) http.HandlerFunc {
 		}
 		items, err := deps.MemberAssetService.Relations(r.Context(), principal, strings.TrimSpace(r.PathValue("assetId")))
 		if err != nil {
+			log.Printf("asset relations failed: asset=%s error=%v", r.PathValue("assetId"), err)
 			writeMemberAssetError(w, err, "asset_relations_failed")
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"items": items})
+		writeData(w, r, http.StatusOK, map[string]any{"items": items})
 	}
 }
 
@@ -89,7 +91,7 @@ func assetVersionProcessing(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusInternalServerError, "processing_load_failed")
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"asset_version_id": versionID, "processing_jobs": jobs})
+		writeData(w, r, http.StatusOK, map[string]any{"asset_version_id": versionID, "processing_jobs": jobs})
 	}
 }
 

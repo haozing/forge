@@ -288,8 +288,11 @@ func (s MemberService) Relations(ctx context.Context, principal auth.Principal, 
 		return nil, err
 	}
 	// Staged: relations parked on the shared draft, materialized at commit.
+	// Staged rows have no surrogate identity — the composite PK is
+	// (asset_draft_id, target_asset_id, relation_type) — so they surface with
+	// an empty id and status=staged until the commit materializes them.
 	rows, err = s.Store.Pool.Query(ctx, `
-		SELECT dr.id::text, dr.relation_type, 'outgoing', dr.source,
+		SELECT ''::text, dr.relation_type, 'outgoing', dr.source,
 		       ta.id::text, COALESCE(tv.title, ''), ta.publication_status, ta.visibility,
 		       ''::text, dr.created_at
 		FROM asset.asset_draft_relations dr

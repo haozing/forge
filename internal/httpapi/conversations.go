@@ -44,7 +44,7 @@ func listConversations(deps Dependencies) http.HandlerFunc {
 		if hasMore {
 			response["next_cursor"] = nextCursor
 		}
-		writeJSON(w, http.StatusOK, response)
+		writeData(w, r, http.StatusOK, response)
 	}
 }
 
@@ -87,6 +87,6 @@ func conversationChildren(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusInternalServerError, "conversation_children_failed")
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"items": items})
+		writeData(w, r, http.StatusOK, map[string]any{"items": items})
 	}
 }

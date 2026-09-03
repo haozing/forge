@@ -596,9 +596,10 @@ event: error\ndata: {"code":"upstream_unavailable","request_id":"..."}\n\n
 
 - `POST /api/frontend/conversations/{conversationId}/note/sync`
 - `GET /api/frontend/conversations/{conversationId}/note`
-- `POST /api/frontend/conversations/{conversationId}/note/publish`
 
-sync 无 body，生成/更新 note asset，返回 `{conversation_id,note_asset_id,asset_version_id,message_count,status}`。publish 请求 `{expected_version_id}`，要求 ETag 一致，返回 `{note_asset_id,asset_version_id,publication_status,quality}`。
+sync 无 body，生成/更新 note asset，返回 `{conversation_id,note_asset_id,asset_version_id,message_count,status}`；游标未推进（无新消息）时为幂等 no-op，`status=unchanged`、`asset_version_id` 为当前工作版本，不新建版本。
+
+**笔记发布没有捷径端点**（`note/publish` 已作为治理旁路移除，2026-09-03）：笔记发布与其他资产同链路——`POST /api/assets/{note_asset_id}/asset-versions/{version_id}/confirm`（builtin_note 要求人工确认，confirm 派生 human_confirmed 子版本）后 `POST /api/assets/{note_asset_id}/publish`（body `{draft_revision}`，草稿乐观锁）。审核制模型则走 `POST /api/workspaces/{ws}/publication-requests`。
 
 GET note 返回 `{conversation_id,note_asset_id,note_container_id,asset_version_id,title,markdown,fields,publication_status,confirmation_status,message_count}`：`confirmation_status` 为当前工作版本的确认状态（`unconfirmed|human_confirmed`），无工作版本时 `title`/`markdown` 为 null、`confirmation_status` 为空字符串。会话不存在或未绑定笔记 404 `conversation_or_note_not_found`。
 

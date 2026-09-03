@@ -210,10 +210,6 @@ type appendMessageRequest struct {
 	ReplyToBlockID         string `json:"reply_to_block_id"`
 }
 
-type publishNoteRequest struct {
-	ExpectedVersionID string `json:"expected_version_id"`
-}
-
 type createDerivationRequest struct {
 	SourceBlockRevisionIDs []string `json:"source_block_revision_ids"`
 	ContextPolicy          string   `json:"context_policy"`
@@ -289,7 +285,7 @@ func createConversation(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusInternalServerError, "conversation_create_failed")
 			return
 		}
-		writeJSON(w, http.StatusCreated, result)
+		writeData(w, r, http.StatusCreated, result)
 	}
 }
 
@@ -321,7 +317,7 @@ func getConversation(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusInternalServerError, "conversation_load_failed")
 			return
 		}
-		writeJSON(w, http.StatusOK, result)
+		writeData(w, r, http.StatusOK, result)
 	}
 }
 
@@ -350,7 +346,7 @@ func appendMessage(deps Dependencies) http.HandlerFunc {
 				writeError(w, http.StatusInternalServerError, "messages_load_failed")
 				return
 			}
-			writeJSON(w, http.StatusOK, map[string]any{"items": result})
+			writeData(w, r, http.StatusOK, map[string]any{"items": result})
 			return
 		}
 		if r.Method != http.MethodPost {
@@ -412,7 +408,7 @@ func appendMessage(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusInternalServerError, "message_create_failed")
 			return
 		}
-		writeJSON(w, http.StatusCreated, result)
+		writeData(w, r, http.StatusCreated, result)
 	}
 }
 
@@ -453,55 +449,7 @@ func syncConversationNote(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusInternalServerError, "note_sync_failed")
 			return
 		}
-		writeJSON(w, http.StatusCreated, result)
-	}
-}
-
-func publishConversationNote(deps Dependencies) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
-			return
-		}
-		principal, err := deps.SessionService.Authenticate(r.Context(), r)
-		if err != nil {
-			writeError(w, http.StatusUnauthorized, "unauthorized")
-			return
-		}
-		if principal.UserType != "member" {
-			writeError(w, http.StatusForbidden, "member_required")
-			return
-		}
-		idempotencyKey, ok := requestIdempotencyKey(w, r)
-		if !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
-			return
-		}
-		var input publishNoteRequest
-		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16*1024))
-		decoder.DisallowUnknownFields()
-		if err := decoder.Decode(&input); err != nil {
-			writeError(w, http.StatusUnprocessableEntity, "invalid_note_publish_request")
-			return
-		}
-		result, err := deps.ConversationService.PublishNote(r.Context(), principal, idempotencyKey, r.PathValue("conversationId"), input.ExpectedVersionID)
-		if errors.Is(err, contentservice.ErrInvalidInput) {
-			writeError(w, http.StatusUnprocessableEntity, "invalid_note_publish_request")
-			return
-		}
-		if errors.Is(err, contentservice.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "conversation_or_note_version_not_found")
-			return
-		}
-		if errors.Is(err, contentservice.ErrConflict) {
-			writeError(w, http.StatusConflict, "note_publish_conflict")
-			return
-		}
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "note_publish_failed")
-			return
-		}
-		writeJSON(w, http.StatusCreated, result)
+		writeData(w, r, http.StatusCreated, result)
 	}
 }
 
@@ -552,7 +500,7 @@ func createDerivation(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusInternalServerError, "derivation_create_failed")
 			return
 		}
-		writeJSON(w, http.StatusCreated, result)
+		writeData(w, r, http.StatusCreated, result)
 	}
 }
 
@@ -584,7 +532,7 @@ func getDerivation(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusInternalServerError, "derivation_load_failed")
 			return
 		}
-		writeJSON(w, http.StatusOK, result)
+		writeData(w, r, http.StatusOK, result)
 	}
 }
 
@@ -633,10 +581,11 @@ func finalizeDerivation(deps Dependencies) http.HandlerFunc {
 			return
 		}
 		if err != nil {
+			log.Printf("derivation finalize failed: derivation=%s error=%v", r.PathValue("derivationId"), err)
 			writeError(w, http.StatusInternalServerError, "derivation_finalize_failed")
 			return
 		}
-		writeJSON(w, http.StatusCreated, result)
+		writeData(w, r, http.StatusCreated, result)
 	}
 }
 
@@ -687,7 +636,7 @@ func registerConversationMedia(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusInternalServerError, "media_registration_failed")
 			return
 		}
-		writeJSON(w, http.StatusCreated, result)
+		writeData(w, r, http.StatusCreated, result)
 	}
 }
 
@@ -719,7 +668,7 @@ func getConversationMedia(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusInternalServerError, "media_load_failed")
 			return
 		}
-		writeJSON(w, http.StatusOK, result)
+		writeData(w, r, http.StatusOK, result)
 	}
 }
 
@@ -760,7 +709,7 @@ func transcribeConversationMedia(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusInternalServerError, "transcription_request_failed")
 			return
 		}
-		writeJSON(w, http.StatusAccepted, result)
+		writeData(w, r, http.StatusAccepted, result)
 	}
 }
 
@@ -1357,7 +1306,7 @@ func chatAgentSession(deps Dependencies) http.HandlerFunc {
 		}
 		chatOutcome = "allowed"
 		addAgentRuntimeAuditMetadata(chatAuditMetadata, result)
-		writeJSON(w, http.StatusOK, agentChatResponse{
+		writeData(w, r, http.StatusOK, agentChatResponse{
 			Answer: result.Answer, Grounded: result.Grounded, ConversationID: result.ConversationID, MessageID: result.MessageID,
 			References: result.References, RejectedReferenceCount: result.RejectedReferenceCount,
 		})

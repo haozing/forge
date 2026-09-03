@@ -4283,11 +4283,12 @@ paths:
     post:
       tags: [conversations]
       operationId: syncConversationNote
+      description: 会话消息快照为笔记新版本；游标未推进（无新消息）时为幂等 no-op，返回 status=unchanged
       parameters:
         - $ref: '#/components/parameters/ConversationId'
         - $ref: '#/components/parameters/IdempotencyKey'
       responses:
-        '200':
+        '201':
           description: 笔记同步结果
           content:
             application/json:
@@ -4312,25 +4313,6 @@ paths:
                   - $ref: '#/components/schemas/NoteDetail'
                   - $ref: '#/components/schemas/Envelope'
         '404': { $ref: '#/components/responses/Error' }
-  /api/conversations/{conversationId}/note/publish:
-    post:
-      tags: [conversations]
-      operationId: publishConversationNote
-      parameters:
-        - $ref: '#/components/parameters/ConversationId'
-        - $ref: '#/components/parameters/IdempotencyKey'
-        - $ref: '#/components/parameters/IfMatch'
-      responses:
-        '200':
-          description: 笔记发布结果
-          content:
-            application/json:
-              schema:
-                allOf:
-                  - $ref: '#/components/schemas/NotePublishResult'
-                  - $ref: '#/components/schemas/Envelope'
-        '404': { $ref: '#/components/responses/Error' }
-        '412': { $ref: '#/components/responses/Error' }
   /api/conversations/{conversationId}/derivations:
     post:
       tags: [conversations]
@@ -4376,6 +4358,7 @@ paths:
     post:
       tags: [conversations]
       operationId: finalizeDerivation
+      description: 派生落库；reference/merge 处置将血缘边（derived_from/continues_from）物化到 asset.asset_relations，可在 GET /api/assets/{assetId}/relations 查看
       parameters:
         - $ref: '#/components/parameters/DerivationId'
         - $ref: '#/components/parameters/IdempotencyKey'
@@ -4385,7 +4368,7 @@ paths:
           application/json:
             schema: { $ref: '#/components/schemas/DerivationFinalize' }
       responses:
-        '200':
+        '201':
           description: 派生落库结果
           content:
             application/json:
@@ -5632,16 +5615,9 @@ components:
       properties:
         conversation_id: { type: string, format: uuid }
         note_asset_id: { type: string, format: uuid }
-        asset_version_id: { type: string, format: uuid }
+        asset_version_id: { type: string, format: uuid, description: 本次新建版本；unchanged 时为当前工作版本 }
         message_count: { type: integer }
-        status: { type: string }
-    NotePublishResult:
-      type: object
-      properties:
-        conversation_id: { type: string, format: uuid }
-        note_asset_id: { type: string, format: uuid }
-        asset_version_id: { type: string, format: uuid }
-        publication_status: { type: string }
+        status: { type: string, enum: [draft, unchanged] }
     Derivation:
       type: object
       properties:
@@ -5650,10 +5626,24 @@ components:
         target_conversation_id: { type: string, format: uuid }
         target_note_asset_id: { type: string, format: uuid }
         operation: { type: string, enum: [create_chat, link, merge] }
-        context_policy: { type: string, enum: [summary_only, selected_only, full] }
+        context_policy: { type: string, enum: [summary_only, selected_only, full], description: 决定注入派生会话开场消息的内容量：摘要(200字/块)/选中原文(2000字/块)/源笔记全文 }
         status: { type: string, enum: [requested, discussing, result_ready, finalizing, completed, failed, cancelled] }
         created_at: { type: string, format: date-time }
         completed_at: { type: string, format: date-time, description: 未完成时为空字符串 }
+        sources:
+          type: array
+          description: 选中源块明细（GET 详情返回）；origin 标记来源=message 聊天消息 / chat 聊天容器块 / note 笔记容器块
+          items: { $ref: '#/components/schemas/DerivationSource' }
+    DerivationSource:
+      type: object
+      properties:
+        ordinal: { type: integer }
+        origin: { type: string, enum: [message, chat, note] }
+        source_container_id: { type: string, format: uuid }
+        source_container_version_id: { type: string, format: uuid }
+        source_block_revision_id: { type: string, format: uuid }
+        source_excerpt: { type: string }
+        context_role: { type: string, enum: [selected, adjacent, summary] }
     DerivationCreate:
       type: object
       required: [source_block_revision_ids, context_policy, title]
@@ -5663,6 +5653,7 @@ components:
           items: { type: string, format: uuid }
           minItems: 1
           maxItems: 50
+          description: 可选范围含会话聊天消息、聊天容器块与笔记容器块
         context_policy: { type: string, enum: [summary_only, selected_only, full] }
         title: { type: string }
     DerivationFinalize:

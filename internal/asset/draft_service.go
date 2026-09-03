@@ -502,7 +502,7 @@ func materializeVersionRelationsTx(ctx context.Context, tx pgx.Tx, material Vers
 				(organization_id, source_asset_version_id, target_asset_version_id,
 				 relation_type, source, confidence, citation, suggestion_id, created_by)
 			VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $9,
-			        CASE WHEN $9 = 'ai' THEN $5 ELSE NULL END,
+			        CASE WHEN $9 = 'ai' THEN $5::numeric ELSE NULL END,
 			        $6::jsonb, NULLIF($7, '')::uuid, $8::uuid)
 			ON CONFLICT (source_asset_version_id, target_asset_version_id, relation_type) DO NOTHING
 			RETURNING id::text
