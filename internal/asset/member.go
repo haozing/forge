@@ -899,11 +899,12 @@ func (s MemberService) Publish(ctx context.Context, principal auth.Principal, wo
 	if err != nil {
 		return MemberAsset{}, err
 	}
-	commit, err := commitDraftTx(ctx, tx, s.Events, principal, row, draft)
+	freeze := commitDraftStrategy(ctx, tx, row.OrganizationID, assetID)
+	result, err := freeze(ctx, tx, s.Events, principal, row, draft)
 	if err != nil {
 		return MemberAsset{}, err
 	}
-	row = commit.Asset
+	row = result.Asset
 	if err := EnsurePublishableVersionTx(ctx, tx, row.OrganizationID, row.CurrentWorkingVersionID, policy); err != nil {
 		return MemberAsset{}, err
 	}

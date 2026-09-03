@@ -22,6 +22,7 @@ import (
 	"agentchunzhi/internal/auth"
 	"agentchunzhi/internal/authz"
 	"agentchunzhi/internal/eventing"
+	"agentchunzhi/internal/noteblocks"
 	"agentchunzhi/internal/store"
 	"agentchunzhi/internal/tag"
 
@@ -138,6 +139,16 @@ func (s MemberService) AutosaveDraft(ctx context.Context, principal auth.Princip
 	row, err := LoadLifecycleTx(ctx, tx, principal.OrganizationID, assetID)
 	if err != nil {
 		return Draft{}, err
+	}
+	if patch.Markdown != nil || patch.Summary != nil {
+		// Conversation notes are block-managed: their markdown is a frozen
+		// render, never an editable draft field. Edits go through the block
+		// surface of the conversation.
+		if _, isNote, noteErr := noteContainerIDTx(ctx, tx, principal.OrganizationID, assetID); noteErr != nil {
+			return Draft{}, noteErr
+		} else if isNote {
+			return Draft{}, ErrNoteBlocksManaged
+		}
 	}
 	if row.PublicationStatus == PublicationArchived {
 		return Draft{}, ErrAssetArchived
@@ -281,7 +292,11 @@ type VersionMaterial struct {
 	CoverAttachmentID string
 	Relations        []RelationMaterial // materialize as asset_relations rows (source='ai')
 	SourceRawInputID string
-	CreatedBy        string
+	// Blocks is the reference-style frozen tree snapshot (noteblocks.SnapshotJSON)
+	// stored on asset_versions.blocks; empty for form-authored assets whose
+	// source of truth is the markdown itself.
+	Blocks    []byte
+	CreatedBy string
 }
 
 // CreateVersionTx is the only version factory. It locks the asset, appends
@@ -384,17 +399,19 @@ func createVersionTx(ctx context.Context, tx pgx.Tx, material VersionMaterial) (
 		INSERT INTO asset.asset_versions
 			(organization_id, workspace_id, asset_id, resource_model_id, resource_model_version_id,
 			 version_no, origin, confirmation_status, confirmed_by, confirmed_at, title, summary, markdown, fields,
-			 source_raw_input_id, parent_version_id, content_checksum, created_by)
+			 source_raw_input_id, parent_version_id, content_checksum, created_by, blocks)
 		VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6, $7, $8,
 			CASE WHEN $8 = 'human_confirmed' THEN NULLIF($16,'')::uuid END,
 			CASE WHEN $8 = 'human_confirmed' THEN now() END,
 			$9, $10, $11, $12::jsonb,
-			NULLIF($13,'')::uuid, NULLIF($14,'')::uuid, $15, NULLIF($16,'')::uuid)
+			NULLIF($13,'')::uuid, NULLIF($14,'')::uuid, $15, NULLIF($16,'')::uuid,
+			COALESCE(NULLIF($17::text, ''), '[]')::jsonb)
 		RETURNING id::text
 	`, material.OrganizationID, material.WorkspaceID, material.AssetID, material.ResourceModelID,
 		material.ResourceModelVersionID, nextNo, material.Origin, material.ConfirmationStatus,
 		material.Title, material.Summary, material.Markdown, string(fieldsJSON),
-		material.SourceRawInputID, parent, checksum, material.CreatedBy).Scan(&versionID)
+		material.SourceRawInputID, parent, checksum, material.CreatedBy,
+		string(material.Blocks)).Scan(&versionID)
 	if err != nil {
 		return "", 0, nil, fmt.Errorf("insert version: %w", err)
 	}
@@ -588,7 +605,13 @@ func (s MemberService) CommitDraft(ctx context.Context, principal auth.Principal
 	if err != nil {
 		return CommitResult{}, err
 	}
-	result, err := commitDraftTx(ctx, tx, s.Events, principal, row, draft)
+	commit := commitDraft
+	if _, isNote, noteErr := noteContainerIDTx(ctx, tx, principal.OrganizationID, assetID); noteErr != nil {
+		return CommitResult{}, noteErr
+	} else if isNote {
+		commit = freezeNote
+	}
+	result, err := commit(ctx, tx, s.Events, principal, row, draft)
 	if err != nil {
 		return CommitResult{}, err
 	}
@@ -596,6 +619,26 @@ func (s MemberService) CommitDraft(ctx context.Context, principal auth.Principal
 		return CommitResult{}, err
 	}
 	return result, nil
+}
+
+// commitFn is the per-asset-kind freeze strategy behind commit/publish.
+type commitFn func(ctx context.Context, tx pgx.Tx, events *eventing.EventStore, principal auth.Principal, row LifecycleRow, draft Draft) (CommitResult, error)
+
+func commitDraft(ctx context.Context, tx pgx.Tx, events *eventing.EventStore, principal auth.Principal, row LifecycleRow, draft Draft) (CommitResult, error) {
+	return commitDraftTx(ctx, tx, events, principal, row, draft)
+}
+
+func freezeNote(ctx context.Context, tx pgx.Tx, events *eventing.EventStore, principal auth.Principal, row LifecycleRow, draft Draft) (CommitResult, error) {
+	return freezeNoteTx(ctx, tx, events, principal, row, draft)
+}
+
+// commitDraftStrategy picks the freeze strategy for an asset: conversation
+// notes freeze their live block tree, form-authored assets freeze the draft.
+func commitDraftStrategy(ctx context.Context, tx pgx.Tx, organizationID, assetID string) commitFn {
+	if _, isNote, err := noteContainerIDTx(ctx, tx, organizationID, assetID); err == nil && isNote {
+		return freezeNote
+	}
+	return commitDraft
 }
 
 // CommitResult reports the version a commit produced and whether a new
@@ -636,7 +679,127 @@ func (s MemberService) CommitDraftForReviewTx(ctx context.Context, tx pgx.Tx, pr
 	if err != nil {
 		return CommitResult{}, err
 	}
+	if _, isNote, noteErr := noteContainerIDTx(ctx, tx, principal.OrganizationID, assetID); noteErr != nil {
+		return CommitResult{}, noteErr
+	} else if isNote {
+		return freezeNoteTx(ctx, tx, s.Events, principal, row, draft)
+	}
 	return commitDraftTx(ctx, tx, s.Events, principal, row, draft)
+}
+
+// noteContainerIDTx reports whether the asset is a conversation note (its
+// block tree is the editable source of truth) and returns the tree container.
+func noteContainerIDTx(ctx context.Context, tx pgx.Tx, organizationID, assetID string) (string, bool, error) {
+	var containerID string
+	err := tx.QueryRow(ctx, `
+		SELECT id::text FROM content.containers
+		WHERE organization_id = $1::uuid AND asset_id = $2::uuid AND kind = 'note'
+	`, organizationID, assetID).Scan(&containerID)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("resolve note container: %w", err)
+	}
+	return containerID, true, nil
+}
+
+// freezeNoteTx is the note-document branch of the commit: the live block tree
+// IS the draft, so freezing renders it into deterministic markdown plus a
+// reference-style block snapshot and seals both into an immutable version.
+// The draft row only rides along for the optimistic-revision check; its
+// markdown/summary stay untouched (metadata-only for notes).
+func freezeNoteTx(ctx context.Context, tx pgx.Tx, events *eventing.EventStore, principal auth.Principal, row LifecycleRow, draft Draft) (CommitResult, error) {
+	if draft.Revision == draft.CommittedRevision {
+		return CommitResult{VersionID: row.CurrentWorkingVersionID, Created: false, Asset: row}, nil
+	}
+	tree, _, err := noteblocks.LoadTreeByAssetTx(ctx, tx, row.OrganizationID, row.ID)
+	if err != nil {
+		return CommitResult{}, err
+	}
+	markdown := noteblocks.RenderMarkdown(tree)
+	snapshot, err := noteblocks.SnapshotJSON(tree)
+	if err != nil {
+		return CommitResult{}, err
+	}
+	var fields map[string]any
+	if draft.Fields != nil {
+		fields = draft.Fields
+	} else {
+		fields = map[string]any{}
+	}
+	material := VersionMaterial{
+		OrganizationID:         row.OrganizationID,
+		WorkspaceID:            row.WorkspaceID,
+		AssetID:                row.ID,
+		ResourceModelID:        row.ResourceModelID,
+		ResourceModelVersionID: draftModelVersionTx(ctx, tx, row),
+		ParentVersionID:        row.CurrentWorkingVersionID,
+		Origin:                 draft.Origin,
+		ConfirmationStatus:     ConfirmationUnconfirmed,
+		Title:                  draft.Title,
+		Summary:                draft.Summary,
+		Markdown:               markdown,
+		Fields:                 fields,
+		Blocks:                 snapshot,
+		CreatedBy:              principal.UserID,
+	}
+	if material.ResourceModelVersionID == "" {
+		return CommitResult{}, fmt.Errorf("%w: note model has no bound version", ErrConflict)
+	}
+	versionID, versionNo, _, err := createVersionTx(ctx, tx, material)
+	if err != nil {
+		return CommitResult{}, err
+	}
+	if _, err := CancelPendingRequestsTx(ctx, tx, events, row, principal, reviewCancelReasonNewVersion); err != nil {
+		return CommitResult{}, err
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE asset.asset_drafts
+		SET base_version_id = $3::uuid, committed_revision = revision + 1,
+		    revision = revision + 1, markdown = '', updated_by = NULLIF($4,'')::uuid, updated_at = now()
+		WHERE organization_id = $1::uuid AND asset_id = $2::uuid
+	`, row.OrganizationID, row.ID, versionID, principal.UserID); err != nil {
+		return CommitResult{}, fmt.Errorf("rebase note draft: %w", err)
+	}
+	next := row
+	next.CurrentWorkingVersionID = versionID
+	next.Revision++
+	if err := AppendAssetEventTx(ctx, tx, events, next, principal, eventing.EventAssetVersionCreated, eventing.PayloadVersionV1, eventing.AssetVersionCreatedPayload{
+		AssetID:     row.ID,
+		VersionID:   versionID,
+		VersionNo:   versionNo,
+		WorkspaceID: row.WorkspaceID,
+	}); err != nil {
+		return CommitResult{}, err
+	}
+	RecordAssetAuditTx(ctx, tx, row.OrganizationID, row.WorkspaceID, principal, "asset.version.committed", row.ID, map[string]any{
+		"workspace_id": row.WorkspaceID,
+		"version_id":   versionID,
+		"version_no":   versionNo,
+		"note_tree":    true,
+	})
+	return CommitResult{VersionID: versionID, VersionNo: versionNo, Created: true, Asset: next}, nil
+}
+
+// FreezeNoteDraftTx is the exported note-tree freeze for callers that own the
+// transaction (derivation finalize freezes the derivation's note before
+// copying its render into a document asset).
+func FreezeNoteDraftTx(ctx context.Context, tx pgx.Tx, events *eventing.EventStore, principal auth.Principal, row LifecycleRow, draft Draft) (CommitResult, error) {
+	return freezeNoteTx(ctx, tx, events, principal, row, draft)
+}
+
+// draftModelVersionTx resolves the model head version at freeze time (the
+// immutable bound version gates the snapshot's field schema inside
+// createVersionTx).
+func draftModelVersionTx(ctx context.Context, tx pgx.Tx, row LifecycleRow) string {
+	var modelVersion string
+	_ = tx.QueryRow(ctx, `
+		SELECT COALESCE(m.current_version_id::text, '')
+		FROM model.resource_models m
+		WHERE m.organization_id = $1::uuid AND m.id = $2::uuid
+	`, row.OrganizationID, row.ResourceModelID).Scan(&modelVersion)
+	return modelVersion
 }
 
 func commitDraftTx(ctx context.Context, tx pgx.Tx, events *eventing.EventStore, principal auth.Principal, row LifecycleRow, draft Draft) (CommitResult, error) {

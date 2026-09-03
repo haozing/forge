@@ -53,8 +53,20 @@ func (s Service) ListMessages(ctx context.Context, principal auth.Principal, id 
 func (s Service) AppendMessage(ctx context.Context, principal auth.Principal, key string, input contentservice.AppendMessageInput) (contentservice.MessageResult, error) {
 	return s.contentService().AppendMessage(ctx, principal, key, input)
 }
-func (s Service) SyncNote(ctx context.Context, principal auth.Principal, key, id string) (contentservice.NoteSyncResult, error) {
-	return s.contentService().SyncNote(ctx, principal, key, id)
+func (s Service) NoteView(ctx context.Context, principal auth.Principal, id string) (contentservice.NoteView, error) {
+	return s.contentService().NoteView(ctx, principal, id)
+}
+func (s Service) NoteBlocks(ctx context.Context, principal auth.Principal, id string) ([]contentservice.NoteBlockEntry, int64, error) {
+	return s.contentService().NoteBlocks(ctx, principal, id)
+}
+func (s Service) AddNoteBlock(ctx context.Context, principal auth.Principal, key, id, kind, blockContent string) (contentservice.NoteBlockEntry, error) {
+	return s.contentService().AddNoteBlock(ctx, principal, key, id, kind, blockContent)
+}
+func (s Service) UpdateNoteBlock(ctx context.Context, principal auth.Principal, key, id, blockID, blockContent string) (contentservice.NoteBlockEntry, error) {
+	return s.contentService().UpdateNoteBlock(ctx, principal, key, id, blockID, blockContent)
+}
+func (s Service) DeleteNoteBlock(ctx context.Context, principal auth.Principal, key, id, blockID string) (string, error) {
+	return s.contentService().DeleteNoteBlock(ctx, principal, key, id, blockID)
 }
 func (s Service) CreateDerivation(ctx context.Context, principal auth.Principal, key string, input contentservice.CreateDerivationInput) (contentservice.DerivationResult, error) {
 	return s.contentService().CreateDerivation(ctx, principal, key, input)
@@ -121,15 +133,15 @@ func (s Service) ListPage(ctx context.Context, principal auth.Principal, workspa
 	}
 	rows, err := s.Store.Pool.Query(ctx, `
 		SELECT c.id::text, c.workspace_id::text, c.title, c.source, c.visibility, c.status,
-		       c.container_id::text, COALESCE(nb.note_asset_id::text, ''),
+		       COALESCE(cc.id::text, ''), COALESCE(nb.note_asset_id::text, ''),
 		       COALESCE(c.parent_conversation_id::text, ''), COALESCE(c.origin_derivation_id::text, ''),
 		       COALESCE(last_message.content, ''), COALESCE(message_counts.message_count, 0), c.updated_at
 		FROM content.conversations c
 		LEFT JOIN content.note_bindings nb ON nb.conversation_id = c.id
+		LEFT JOIN content.containers cc ON cc.organization_id = nb.organization_id AND cc.asset_id = nb.note_asset_id
 		LEFT JOIN LATERAL (SELECT br.content FROM content.message_blocks mb JOIN content.block_revisions br ON br.id = mb.block_revision_id WHERE mb.conversation_id = c.id ORDER BY mb.sequence_no DESC LIMIT 1) last_message ON true
 		LEFT JOIN LATERAL (SELECT count(*) AS message_count FROM content.message_blocks mb WHERE mb.conversation_id = c.id) message_counts ON true
 		WHERE c.organization_id = $1::uuid AND c.workspace_id = $2::uuid AND c.status <> 'archived'
-		  AND (c.visibility = 'workspace' OR c.initiator_user_id = $3::uuid)
 		  AND ($4 = '' OR c.title ILIKE '%' || $4 || '%' OR last_message.content ILIKE '%' || $4 || '%')
 		  AND ($5 = '' OR c.updated_at < NULLIF($5, '')::timestamptz OR (c.updated_at = NULLIF($5, '')::timestamptz AND c.id > NULLIF($6, '')::uuid))
 		ORDER BY c.updated_at DESC, c.id LIMIT $7
@@ -176,15 +188,15 @@ func (s Service) ListChildren(ctx context.Context, principal auth.Principal, con
 	}
 	rows, err := s.Store.Pool.Query(ctx, `
 		SELECT c.id::text, c.workspace_id::text, c.title, c.source, c.visibility, c.status,
-		       c.container_id::text, COALESCE(nb.note_asset_id::text, ''),
+		       COALESCE(cc.id::text, ''), COALESCE(nb.note_asset_id::text, ''),
 		       COALESCE(c.parent_conversation_id::text, ''), COALESCE(c.origin_derivation_id::text, ''),
 		       COALESCE(last_message.content, ''), COALESCE(message_counts.message_count, 0), c.updated_at
 		FROM content.conversations c
 		LEFT JOIN content.note_bindings nb ON nb.conversation_id = c.id
+		LEFT JOIN content.containers cc ON cc.organization_id = nb.organization_id AND cc.asset_id = nb.note_asset_id
 		LEFT JOIN LATERAL (SELECT br.content FROM content.message_blocks mb JOIN content.block_revisions br ON br.id = mb.block_revision_id WHERE mb.conversation_id = c.id ORDER BY mb.sequence_no DESC LIMIT 1) last_message ON true
 		LEFT JOIN LATERAL (SELECT count(*) AS message_count FROM content.message_blocks mb WHERE mb.conversation_id = c.id) message_counts ON true
 		WHERE c.organization_id = $1::uuid AND c.parent_conversation_id = $2::uuid AND c.status <> 'archived'
-		  AND (c.visibility = 'workspace' OR c.initiator_user_id = $3::uuid)
 		ORDER BY c.created_at, c.id
 	`, principal.OrganizationID, conversationID, principal.UserID)
 	if err != nil {

@@ -594,8 +594,8 @@ event: error\ndata: {"code":"upstream_unavailable","request_id":"..."}\n\n
 
 ### 12.1 会话笔记
 
-- `POST /api/frontend/conversations/{conversationId}/note/sync`
 - `GET /api/frontend/conversations/{conversationId}/note`
+- `GET|POST /api/frontend/conversations/{conversationId}/note/blocks`、`PATCH|DELETE .../note/blocks/{blockId}`
 
 sync 无 body，生成/更新 note asset，返回 `{conversation_id,note_asset_id,asset_version_id,message_count,status}`；游标未推进（无新消息）时为幂等 no-op，`status=unchanged`、`asset_version_id` 为当前工作版本，不新建版本。
 

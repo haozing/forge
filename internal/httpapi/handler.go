@@ -224,6 +224,7 @@ type finalizeDerivationRequest struct {
 	ExpectedContainerVersionID   string `json:"expected_container_version_id"`
 	MergeMode                    string `json:"merge_mode"`
 	TargetBlockID                string `json:"target_block_id"`
+	AutoArchive                  *bool  `json:"auto_archive"`
 }
 
 type registerMediaRequest struct {
@@ -412,47 +413,6 @@ func appendMessage(deps Dependencies) http.HandlerFunc {
 	}
 }
 
-func syncConversationNote(deps Dependencies) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
-			return
-		}
-		principal, err := deps.SessionService.Authenticate(r.Context(), r)
-		if err != nil {
-			writeError(w, http.StatusUnauthorized, "unauthorized")
-			return
-		}
-		if principal.UserType != "member" {
-			writeError(w, http.StatusForbidden, "member_required")
-			return
-		}
-		idempotencyKey, ok := requestIdempotencyKey(w, r)
-		if !ok {
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_invalid")
-			return
-		}
-		result, err := deps.ConversationService.SyncNote(r.Context(), principal, idempotencyKey, r.PathValue("conversationId"))
-		if errors.Is(err, contentservice.ErrInvalidInput) {
-			writeError(w, http.StatusUnprocessableEntity, "invalid_conversation_id")
-			return
-		}
-		if errors.Is(err, contentservice.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "conversation_not_found")
-			return
-		}
-		if errors.Is(err, contentservice.ErrConflict) {
-			writeError(w, http.StatusConflict, "note_sync_conflict")
-			return
-		}
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "note_sync_failed")
-			return
-		}
-		writeData(w, r, http.StatusCreated, result)
-	}
-}
-
 func createDerivation(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -497,6 +457,7 @@ func createDerivation(deps Dependencies) http.HandlerFunc {
 			return
 		}
 		if err != nil {
+			log.Printf("derivation create failed: conversation=%s error=%v", r.PathValue("conversationId"), err)
 			writeError(w, http.StatusInternalServerError, "derivation_create_failed")
 			return
 		}
@@ -567,6 +528,7 @@ func finalizeDerivation(deps Dependencies) http.HandlerFunc {
 			Disposition: input.Disposition, TargetAssetID: input.TargetAssetID,
 			ExpectedSourceAssetVersionID: input.ExpectedSourceAssetVersionID, ExpectedTargetAssetVersionID: input.ExpectedTargetAssetVersionID,
 			ExpectedContainerVersionID: input.ExpectedContainerVersionID, MergeMode: input.MergeMode, TargetBlockID: input.TargetBlockID,
+			AutoArchive: input.AutoArchive,
 		})
 		if errors.Is(err, contentservice.ErrInvalidInput) {
 			writeError(w, http.StatusUnprocessableEntity, "invalid_derivation_finalize_request")

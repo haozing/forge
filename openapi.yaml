@@ -4279,38 +4279,132 @@ paths:
             text/event-stream:
               schema: { type: string }
         '404': { $ref: '#/components/responses/Error' }
-  /api/conversations/{conversationId}/note/sync:
-    post:
-      tags: [conversations]
-      operationId: syncConversationNote
-      description: 会话消息快照为笔记新版本；游标未推进（无新消息）时为幂等 no-op，返回 status=unchanged
-      parameters:
-        - $ref: '#/components/parameters/ConversationId'
-        - $ref: '#/components/parameters/IdempotencyKey'
-      responses:
-        '201':
-          description: 笔记同步结果
-          content:
-            application/json:
-              schema:
-                allOf:
-                  - $ref: '#/components/schemas/NoteSyncResult'
-                  - $ref: '#/components/schemas/Envelope'
-        '404': { $ref: '#/components/responses/Error' }
   /api/conversations/{conversationId}/note:
     get:
       tags: [conversations]
       operationId: getConversationNote
+      description: 笔记文档视图：冻结版本 + 活块树实时渲染（draft_markdown）与 dirty 状态。会话消息即是笔记的块；"保存"= POST /api/assets/{note_asset_id}/commit-draft
       parameters:
         - $ref: '#/components/parameters/ConversationId'
       responses:
         '200':
-          description: 会话笔记
+          description: 会话笔记视图
           content:
             application/json:
               schema:
                 allOf:
                   - $ref: '#/components/schemas/NoteDetail'
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
+  /api/conversations/{conversationId}/note/blocks:
+    get:
+      tags: [conversations]
+      operationId: listNoteBlocks
+      description: 笔记文档的活块树（消息块与手动块统一列表，position 排序）
+      parameters:
+        - $ref: '#/components/parameters/ConversationId'
+      responses:
+        '200':
+          description: 块列表与树 revision
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          revision: { type: integer }
+                          items:
+                            type: array
+                            items: { $ref: '#/components/schemas/NoteBlock' }
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
+    post:
+      tags: [conversations]
+      operationId: addNoteBlock
+      description: 向笔记文档追加一个手动块（kind: paragraph/heading/quote/code/list/callout）
+      parameters:
+        - $ref: '#/components/parameters/ConversationId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [kind, content]
+              properties:
+                kind: { type: string, enum: [paragraph, heading, quote, code, list, callout] }
+                content: { type: string }
+      responses:
+        '201':
+          description: 已追加
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/NoteBlock'
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+  /api/conversations/{conversationId}/note/blocks/{blockId}:
+    patch:
+      tags: [conversations]
+      operationId: updateNoteBlock
+      description: 修改手动块内容（产生新块修订）；消息块为会话原始记录，不可改
+      parameters:
+        - $ref: '#/components/parameters/ConversationId'
+        - name: blockId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [content]
+              properties:
+                content: { type: string }
+      responses:
+        '200':
+          description: 已更新
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/NoteBlock'
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+    delete:
+      tags: [conversations]
+      operationId: deleteNoteBlock
+      description: 从活树移除块（块修订保留——已冻结版本引用它们）
+      parameters:
+        - $ref: '#/components/parameters/ConversationId'
+        - name: blockId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: 已移除
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          block_id: { type: string, format: uuid }
                   - $ref: '#/components/schemas/Envelope'
         '404': { $ref: '#/components/responses/Error' }
   /api/conversations/{conversationId}/derivations:
@@ -4369,7 +4463,7 @@ paths:
             schema: { $ref: '#/components/schemas/DerivationFinalize' }
       responses:
         '201':
-          description: 派生落库结果
+          description: 派生落库结果（产物=builtin_document 文档资产；默认归档派生会话）
           content:
             application/json:
               schema:
@@ -5597,27 +5691,35 @@ components:
           properties:
             input_tokens: { type: integer }
             output_tokens: { type: integer }
-    NoteDetail:
+    NoteView:
       type: object
+      description: 会话笔记视图。块树是唯一事实源；markdown 是冻结产物（每个版本一份），draft_markdown 是活树实时渲染（只读投影）
       properties:
         conversation_id: { type: string, format: uuid }
         note_asset_id: { type: string, format: uuid }
-        note_container_id: { type: string, format: uuid }
+        container_id: { type: string, format: uuid, description: 笔记文档容器（活块树） }
         asset_version_id: { type: string, description: 当前工作版本，无则为空字符串 }
         title: { type: string, nullable: true }
-        markdown: { type: string, nullable: true }
+        markdown: { type: string, nullable: true, description: 当前工作版本的冻结 markdown }
         fields: { type: object }
+        revision: { type: integer, description: 活树修订（提交乐观锁 draft_revision） }
+        committed_revision: { type: integer, description: 最近一次固化的树修订 }
+        draft_markdown: { type: string, description: 活树实时渲染，只读 }
+        dirty: { type: boolean, description: 活树较最近固化有变化 }
         publication_status: { type: string }
         confirmation_status: { type: string, enum: [unconfirmed, human_confirmed, ''] }
         message_count: { type: integer }
-    NoteSyncResult:
+    NoteBlock:
       type: object
       properties:
-        conversation_id: { type: string, format: uuid }
-        note_asset_id: { type: string, format: uuid }
-        asset_version_id: { type: string, format: uuid, description: 本次新建版本；unchanged 时为当前工作版本 }
-        message_count: { type: integer }
-        status: { type: string, enum: [draft, unchanged] }
+        block_id: { type: string, format: uuid }
+        block_revision_id: { type: string, format: uuid }
+        position: { type: number }
+        kind: { type: string, description: message=会话消息（不可改）；paragraph/heading/quote/code/list/callout=手动块（可改可删） }
+        role: { type: string, description: 消息块角色 user/assistant }
+        status: { type: string }
+        content: { type: string }
+        editable: { type: boolean }
     Derivation:
       type: object
       properties:
@@ -5632,15 +5734,14 @@ components:
         completed_at: { type: string, format: date-time, description: 未完成时为空字符串 }
         sources:
           type: array
-          description: 选中源块明细（GET 详情返回）；origin 标记来源=message 聊天消息 / chat 聊天容器块 / note 笔记容器块
+          description: 选中源块明细（GET 详情返回）；origin 标记来源=message 消息块 / manual 手动块
           items: { $ref: '#/components/schemas/DerivationSource' }
     DerivationSource:
       type: object
       properties:
         ordinal: { type: integer }
-        origin: { type: string, enum: [message, chat, note] }
+        origin: { type: string, enum: [message, manual] }
         source_container_id: { type: string, format: uuid }
-        source_container_version_id: { type: string, format: uuid }
         source_block_revision_id: { type: string, format: uuid }
         source_excerpt: { type: string }
         context_role: { type: string, enum: [selected, adjacent, summary] }
@@ -5653,7 +5754,7 @@ components:
           items: { type: string, format: uuid }
           minItems: 1
           maxItems: 50
-          description: 可选范围含会话聊天消息、聊天容器块与笔记容器块
+          description: 可选范围=笔记文档活树中的块（消息块与手动块；GET /note/blocks 获取）
         context_policy: { type: string, enum: [summary_only, selected_only, full] }
         title: { type: string }
     DerivationFinalize:
@@ -5667,6 +5768,7 @@ components:
         expected_target_asset_version_id: { type: string, format: uuid, nullable: true }
         expected_container_version_id: { type: string, format: uuid, nullable: true }
         merge_mode: { type: string }
+        auto_archive: { type: boolean, nullable: true, description: 收割成功后归档派生会话（默认 true） }
     DerivationFinalizeResult:
       type: object
       properties:

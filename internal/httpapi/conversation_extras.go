@@ -3,10 +3,12 @@ package httpapi
 import (
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"time"
 
 	"agentchunzhi/internal/content"
+	contentservice "agentchunzhi/internal/content"
 	"agentchunzhi/internal/conversation"
 	"github.com/jackc/pgx/v5"
 )
@@ -203,42 +205,107 @@ func conversationNote(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusInternalServerError, "database_unconfigured")
 			return
 		}
-		var noteAssetID, noteContainerID, versionID string
-		var title, markdown *string
-		var fields []byte
-		var publicationStatus, confirmationStatus string
-		var messageCount int64
-		err := deps.Store.Pool.QueryRow(r.Context(), `
-			SELECT nb.note_asset_id::text, nb.note_container_id::text,
-			       COALESCE(a.current_working_version_id::text, ''), v.title, v.markdown, v.fields,
-			       a.publication_status, COALESCE(v.confirmation_status, ''), count(mb.block_revision_id)
-			FROM content.note_bindings nb
-                        JOIN content.conversations c ON c.id = nb.conversation_id
-                        JOIN content.workspace_members wm ON wm.workspace_id = c.workspace_id AND wm.user_id = $3::uuid
-			JOIN asset.assets a ON a.organization_id = c.organization_id AND a.id = nb.note_asset_id
-			LEFT JOIN asset.asset_versions v ON v.id = a.current_working_version_id
-			LEFT JOIN content.message_blocks mb ON mb.organization_id = c.organization_id AND mb.conversation_id = c.id
-                        WHERE nb.organization_id = $1::uuid AND nb.conversation_id = $2::uuid
-			GROUP BY nb.note_asset_id, nb.note_container_id, a.current_working_version_id, v.title, v.markdown, v.fields, a.publication_status, v.confirmation_status`,
-			principal.OrganizationID, r.PathValue("conversationId"), principal.UserID).Scan(&noteAssetID, &noteContainerID, &versionID, &title, &markdown, &fields, &publicationStatus, &confirmationStatus, &messageCount)
-		if errors.Is(err, pgx.ErrNoRows) {
+		view, err := deps.ConversationService.NoteView(r.Context(), principal, r.PathValue("conversationId"))
+		if errors.Is(err, content.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "conversation_or_note_not_found")
 			return
 		}
+		if errors.Is(err, content.ErrInvalidInput) {
+			writeError(w, http.StatusUnprocessableEntity, "invalid_conversation_id")
+			return
+		}
 		if err != nil {
+			log.Printf("note view failed: conversation=%s error=%v", r.PathValue("conversationId"), err)
 			writeError(w, http.StatusInternalServerError, "conversation_note_load_failed")
 			return
 		}
-		decodedFields := map[string]any{}
-		if len(fields) > 0 {
-			_ = json.Unmarshal(fields, &decodedFields)
-		}
-		writeData(w, r, http.StatusOK, map[string]any{
-			"conversation_id": r.PathValue("conversationId"), "note_asset_id": noteAssetID, "note_container_id": noteContainerID,
-			"asset_version_id": versionID, "title": title, "markdown": markdown, "fields": decodedFields,
-			"publication_status": publicationStatus, "confirmation_status": confirmationStatus, "message_count": messageCount,
-		})
+		writeData(w, r, http.StatusOK, view)
 	}
+}
+
+// noteBlocks serves the live block tree of a conversation note.
+func noteBlocks(deps Dependencies) http.HandlerFunc {
+	switcher := func(w http.ResponseWriter, r *http.Request) {
+		principal, ok := requireMemberSession(w, r, deps)
+		if !ok {
+			return
+		}
+		conversationID := r.PathValue("conversationId")
+		idempotencyKey := ""
+		if r.Method != http.MethodGet {
+			key, ok := requestIdempotencyKey(w, r)
+			if !ok {
+				return
+			}
+			idempotencyKey = key
+		}
+		var err error
+		switch r.Method {
+		case http.MethodGet:
+			var entries []contentservice.NoteBlockEntry
+			var revision int64
+			entries, revision, err = deps.ConversationService.NoteBlocks(r.Context(), principal, conversationID)
+			if err == nil {
+				writeData(w, r, http.StatusOK, map[string]any{"items": entries, "revision": revision})
+			}
+		case http.MethodPost:
+			var body struct {
+				Kind    string `json:"kind"`
+				Content string `json:"content"`
+			}
+			if !decodeNoteBlockBody(w, r, &body, 64*1024) {
+				return
+			}
+			var entry contentservice.NoteBlockEntry
+			entry, err = deps.ConversationService.AddNoteBlock(r.Context(), principal, idempotencyKey, conversationID, body.Kind, body.Content)
+			if err == nil {
+				writeData(w, r, http.StatusCreated, entry)
+			}
+		case http.MethodPatch:
+			var body struct {
+				Content string `json:"content"`
+			}
+			if !decodeNoteBlockBody(w, r, &body, 64*1024) {
+				return
+			}
+			var entry contentservice.NoteBlockEntry
+			entry, err = deps.ConversationService.UpdateNoteBlock(r.Context(), principal, idempotencyKey, conversationID, r.PathValue("blockId"), body.Content)
+			if err == nil {
+				writeData(w, r, http.StatusOK, entry)
+			}
+		case http.MethodDelete:
+			var removed string
+			removed, err = deps.ConversationService.DeleteNoteBlock(r.Context(), principal, idempotencyKey, conversationID, r.PathValue("blockId"))
+			if err == nil {
+				writeData(w, r, http.StatusOK, map[string]any{"block_id": removed})
+			}
+		default:
+			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
+			return
+		}
+		switch {
+		case errors.Is(err, content.ErrNotFound):
+			writeError(w, http.StatusNotFound, "conversation_or_note_block_not_found")
+		case errors.Is(err, content.ErrConflict):
+			writeError(w, http.StatusConflict, "note_block_conflict")
+		case errors.Is(err, content.ErrInvalidInput):
+			writeError(w, http.StatusUnprocessableEntity, "invalid_note_block_request")
+		case err != nil:
+			log.Printf("note block op failed: conversation=%s error=%v", conversationID, err)
+			writeError(w, http.StatusInternalServerError, "note_block_failed")
+		}
+	}
+	return switcher
+}
+
+func decodeNoteBlockBody(w http.ResponseWriter, r *http.Request, target any, limit int64) bool {
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, limit))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "invalid_note_block_request")
+		return false
+	}
+	return true
 }
 
 func conversationTranscript(deps Dependencies) http.HandlerFunc {

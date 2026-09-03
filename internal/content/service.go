@@ -42,8 +42,7 @@ type CreateConversationInput struct {
 type ConversationResult struct {
 	ConversationID     string `json:"conversation_id"`
 	WorkspaceID        string `json:"workspace_id"`
-	ContainerID        string `json:"container_id"`
-	NoteContainerID    string `json:"note_container_id"`
+	ContainerID        string `json:"container_id"` // the note document container (live tree)
 	NoteAssetID        string `json:"note_asset_id"`
 	AgentApplicationID string `json:"agent_application_id"`
 	BoundAgentUserID   string `json:"bound_agent_user_id"`
@@ -137,14 +136,6 @@ type MessageReference struct {
 	UpdatedAt      string `json:"updated_at"`
 }
 
-type NoteSyncResult struct {
-	ConversationID string `json:"conversation_id"`
-	NoteAssetID    string `json:"note_asset_id"`
-	AssetVersionID string `json:"asset_version_id"`
-	MessageCount   int    `json:"message_count"`
-	Status         string `json:"status"`
-}
-
 type CreateDerivationInput struct {
 	SourceConversationID   string
 	SourceBlockRevisionIDs []string
@@ -153,24 +144,22 @@ type CreateDerivationInput struct {
 }
 
 type DerivationSource struct {
-	Ordinal                  int    `json:"ordinal"`
-	Origin                   string `json:"origin"`
-	SourceContainerID        string `json:"source_container_id"`
-	SourceContainerVersionID string `json:"source_container_version_id"`
-	SourceBlockRevisionID    string `json:"source_block_revision_id"`
-	SourceExcerpt            string `json:"source_excerpt"`
-	ContextRole              string `json:"context_role"`
+	Ordinal               int    `json:"ordinal"`
+	Origin                string `json:"origin"`
+	SourceContainerID     string `json:"source_container_id"`
+	SourceBlockRevisionID string `json:"source_block_revision_id"`
+	SourceExcerpt         string `json:"source_excerpt"`
+	ContextRole           string `json:"context_role"`
 }
 
 // derivationSourceBlock is one selected source block of a derivation: the
 // excerpt plus where it came from (message / chat container / note
 // container), kept for the context snapshot and the opening seed message.
 type derivationSourceBlock struct {
-	ID                 string `json:"id"`
-	Content            string `json:"content"`
-	Origin             string `json:"origin"`
-	ContainerID        string `json:"-"`
-	ContainerVersionID string `json:"-"`
+	ID          string `json:"id"`
+	Content     string `json:"content"`
+	Origin      string `json:"origin"`
+	ContainerID string `json:"-"`
 }
 
 type DerivationResult struct {
@@ -222,29 +211,25 @@ func (s Service) CreateDerivation(ctx context.Context, principal auth.Principal,
 		}
 		return result, nil
 	}
-	var workspaceID, sourceContainerID, sourceVersionID, sourceTitle, sourceVisibility, appID, boundAgent string
-	var noteContainerID, noteContainerVersionID string
+	var workspaceID, sourceContainerID, sourceTitle, sourceVisibility, appID, boundAgent string
 	var noteModelID, noteModelVersionID string
 	var sourceMarkdown string
 	err = tx.QueryRow(ctx, `
-		SELECT c.workspace_id::text, c.container_id::text, cv.id::text, c.title, c.visibility,
+		SELECT c.workspace_id::text, cc.id::text, c.title, c.visibility,
 		       c.agent_application_id::text, c.bound_agent_user_id::text,
-		       ncc.id::text, ncv.id::text, COALESCE(av.markdown, ''),
+		       COALESCE(av.markdown, ''),
 		       av.resource_model_id::text, av.resource_model_version_id::text
 		FROM content.conversations c
                 JOIN content.workspace_members wm ON wm.workspace_id = c.workspace_id AND wm.user_id = $3::uuid
-		JOIN content.containers cc ON cc.id = c.container_id AND cc.organization_id = c.organization_id
-		JOIN content.container_versions cv ON cv.id = cc.current_version_id
 		JOIN content.note_bindings nb ON nb.conversation_id = c.id
-		JOIN content.containers ncc ON ncc.id = nb.note_container_id AND ncc.organization_id = nb.organization_id
-		JOIN content.container_versions ncv ON ncv.id = ncc.current_version_id
+		JOIN content.containers cc ON cc.organization_id = nb.organization_id AND cc.asset_id = nb.note_asset_id
 		JOIN asset.assets a ON a.id = nb.note_asset_id AND a.organization_id = c.organization_id
 		JOIN asset.asset_versions av ON av.id = a.current_working_version_id
 		WHERE c.organization_id = $1::uuid AND c.id = $2::uuid AND c.status = 'active'
-		FOR UPDATE OF c, cc, cv, nb, a
+		FOR UPDATE OF c, cc, nb, a
 	`, principal.OrganizationID, input.SourceConversationID, principal.UserID).Scan(
-		&workspaceID, &sourceContainerID, &sourceVersionID, &sourceTitle, &sourceVisibility, &appID, &boundAgent,
-		&noteContainerID, &noteContainerVersionID, &sourceMarkdown,
+		&workspaceID, &sourceContainerID, &sourceTitle, &sourceVisibility, &appID, &boundAgent,
+		&sourceMarkdown,
 		&noteModelID, &noteModelVersionID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return DerivationResult{}, ErrNotFound
@@ -254,33 +239,23 @@ func (s Service) CreateDerivation(ctx context.Context, principal auth.Principal,
 	}
 	sources := make(map[string]derivationSourceBlock, len(input.SourceBlockRevisionIDs))
 	rows, err := tx.Query(ctx, `
-		SELECT br.id::text, br.content, 'message', $5::uuid, $4::uuid
-		FROM content.block_revisions br
-		JOIN content.message_blocks mb ON mb.block_revision_id = br.id
-		WHERE br.organization_id = $1::uuid AND mb.organization_id = $1::uuid
-		  AND mb.conversation_id = $2::uuid AND br.id = ANY($3::uuid[])
-		UNION
-		SELECT br.id::text, br.content, 'chat', $5::uuid, $4::uuid
-		FROM content.block_revisions br
-		JOIN content.block_placements bp ON bp.block_revision_id = br.id
-		WHERE br.organization_id = $1::uuid AND bp.organization_id = $1::uuid
-		  AND bp.container_version_id = $4::uuid AND br.id = ANY($3::uuid[])
-		UNION
-		SELECT br.id::text, br.content, 'note', $6::uuid, $7::uuid
-		FROM content.block_revisions br
-		JOIN content.block_placements bp ON bp.block_revision_id = br.id
-		WHERE br.organization_id = $1::uuid AND bp.organization_id = $1::uuid
-		  AND bp.container_version_id = $7::uuid AND br.id = ANY($3::uuid[])
-	`, principal.OrganizationID, input.SourceConversationID, input.SourceBlockRevisionIDs, sourceVersionID, sourceContainerID, noteContainerID, noteContainerVersionID)
+		SELECT br.id::text, br.content,
+		       CASE WHEN mb.block_revision_id IS NULL THEN 'manual' ELSE 'message' END
+		FROM content.block_placements bp
+		JOIN content.block_revisions br ON br.organization_id = bp.organization_id AND br.id = bp.block_revision_id
+		LEFT JOIN content.message_blocks mb ON mb.organization_id = bp.organization_id AND mb.block_revision_id = br.id
+		WHERE bp.organization_id = $1::uuid AND bp.container_id = $3::uuid AND br.id = ANY($2::uuid[])
+	`, principal.OrganizationID, input.SourceBlockRevisionIDs, sourceContainerID)
 	if err != nil {
 		return DerivationResult{}, fmt.Errorf("load derivation source blocks: %w", err)
 	}
 	for rows.Next() {
 		var item derivationSourceBlock
-		if err := rows.Scan(&item.ID, &item.Content, &item.Origin, &item.ContainerID, &item.ContainerVersionID); err != nil {
+		if err := rows.Scan(&item.ID, &item.Content, &item.Origin); err != nil {
 			rows.Close()
 			return DerivationResult{}, fmt.Errorf("scan derivation source block: %w", err)
 		}
+		item.ContainerID = sourceContainerID
 		sources[item.ID] = item
 	}
 	if err := rows.Err(); err != nil {
@@ -306,11 +281,11 @@ func (s Service) CreateDerivation(ctx context.Context, principal auth.Principal,
 		contextItems = append(contextItems, item)
 	}
 	contextSnapshot, _ := json.Marshal(map[string]any{
-		"source_conversation_id":      input.SourceConversationID,
-		"source_container_version_id": sourceVersionID,
-		"context_policy":              input.ContextPolicy,
-		"source_block_revision_ids":   input.SourceBlockRevisionIDs,
-		"blocks":                      contextItems,
+		"source_conversation_id":    input.SourceConversationID,
+		"source_container_id":       sourceContainerID,
+		"context_policy":            input.ContextPolicy,
+		"source_block_revision_ids": input.SourceBlockRevisionIDs,
+		"blocks":                    contextItems,
 	})
 	var derivationID, derivationCreatedAt string
 	if err := tx.QueryRow(ctx, `
@@ -320,25 +295,6 @@ func (s Service) CreateDerivation(ctx context.Context, principal auth.Principal,
 		RETURNING id::text, created_at::text
 	`, principal.OrganizationID, workspaceID, input.SourceConversationID, input.ContextPolicy, string(contextSnapshot), principal.UserID).Scan(&derivationID, &derivationCreatedAt); err != nil {
 		return DerivationResult{}, fmt.Errorf("create derivation: %w", err)
-	}
-	var chatContainer, noteContainer string
-	if err := tx.QueryRow(ctx, `
-		INSERT INTO content.containers (organization_id, workspace_id, kind, title, visibility, created_by)
-		VALUES ($1::uuid, $2::uuid, 'chat', $3, $4, $5::uuid) RETURNING id::text
-	`, principal.OrganizationID, workspaceID, title, sourceVisibility, principal.UserID).Scan(&chatContainer); err != nil {
-		return DerivationResult{}, fmt.Errorf("create derived chat container: %w", err)
-	}
-	if err := createEmptyContainerVersion(ctx, tx, principal.OrganizationID, chatContainer, principal.UserID, emptyChecksum()); err != nil {
-		return DerivationResult{}, err
-	}
-	if err := tx.QueryRow(ctx, `
-		INSERT INTO content.containers (organization_id, workspace_id, kind, title, visibility, created_by)
-		VALUES ($1::uuid, $2::uuid, 'note', $3, $4, $5::uuid) RETURNING id::text
-	`, principal.OrganizationID, workspaceID, title, sourceVisibility, principal.UserID).Scan(&noteContainer); err != nil {
-		return DerivationResult{}, fmt.Errorf("create derived note container: %w", err)
-	}
-	if err := createEmptyContainerVersion(ctx, tx, principal.OrganizationID, noteContainer, principal.UserID, emptyChecksum()); err != nil {
-		return DerivationResult{}, err
 	}
 	var noteAsset string
 	if err := tx.QueryRow(ctx, `
@@ -350,32 +306,39 @@ func (s Service) CreateDerivation(ctx context.Context, principal auth.Principal,
 	if _, err := createAssetVersionWithDraft(ctx, tx, principal.OrganizationID, workspaceID, noteAsset, noteModelID, noteModelVersionID, title, "", nil, principal.UserID); err != nil {
 		return DerivationResult{}, err
 	}
+	var noteContainer string
+	if err := tx.QueryRow(ctx, `
+		INSERT INTO content.containers (organization_id, workspace_id, kind, title, visibility, created_by, asset_id, revision)
+		VALUES ($1::uuid, $2::uuid, 'note', $3, $4, $5::uuid, $6::uuid, 1) RETURNING id::text
+	`, principal.OrganizationID, workspaceID, title, sourceVisibility, principal.UserID, noteAsset).Scan(&noteContainer); err != nil {
+		return DerivationResult{}, fmt.Errorf("create derived note container: %w", err)
+	}
 	var targetConversation string
 	if err := tx.QueryRow(ctx, `
 		INSERT INTO content.conversations
-			(organization_id, workspace_id, container_id, initiator_user_id, agent_application_id,
+			(organization_id, workspace_id, initiator_user_id, agent_application_id,
 			 bound_agent_user_id, parent_conversation_id, origin_derivation_id, title, source, visibility, source_summary)
-		VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6::uuid, $7::uuid, $8::uuid, $9, 'chat_interface', $10, $11::jsonb)
+		VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6::uuid, $7::uuid, $8, 'chat_interface', $9, $10::jsonb)
 		RETURNING id::text
-	`, principal.OrganizationID, workspaceID, chatContainer, principal.UserID, appID, boundAgent, input.SourceConversationID, derivationID, title, sourceVisibility, string(contextSnapshot)).Scan(&targetConversation); err != nil {
+	`, principal.OrganizationID, workspaceID, principal.UserID, appID, boundAgent, input.SourceConversationID, derivationID, title, sourceVisibility, string(contextSnapshot)).Scan(&targetConversation); err != nil {
 		return DerivationResult{}, fmt.Errorf("create derived conversation: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO content.note_bindings (organization_id, conversation_id, note_container_id, note_asset_id)
-		VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid)
-	`, principal.OrganizationID, targetConversation, noteContainer, noteAsset); err != nil {
+		INSERT INTO content.note_bindings (organization_id, conversation_id, note_asset_id)
+		VALUES ($1::uuid, $2::uuid, $3::uuid)
+	`, principal.OrganizationID, targetConversation, noteAsset); err != nil {
 		return DerivationResult{}, fmt.Errorf("bind derived note: %w", err)
 	}
 	for ordinal, id := range input.SourceBlockRevisionIDs {
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO content.derivation_sources
-				(derivation_id, ordinal, source_container_id, source_container_version_id, source_block_revision_id, source_excerpt, context_role)
-			VALUES ($1::uuid, $2, $3::uuid, $4::uuid, $5::uuid, $6, 'selected')
-		`, derivationID, ordinal, sources[id].ContainerID, sources[id].ContainerVersionID, id, sources[id].Content); err != nil {
+				(derivation_id, ordinal, source_container_id, source_block_revision_id, source_excerpt, context_role)
+			VALUES ($1::uuid, $2, $3::uuid, $4::uuid, $5, 'selected')
+		`, derivationID, ordinal, sourceContainerID, id, sources[id].Content); err != nil {
 			return DerivationResult{}, fmt.Errorf("save derivation source: %w", err)
 		}
 	}
-	if err := injectDerivationContext(ctx, tx, principal.OrganizationID, targetConversation, chatContainer, input.ContextPolicy, sourceTitle, sourceMarkdown, contextItems, principal.UserID); err != nil {
+	if err := injectDerivationContext(ctx, tx, principal.OrganizationID, targetConversation, noteContainer, noteAsset, input.ContextPolicy, sourceTitle, sourceMarkdown, contextItems, principal.UserID); err != nil {
 		return DerivationResult{}, err
 	}
 	if _, err := tx.Exec(ctx, `UPDATE content.derivations SET target_conversation_id = $2::uuid, status = 'discussing', updated_at = now() WHERE id = $1::uuid`, derivationID, targetConversation); err != nil {
@@ -392,13 +355,91 @@ func (s Service) CreateDerivation(ctx context.Context, principal auth.Principal,
 	return result, nil
 }
 
+// appendMessageBlockTx appends one message as a block of the conversation's
+// live note tree: block + revision + placement at the tree tail, tree
+// revision bump (the draft epoch advances with it so publish sees the dirty
+// state), message metadata and references. Callers must hold the transaction
+// and have locked the container row.
+func appendMessageBlockTx(ctx context.Context, tx pgx.Tx, organizationID, conversationID, containerID, noteAssetID string, input AppendMessageInput, userID string) (MessageResult, error) {
+	var nextSequence int64
+	if err := tx.QueryRow(ctx, `
+		SELECT COALESCE(MAX(sequence_no), 0) + 1
+		FROM content.message_blocks
+		WHERE organization_id = $1::uuid AND conversation_id = $2::uuid
+	`, organizationID, conversationID).Scan(&nextSequence); err != nil {
+		return MessageResult{}, fmt.Errorf("allocate message sequence: %w", err)
+	}
+	var nextPosition float64
+	if err := tx.QueryRow(ctx, `
+		SELECT COALESCE(MAX(position) + 1, 0)
+		FROM content.block_placements
+		WHERE organization_id = $1::uuid AND container_id = $2::uuid
+	`, organizationID, containerID).Scan(&nextPosition); err != nil {
+		return MessageResult{}, fmt.Errorf("allocate block position: %w", err)
+	}
+	checksum := hashBytes(input.Content)
+	var blockID, revisionID string
+	if err := tx.QueryRow(ctx, `
+		INSERT INTO content.blocks (organization_id, block_type, created_by)
+		VALUES ($1::uuid, 'message', $2::uuid) RETURNING id::text
+	`, organizationID, userID).Scan(&blockID); err != nil {
+		return MessageResult{}, fmt.Errorf("create message block: %w", err)
+	}
+	if err := tx.QueryRow(ctx, `
+		INSERT INTO content.block_revisions
+			(organization_id, block_id, revision_no, content, content_format, created_by, content_checksum)
+		VALUES ($1::uuid, $2::uuid, 1, $3, $4, $5::uuid, $6)
+		RETURNING id::text
+	`, organizationID, blockID, input.Content, input.ContentFormat, userID, checksum).Scan(&revisionID); err != nil {
+		return MessageResult{}, fmt.Errorf("create message revision: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO content.block_placements
+			(organization_id, container_id, block_revision_id, position)
+		VALUES ($1::uuid, $2::uuid, $3::uuid, $4)
+	`, organizationID, containerID, revisionID, nextPosition); err != nil {
+		return MessageResult{}, fmt.Errorf("place message block: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE content.containers SET revision = revision + 1, updated_at = now() WHERE id = $1::uuid
+	`, containerID); err != nil {
+		return MessageResult{}, fmt.Errorf("advance note tree: %w", err)
+	}
+	if noteAssetID != "" {
+		if _, err := tx.Exec(ctx, `
+			UPDATE asset.asset_drafts SET revision = revision + 1, updated_at = now() WHERE organization_id = $1::uuid AND asset_id = $2::uuid
+		`, organizationID, noteAssetID); err != nil {
+			return MessageResult{}, fmt.Errorf("advance note draft epoch: %w", err)
+		}
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO content.message_blocks
+			(organization_id, block_revision_id, conversation_id, role, provider_conversation_id,
+			 provider_message_id, status, reply_to_block_id, sequence_no)
+		VALUES ($1::uuid, $2::uuid, $3::uuid, $4, NULLIF($5, ''), NULLIF($6, ''), $7, NULLIF($8, '')::uuid, $9)
+	`, organizationID, revisionID, conversationID, input.Role, input.ProviderConversationID, input.ProviderMessageID, input.Status, input.ReplyToBlockID, nextSequence); err != nil {
+		return MessageResult{}, fmt.Errorf("persist message metadata: %w", err)
+	}
+	for ordinal, reference := range input.References {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO content.message_references
+				(organization_id, block_revision_id, ordinal, asset_id, asset_version_id, title, url, source_excerpt, updated_at_snapshot)
+			VALUES ($1::uuid, $2::uuid, $3, $4::uuid, $5::uuid, $6, $7, $8, $9)
+		`, organizationID, revisionID, ordinal, reference.AssetID, reference.AssetVersionID,
+			reference.Title, reference.URL, reference.SourceExcerpt, reference.UpdatedAt); err != nil {
+			return MessageResult{}, fmt.Errorf("persist message reference: %w", err)
+		}
+	}
+	return MessageResult{BlockRevisionID: revisionID, BlockID: blockID, ConversationID: conversationID, SequenceNo: nextSequence, Role: input.Role, Status: input.Status}, nil
+}
+
 // injectDerivationContext seeds the derived conversation with an opening
 // assistant message carrying the selected source material, so the new chat
 // starts from the harvested context instead of a blank slate. The context
 // policy decides how much travels: summary_only keeps a short digest of each
 // selected block, selected_only carries the excerpts verbatim, full prepends
 // the whole source note markdown.
-func injectDerivationContext(ctx context.Context, tx pgx.Tx, organizationID, conversationID, chatContainerID, policy, sourceTitle, sourceMarkdown string, blocks []derivationSourceBlock, userID string) error {
+func injectDerivationContext(ctx context.Context, tx pgx.Tx, organizationID, conversationID, containerID, noteAssetID, policy, sourceTitle, sourceMarkdown string, blocks []derivationSourceBlock, userID string) error {
 	excerptLimit := 2000
 	if policy == "summary_only" {
 		excerptLimit = 200
@@ -429,51 +470,10 @@ func injectDerivationContext(ctx context.Context, tx pgx.Tx, organizationID, con
 		content = string(runes[:24000]) + "\n\n…(truncated)"
 	}
 	message := fmt.Sprintf("> Derived from %q · context policy: %s\n\n%s", sourceTitle, policy, content)
-	checksum := hashBytes(message)
-	var blockID, revisionID string
-	if err := tx.QueryRow(ctx, `
-		INSERT INTO content.blocks (organization_id, block_type, created_by)
-		VALUES ($1::uuid, 'message', $2::uuid) RETURNING id::text
-	`, organizationID, userID).Scan(&blockID); err != nil {
-		return fmt.Errorf("create derivation context block: %w", err)
-	}
-	if err := tx.QueryRow(ctx, `
-		INSERT INTO content.block_revisions
-			(organization_id, block_id, revision_no, content, content_format, created_by, content_checksum)
-		VALUES ($1::uuid, $2::uuid, 1, $3, 'markdown', $4::uuid, $5)
-		RETURNING id::text
-	`, organizationID, blockID, message, userID, checksum).Scan(&revisionID); err != nil {
-		return fmt.Errorf("create derivation context revision: %w", err)
-	}
-	var containerVersionID string
-	if err := tx.QueryRow(ctx, `
-		INSERT INTO content.container_versions
-			(organization_id, container_id, version_no, created_by, content_checksum)
-		VALUES ($1::uuid, $2::uuid, 2, $3::uuid, $4) RETURNING id::text
-	`, organizationID, chatContainerID, userID, checksum).Scan(&containerVersionID); err != nil {
-		return fmt.Errorf("create derivation context container version: %w", err)
-	}
-	if _, err := tx.Exec(ctx, `
-		INSERT INTO content.block_placements
-			(organization_id, container_version_id, block_revision_id, position)
-		VALUES ($1::uuid, $2::uuid, $3::uuid, 0)
-	`, organizationID, containerVersionID, revisionID); err != nil {
-		return fmt.Errorf("place derivation context block: %w", err)
-	}
-	if _, err := tx.Exec(ctx, `
-		UPDATE content.containers SET current_version_id = $3::uuid, updated_at = now()
-		WHERE organization_id = $1::uuid AND id = $2::uuid
-	`, organizationID, chatContainerID, containerVersionID); err != nil {
-		return fmt.Errorf("advance derivation context container: %w", err)
-	}
-	if _, err := tx.Exec(ctx, `
-		INSERT INTO content.message_blocks
-			(organization_id, block_revision_id, conversation_id, role, status, sequence_no)
-		VALUES ($1::uuid, $2::uuid, $3::uuid, 'assistant', 'completed', 1)
-	`, organizationID, revisionID, conversationID); err != nil {
-		return fmt.Errorf("persist derivation context message: %w", err)
-	}
-	return nil
+	_, err := appendMessageBlockTx(ctx, tx, organizationID, conversationID, containerID, noteAssetID, AppendMessageInput{
+		Role: "assistant", Content: message, ContentFormat: "markdown", Status: "completed",
+	}, userID)
+	return err
 }
 
 func (s Service) GetDerivation(ctx context.Context, principal auth.Principal, derivationID string) (DerivationResult, error) {
@@ -514,7 +514,7 @@ func (s Service) GetDerivation(ctx context.Context, principal auth.Principal, de
 		origins[block.ID] = block.Origin
 	}
 	rows, err := s.Store.Pool.Query(ctx, `
-		SELECT ordinal, source_container_id::text, source_container_version_id::text,
+		SELECT ordinal, source_container_id::text,
 		       source_block_revision_id::text, COALESCE(source_excerpt, ''), context_role
 		FROM content.derivation_sources
 		WHERE derivation_id = $1::uuid
@@ -527,7 +527,7 @@ func (s Service) GetDerivation(ctx context.Context, principal auth.Principal, de
 	result.Sources = []DerivationSource{}
 	for rows.Next() {
 		var item DerivationSource
-		if err := rows.Scan(&item.Ordinal, &item.SourceContainerID, &item.SourceContainerVersionID,
+		if err := rows.Scan(&item.Ordinal, &item.SourceContainerID,
 			&item.SourceBlockRevisionID, &item.SourceExcerpt, &item.ContextRole); err != nil {
 			return DerivationResult{}, fmt.Errorf("scan derivation source: %w", err)
 		}
@@ -548,6 +548,9 @@ type FinalizeDerivationInput struct {
 	ExpectedContainerVersionID   string
 	MergeMode                    string
 	TargetBlockID                string
+	// AutoArchive archives the derived conversation after a successful
+	// harvest; nil counts as true.
+	AutoArchive *bool
 }
 
 type FinalizeResult struct {
@@ -631,11 +634,27 @@ func (s Service) FinalizeDerivation(ctx context.Context, principal auth.Principa
 	if derivationStatus != "discussing" && derivationStatus != "result_ready" && derivationStatus != "finalizing" {
 		return FinalizeResult{}, fmt.Errorf("%w: derivation is not ready", ErrConflict)
 	}
-	var sourceVersionID, sourceModelID, sourceModelVersionID, sourceTitle string
-	var sourceMarkdown, sourceFields []byte
+	// The harvest output must be the committed state of the derivation's
+	// discussion: freeze its note first when the live tree moved since the
+	// last save (title/fields flow through the draft row).
+	targetRow, err := assetservice.LoadLifecycleTx(ctx, tx, principal.OrganizationID, targetNoteAssetID)
+	if err != nil {
+		return FinalizeResult{}, err
+	}
+	targetDraft, err := assetservice.LoadDraftTx(ctx, tx, principal.OrganizationID, targetNoteAssetID, "")
+	if err != nil {
+		return FinalizeResult{}, err
+	}
+	if targetDraft.Revision != targetDraft.CommittedRevision {
+		if _, err := assetservice.FreezeNoteDraftTx(ctx, tx, &s.Events, principal, targetRow, targetDraft); err != nil {
+			return FinalizeResult{}, fmt.Errorf("freeze derivation note: %w", err)
+		}
+	}
 	// Harvest reads the DERIVED conversation's note (target): the derivation
 	// exists so its discussion can grow into a result; the trunk note was
 	// already harvested when the derivation was created.
+	var sourceVersionID, sourceModelID, sourceModelVersionID, sourceTitle string
+	var sourceMarkdown, sourceFields []byte
 	if err := tx.QueryRow(ctx, `
 		SELECT av.id::text, av.resource_model_id::text, av.resource_model_version_id::text,
 		       COALESCE(av.title, ''), COALESCE(av.markdown, ''), av.fields
@@ -649,7 +668,25 @@ func (s Service) FinalizeDerivation(ctx context.Context, principal auth.Principa
 		return FinalizeResult{}, fmt.Errorf("%w: derivation note version changed", ErrConflict)
 	}
 	if strings.TrimSpace(string(sourceMarkdown)) == "" {
-		return FinalizeResult{}, fmt.Errorf("%w: derivation note is empty; sync the derived conversation into its note first", ErrConflict)
+		return FinalizeResult{}, fmt.Errorf("%w: derivation note is empty; save the derived conversation into its note first", ErrConflict)
+	}
+	// Harvest output is a standalone document: it always uses the
+	// organization's builtin_document model (form-authored, markdown source
+	// of truth after the copy), never the note model it grew out of.
+	var docModelID, docModelVersionID string
+	if err := tx.QueryRow(ctx, `
+		SELECT m.id::text, COALESCE(m.current_version_id::text, '')
+		FROM model.resource_models m
+		WHERE m.organization_id = $1::uuid AND m.model_key = 'builtin_document'
+		  AND m.status = 'active' AND m.workspace_id IS NULL
+	`, principal.OrganizationID).Scan(&docModelID, &docModelVersionID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return FinalizeResult{}, fmt.Errorf("%w: builtin_document model is not provisioned", ErrConflict)
+		}
+		return FinalizeResult{}, fmt.Errorf("resolve document model: %w", err)
+	}
+	if docModelVersionID == "" {
+		return FinalizeResult{}, fmt.Errorf("%w: builtin_document model has no bound version", ErrConflict)
 	}
 	result := FinalizeResult{DerivationID: derivationID, Disposition: input.Disposition, Status: "completed"}
 	if input.Disposition == "merge" {
@@ -669,18 +706,6 @@ func (s Service) FinalizeDerivation(ctx context.Context, principal auth.Principa
 		}
 		if targetVersionID != input.ExpectedTargetAssetVersionID {
 			return FinalizeResult{}, fmt.Errorf("%w: target version changed", ErrConflict)
-		}
-		if input.ExpectedContainerVersionID != "" {
-			var currentContainerVersion string
-			err := tx.QueryRow(ctx, `
-			SELECT cv.id::text FROM content.note_bindings nb
-			JOIN content.containers c ON c.id = nb.note_container_id
-			JOIN content.container_versions cv ON cv.id = c.current_version_id
-			WHERE nb.organization_id = $1::uuid AND nb.note_asset_id = $2::uuid
-		`, principal.OrganizationID, input.TargetAssetID).Scan(&currentContainerVersion)
-			if errors.Is(err, pgx.ErrNoRows) || currentContainerVersion != input.ExpectedContainerVersionID {
-				return FinalizeResult{}, fmt.Errorf("%w: target container version changed", ErrConflict)
-			}
 		}
 		var targetFieldsMap map[string]any
 		if len(targetFields) > 0 {
@@ -718,22 +743,12 @@ func (s Service) FinalizeDerivation(ctx context.Context, principal auth.Principa
 		if err := tx.QueryRow(ctx, `SELECT title FROM content.conversations WHERE organization_id = $1::uuid AND id = $2::uuid`, principal.OrganizationID, targetConversationID).Scan(&title); err != nil {
 			return FinalizeResult{}, fmt.Errorf("load result note title: %w", err)
 		}
-		var documentContainer string
-		if err := tx.QueryRow(ctx, `
-			INSERT INTO content.containers (organization_id, workspace_id, kind, title, visibility, created_by)
-			SELECT $1::uuid, $2::uuid, 'document', $3, visibility, $4::uuid
-			FROM content.conversations WHERE organization_id = $1::uuid AND id = $5::uuid
-			RETURNING id::text
-		`, principal.OrganizationID, workspaceID, title, principal.UserID, targetConversationID).Scan(&documentContainer); err != nil {
-			return FinalizeResult{}, fmt.Errorf("create result document container: %w", err)
-		}
-		if err := createEmptyContainerVersion(ctx, tx, principal.OrganizationID, documentContainer, principal.UserID, hashBytes(string(sourceMarkdown))); err != nil {
-			return FinalizeResult{}, err
-		}
+		// The harvest output is a form-authored document asset: its markdown
+		// render is the source of truth; no container rides along.
 		if err := tx.QueryRow(ctx, `
 					INSERT INTO asset.assets (organization_id, workspace_id, resource_model_id, created_by)
 					VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid) RETURNING id::text
-				`, principal.OrganizationID, workspaceID, sourceModelID, principal.UserID).Scan(&result.AssetID); err != nil {
+				`, principal.OrganizationID, workspaceID, docModelID, principal.UserID).Scan(&result.AssetID); err != nil {
 			return FinalizeResult{}, fmt.Errorf("create result document asset: %w", err)
 		}
 		var sourceFieldsMap map[string]any
@@ -748,8 +763,8 @@ func (s Service) FinalizeDerivation(ctx context.Context, principal auth.Principa
 			OrganizationID:         principal.OrganizationID,
 			WorkspaceID:            workspaceID,
 			AssetID:                result.AssetID,
-			ResourceModelID:        sourceModelID,
-			ResourceModelVersionID: sourceModelVersionID,
+			ResourceModelID:        docModelID,
+			ResourceModelVersionID: docModelVersionID,
 			Origin:                 assetservice.OriginHuman,
 			ConfirmationStatus:     assetservice.ConfirmationUnconfirmed,
 			Title:                  title,
@@ -773,6 +788,18 @@ func (s Service) FinalizeDerivation(ctx context.Context, principal auth.Principa
 	}
 	if _, err := tx.Exec(ctx, `UPDATE content.derivations SET status = 'completed', completed_at = now(), updated_at = now() WHERE organization_id = $1::uuid AND id = $2::uuid`, principal.OrganizationID, derivationID); err != nil {
 		return FinalizeResult{}, fmt.Errorf("complete derivation: %w", err)
+	}
+	// A harvested thought leaves the intake list: archive the derived
+	// conversation unless the caller explicitly wants to keep talking.
+	autoArchive := input.AutoArchive == nil || *input.AutoArchive
+	if autoArchive && targetConversationID != "" {
+		if _, err := tx.Exec(ctx, `
+			UPDATE content.conversations
+			SET status = 'archived', completed_at = COALESCE(completed_at, now()), updated_at = now()
+			WHERE organization_id = $1::uuid AND id = $2::uuid
+		`, principal.OrganizationID, targetConversationID); err != nil {
+			return FinalizeResult{}, fmt.Errorf("archive derived conversation: %w", err)
+		}
 	}
 	body, _ := json.Marshal(result)
 	if err := saveIdempotency(ctx, tx, principal, "conversation.derivation.finalize", idempotencyKey, body); err != nil {
@@ -809,197 +836,6 @@ func loadMaterializedRelationID(ctx context.Context, tx pgx.Tx, organizationID, 
 		return fmt.Errorf("load materialized derivation relation: %w", err)
 	}
 	return nil
-}
-
-func (s Service) SyncNote(ctx context.Context, principal auth.Principal, idempotencyKey, conversationID string) (NoteSyncResult, error) {
-	if principal.UserType != "member" || !validID(principal.OrganizationID) || !validID(principal.UserID) ||
-		!validID(conversationID) || !validIdempotencyKey(idempotencyKey) {
-		return NoteSyncResult{}, ErrInvalidInput
-	}
-	if s.Store == nil || s.Store.Pool == nil {
-		return NoteSyncResult{}, errors.New("database store is not initialized")
-	}
-	tx, err := s.Store.Pool.Begin(ctx)
-	if err != nil {
-		return NoteSyncResult{}, fmt.Errorf("begin note sync: %w", err)
-	}
-	defer tx.Rollback(ctx)
-	requestHash := hashRequest(struct{ ConversationID string }{conversationID})
-	state, err := reserveIdempotency(ctx, tx, principal, "conversation.note.sync", idempotencyKey, requestHash)
-	if err != nil {
-		return NoteSyncResult{}, err
-	}
-	if state.replay {
-		var result NoteSyncResult
-		if err := json.Unmarshal(state.body, &result); err != nil {
-			return NoteSyncResult{}, fmt.Errorf("decode idempotent note sync: %w", err)
-		}
-		return result, nil
-	}
-	var workspaceID, noteContainerID, noteAssetID, resourceModelID, resourceModelVersionID, workingVersionID string
-	var lastSynced int64
-	if err := tx.QueryRow(ctx, `
-		SELECT c.workspace_id::text, nb.note_container_id::text, nb.note_asset_id::text, av.resource_model_id::text, av.resource_model_version_id::text,
-		       av.id::text, COALESCE(nb.last_synced_message_sequence, 0)
-		FROM content.note_bindings nb
-		JOIN content.conversations c ON c.id = nb.conversation_id
-                JOIN content.workspace_members wm ON wm.workspace_id = c.workspace_id AND wm.user_id = $3::uuid
-		JOIN asset.assets a ON a.id = nb.note_asset_id AND a.organization_id = $1::uuid
-		JOIN asset.asset_versions av ON av.organization_id = a.organization_id AND av.id = a.current_working_version_id
-                WHERE nb.organization_id = $1::uuid AND nb.conversation_id = $2::uuid
-                  AND wm.role <> 'viewer'
-		FOR UPDATE OF nb, a
-	`, principal.OrganizationID, conversationID, principal.UserID).Scan(&workspaceID, &noteContainerID, &noteAssetID, &resourceModelID, &resourceModelVersionID, &workingVersionID, &lastSynced); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return NoteSyncResult{}, ErrNotFound
-		}
-		return NoteSyncResult{}, fmt.Errorf("load note binding: %w", err)
-	}
-	rows, err := tx.Query(ctx, `
-		SELECT mb.role, br.content, mb.sequence_no
-		FROM content.message_blocks mb
-		JOIN content.block_revisions br ON br.id = mb.block_revision_id
-		WHERE mb.organization_id = $1::uuid AND mb.conversation_id = $2::uuid
-		ORDER BY mb.sequence_no
-	`, principal.OrganizationID, conversationID)
-	if err != nil {
-		return NoteSyncResult{}, fmt.Errorf("load conversation messages: %w", err)
-	}
-	defer rows.Close()
-	var markdown strings.Builder
-	messageCount := 0
-	lastSequence := int64(0)
-	for rows.Next() {
-		var role, content string
-		var sequence int64
-		if err := rows.Scan(&role, &content, &sequence); err != nil {
-			return NoteSyncResult{}, fmt.Errorf("scan conversation message: %w", err)
-		}
-		messageCount++
-		if sequence > lastSequence {
-			lastSequence = sequence
-		}
-		if markdown.Len() > 0 {
-			markdown.WriteString("\n\n")
-		}
-		markdown.WriteString("## ")
-		markdown.WriteString(strings.Title(role))
-		markdown.WriteString("\n\n")
-		markdown.WriteString(content)
-	}
-	if err := rows.Err(); err != nil {
-		return NoteSyncResult{}, fmt.Errorf("iterate conversation messages: %w", err)
-	}
-	// Dedup guard: the sync cursor has not advanced since the last snapshot,
-	// so there is nothing new to version. Repeated saves are absorbed as a
-	// no-op instead of minting identical versions.
-	if lastSequence <= lastSynced {
-		result := NoteSyncResult{ConversationID: conversationID, NoteAssetID: noteAssetID, AssetVersionID: workingVersionID, MessageCount: messageCount, Status: "unchanged"}
-		body, _ := json.Marshal(result)
-		if err := saveIdempotency(ctx, tx, principal, "conversation.note.sync", idempotencyKey, body); err != nil {
-			return NoteSyncResult{}, err
-		}
-		if err := tx.Commit(ctx); err != nil {
-			return NoteSyncResult{}, fmt.Errorf("commit note sync: %w", err)
-		}
-		return result, nil
-	}
-	content := markdown.String()
-	checksum := hashBytes(content)
-	var currentContainerVersion string
-	var containerVersionNo int64
-	if err := tx.QueryRow(ctx, `
-		SELECT cv.id::text, cv.version_no
-		FROM content.containers c
-		JOIN content.container_versions cv ON cv.id = c.current_version_id
-		WHERE c.organization_id = $1::uuid AND c.id = $2::uuid
-		FOR UPDATE OF c, cv
-	`, principal.OrganizationID, noteContainerID).Scan(&currentContainerVersion, &containerVersionNo); err != nil {
-		return NoteSyncResult{}, fmt.Errorf("load note container version: %w", err)
-	}
-	var noteContainerVersionID string
-	if err := tx.QueryRow(ctx, `
-		INSERT INTO content.container_versions
-			(organization_id, container_id, version_no, created_by, content_checksum)
-		VALUES ($1::uuid, $2::uuid, $3, $4::uuid, $5)
-		RETURNING id::text
-	`, principal.OrganizationID, noteContainerID, containerVersionNo+1, principal.UserID, checksum).Scan(&noteContainerVersionID); err != nil {
-		return NoteSyncResult{}, fmt.Errorf("create note container version: %w", err)
-	}
-	var blockID, blockRevisionID string
-	if err := tx.QueryRow(ctx, `
-		INSERT INTO content.blocks (organization_id, block_type, created_by)
-		VALUES ($1::uuid, 'paragraph', $2::uuid)
-		RETURNING id::text
-	`, principal.OrganizationID, principal.UserID).Scan(&blockID); err != nil {
-		return NoteSyncResult{}, fmt.Errorf("create note snapshot block: %w", err)
-	}
-	if err := tx.QueryRow(ctx, `
-		INSERT INTO content.block_revisions
-			(organization_id, block_id, revision_no, content, content_format, created_by, content_checksum)
-		VALUES ($1::uuid, $2::uuid, 1, $3, 'markdown', $4::uuid, $5)
-		RETURNING id::text
-	`, principal.OrganizationID, blockID, content, principal.UserID, checksum).Scan(&blockRevisionID); err != nil {
-		return NoteSyncResult{}, fmt.Errorf("create note snapshot revision: %w", err)
-	}
-	if _, err := tx.Exec(ctx, `
-		INSERT INTO content.block_placements
-			(organization_id, container_version_id, block_revision_id, position)
-		VALUES ($1::uuid, $2::uuid, $3::uuid, 0)
-	`, principal.OrganizationID, noteContainerVersionID, blockRevisionID); err != nil {
-		return NoteSyncResult{}, fmt.Errorf("place note snapshot block: %w", err)
-	}
-	if _, err := tx.Exec(ctx, `UPDATE content.containers SET current_version_id = $2::uuid, updated_at = now() WHERE organization_id = $1::uuid AND id = $3::uuid`, principal.OrganizationID, noteContainerVersionID, noteContainerID); err != nil {
-		return NoteSyncResult{}, fmt.Errorf("advance note container version: %w", err)
-	}
-	// Snapshot the conversation transcript as a new immutable working version
-	// derived from the current one, then move the shared draft base on top.
-	var currentVersionID, currentTitle string
-	var currentFields []byte
-	if err := tx.QueryRow(ctx, `
-		SELECT av.id::text, COALESCE(av.title, 'Untitled Note'), av.fields
-		FROM asset.assets a
-		JOIN asset.asset_versions av ON av.organization_id = a.organization_id AND av.id = a.current_working_version_id
-		WHERE a.organization_id = $1::uuid AND a.id = $2::uuid
-	`, principal.OrganizationID, noteAssetID).Scan(&currentVersionID, &currentTitle, &currentFields); err != nil {
-		return NoteSyncResult{}, fmt.Errorf("load note working version: %w", err)
-	}
-	var currentFieldsMap map[string]any
-	if len(currentFields) > 0 {
-		_ = json.Unmarshal(currentFields, &currentFieldsMap)
-	}
-	versionID, _, err := assetservice.CreateVersionTx(ctx, tx, assetservice.VersionMaterial{
-		OrganizationID:         principal.OrganizationID,
-		WorkspaceID:            workspaceID,
-		AssetID:                noteAssetID,
-		ResourceModelID:        resourceModelID,
-		ResourceModelVersionID: resourceModelVersionID,
-		ParentVersionID:        currentVersionID,
-		Origin:                 assetservice.OriginHuman,
-		ConfirmationStatus:     assetservice.ConfirmationUnconfirmed,
-		Title:                  currentTitle,
-		Markdown:               content,
-		Fields:                 currentFieldsMap,
-		CreatedBy:              principal.UserID,
-	})
-	if err != nil {
-		return NoteSyncResult{}, fmt.Errorf("create note version: %w", err)
-	}
-	if err := advanceAssetDraft(ctx, tx, principal.OrganizationID, workspaceID, noteAssetID, versionID, currentTitle, content, currentFieldsMap, principal.UserID); err != nil {
-		return NoteSyncResult{}, err
-	}
-	if _, err := tx.Exec(ctx, `UPDATE content.note_bindings SET last_synced_message_sequence = $2, updated_at = now() WHERE conversation_id = $1::uuid`, conversationID, lastSequence); err != nil {
-		return NoteSyncResult{}, fmt.Errorf("advance note sync cursor: %w", err)
-	}
-	result := NoteSyncResult{ConversationID: conversationID, NoteAssetID: noteAssetID, AssetVersionID: versionID, MessageCount: messageCount, Status: "draft"}
-	body, _ := json.Marshal(result)
-	if err := saveIdempotency(ctx, tx, principal, "conversation.note.sync", idempotencyKey, body); err != nil {
-		return NoteSyncResult{}, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return NoteSyncResult{}, fmt.Errorf("commit note sync: %w", err)
-	}
-	return result, nil
 }
 
 func (s Service) AppendMessage(ctx context.Context, principal auth.Principal, idempotencyKey string, input AppendMessageInput) (MessageResult, error) {
@@ -1055,108 +891,26 @@ func (s Service) AppendMessage(ctx context.Context, principal auth.Principal, id
 		}
 		return result, nil
 	}
-	var workspaceID, containerID string
+	var workspaceID, containerID, noteAssetID string
 	if err := tx.QueryRow(ctx, `
-		SELECT c.workspace_id::text, c.container_id::text
+		SELECT c.workspace_id::text, cc.id::text, nb.note_asset_id::text
 		FROM content.conversations c
 				JOIN content.workspace_members wm ON wm.workspace_id = c.workspace_id AND wm.user_id = $3::uuid
+				JOIN content.note_bindings nb ON nb.conversation_id = c.id
+				JOIN content.containers cc ON cc.organization_id = nb.organization_id AND cc.asset_id = nb.note_asset_id
 				WHERE c.organization_id = $1::uuid AND c.id = $2::uuid AND c.status = 'active'
 				  AND wm.role <> 'viewer'
-				FOR UPDATE OF c
-	`, principal.OrganizationID, input.ConversationID, principal.UserID).Scan(&workspaceID, &containerID); err != nil {
+				FOR UPDATE OF c, cc
+	`, principal.OrganizationID, input.ConversationID, principal.UserID).Scan(&workspaceID, &containerID, &noteAssetID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return MessageResult{}, ErrNotFound
 		}
 		return MessageResult{}, fmt.Errorf("load conversation for message: %w", err)
 	}
-	var currentVersion string
-	var versionNo int64
-	if err := tx.QueryRow(ctx, `
-		SELECT cv.id::text, cv.version_no
-		FROM content.containers c
-		JOIN content.container_versions cv ON cv.id = c.current_version_id
-		WHERE c.organization_id = $1::uuid AND c.id = $2::uuid
-		FOR UPDATE OF c, cv
-	`, principal.OrganizationID, containerID).Scan(&currentVersion, &versionNo); err != nil {
-		return MessageResult{}, fmt.Errorf("load chat container version: %w", err)
+	result, err := appendMessageBlockTx(ctx, tx, principal.OrganizationID, input.ConversationID, containerID, noteAssetID, input, principal.UserID)
+	if err != nil {
+		return MessageResult{}, err
 	}
-	var nextSequence int64
-	if err := tx.QueryRow(ctx, `
-		SELECT COALESCE(MAX(sequence_no), 0) + 1
-		FROM content.message_blocks
-		WHERE organization_id = $1::uuid AND conversation_id = $2::uuid
-	`, principal.OrganizationID, input.ConversationID).Scan(&nextSequence); err != nil {
-		return MessageResult{}, fmt.Errorf("allocate message sequence: %w", err)
-	}
-	checksum := hashBytes(input.Content)
-	var blockID, revisionID string
-	if err := tx.QueryRow(ctx, `
-		INSERT INTO content.blocks (organization_id, block_type, created_by)
-		VALUES ($1::uuid, 'message', $2::uuid) RETURNING id::text
-	`, principal.OrganizationID, principal.UserID).Scan(&blockID); err != nil {
-		return MessageResult{}, fmt.Errorf("create message block: %w", err)
-	}
-	if err := tx.QueryRow(ctx, `
-		INSERT INTO content.block_revisions
-			(organization_id, block_id, revision_no, content, content_format, created_by, content_checksum)
-		VALUES ($1::uuid, $2::uuid, 1, $3, $4, $5::uuid, $6)
-		RETURNING id::text
-	`, principal.OrganizationID, blockID, input.Content, input.ContentFormat, principal.UserID, checksum).Scan(&revisionID); err != nil {
-		return MessageResult{}, fmt.Errorf("create message revision: %w", err)
-	}
-	newChecksum := hashRequest(struct{ Previous, Message string }{currentVersion, input.Content})
-	var newVersion string
-	if err := tx.QueryRow(ctx, `
-		INSERT INTO content.container_versions
-			(organization_id, container_id, version_no, created_by, content_checksum)
-		VALUES ($1::uuid, $2::uuid, $3, $4::uuid, $5)
-		RETURNING id::text
-	`, principal.OrganizationID, containerID, versionNo+1, principal.UserID, newChecksum).Scan(&newVersion); err != nil {
-		return MessageResult{}, fmt.Errorf("create message container version: %w", err)
-	}
-	if _, err := tx.Exec(ctx, `
-		WITH mapping AS MATERIALIZED (
-			SELECT id AS old_id, gen_random_uuid() AS new_id, block_revision_id, parent_placement_id, position, role_in_parent
-			FROM content.block_placements
-			WHERE organization_id = $1::uuid AND container_version_id = $3::uuid
-		)
-		INSERT INTO content.block_placements
-			(id, organization_id, container_version_id, block_revision_id, parent_placement_id, position, role_in_parent)
-		SELECT m.new_id, $1::uuid, $2::uuid, m.block_revision_id, parent.new_id, m.position, m.role_in_parent
-		FROM mapping m
-		LEFT JOIN mapping parent ON parent.old_id = m.parent_placement_id
-	`, principal.OrganizationID, newVersion, currentVersion); err != nil {
-		return MessageResult{}, fmt.Errorf("copy message placements: %w", err)
-	}
-	if _, err := tx.Exec(ctx, `
-		INSERT INTO content.block_placements
-			(organization_id, container_version_id, block_revision_id, position)
-		VALUES ($1::uuid, $2::uuid, $3::uuid, $4)
-	`, principal.OrganizationID, newVersion, revisionID, nextSequence-1); err != nil {
-		return MessageResult{}, fmt.Errorf("place message block: %w", err)
-	}
-	if _, err := tx.Exec(ctx, `UPDATE content.containers SET current_version_id = $2::uuid, updated_at = now() WHERE id = $1::uuid`, containerID, newVersion); err != nil {
-		return MessageResult{}, fmt.Errorf("advance chat container: %w", err)
-	}
-	if _, err := tx.Exec(ctx, `
-		INSERT INTO content.message_blocks
-			(organization_id, block_revision_id, conversation_id, role, provider_conversation_id,
-			 provider_message_id, status, reply_to_block_id, sequence_no)
-		VALUES ($1::uuid, $2::uuid, $3::uuid, $4, NULLIF($5, ''), NULLIF($6, ''), $7, NULLIF($8, '')::uuid, $9)
-	`, principal.OrganizationID, revisionID, input.ConversationID, input.Role, input.ProviderConversationID, input.ProviderMessageID, input.Status, input.ReplyToBlockID, nextSequence); err != nil {
-		return MessageResult{}, fmt.Errorf("persist message metadata: %w", err)
-	}
-	for ordinal, reference := range input.References {
-		if _, err := tx.Exec(ctx, `
-			INSERT INTO content.message_references
-				(organization_id, block_revision_id, ordinal, asset_id, asset_version_id, title, url, source_excerpt, updated_at_snapshot)
-			VALUES ($1::uuid, $2::uuid, $3, $4::uuid, $5::uuid, $6, $7, $8, $9)
-		`, principal.OrganizationID, revisionID, ordinal, reference.AssetID, reference.AssetVersionID,
-			reference.Title, reference.URL, reference.SourceExcerpt, reference.UpdatedAt); err != nil {
-			return MessageResult{}, fmt.Errorf("persist message reference: %w", err)
-		}
-	}
-	result := MessageResult{BlockRevisionID: revisionID, BlockID: blockID, ConversationID: input.ConversationID, SequenceNo: nextSequence, Role: input.Role, Status: input.Status}
 	body, _ := json.Marshal(result)
 	if err := saveIdempotency(ctx, tx, principal, "conversation.message.create", idempotencyKey, body); err != nil {
 		return MessageResult{}, err
@@ -1339,38 +1093,6 @@ func (s Service) CreateConversation(ctx context.Context, principal auth.Principa
 	if !validID(modelVersion) {
 		return ConversationResult{}, ErrConflict
 	}
-	parentContainer := ""
-	if input.ContainerID != "" {
-		if err := tx.QueryRow(ctx, `
-			SELECT id::text FROM content.containers
-			WHERE organization_id = $1::uuid AND workspace_id = $2::uuid AND id = $3::uuid AND status = 'active'
-		`, principal.OrganizationID, input.WorkspaceID, input.ContainerID).Scan(&parentContainer); err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return ConversationResult{}, ErrNotFound
-			}
-			return ConversationResult{}, fmt.Errorf("load conversation parent container: %w", err)
-		}
-	}
-	checksum := emptyChecksum()
-	var chatContainer, noteContainer string
-	if err := tx.QueryRow(ctx, `
-		INSERT INTO content.containers (organization_id, workspace_id, parent_id, kind, title, visibility, created_by)
-		VALUES ($1::uuid, $2::uuid, NULLIF($3, '')::uuid, 'chat', $4, $5, $6::uuid) RETURNING id::text
-	`, principal.OrganizationID, input.WorkspaceID, parentContainer, input.Title, input.Visibility, principal.UserID).Scan(&chatContainer); err != nil {
-		return ConversationResult{}, fmt.Errorf("create chat container: %w", err)
-	}
-	if err := createEmptyContainerVersion(ctx, tx, principal.OrganizationID, chatContainer, principal.UserID, checksum); err != nil {
-		return ConversationResult{}, err
-	}
-	if err := tx.QueryRow(ctx, `
-		INSERT INTO content.containers (organization_id, workspace_id, parent_id, kind, title, visibility, created_by)
-		VALUES ($1::uuid, $2::uuid, NULLIF($3, '')::uuid, 'note', $4, $5, $6::uuid) RETURNING id::text
-	`, principal.OrganizationID, input.WorkspaceID, parentContainer, input.Title, input.Visibility, principal.UserID).Scan(&noteContainer); err != nil {
-		return ConversationResult{}, fmt.Errorf("create note container: %w", err)
-	}
-	if err := createEmptyContainerVersion(ctx, tx, principal.OrganizationID, noteContainer, principal.UserID, checksum); err != nil {
-		return ConversationResult{}, err
-	}
 	var noteAsset string
 	if err := tx.QueryRow(ctx, `
 			INSERT INTO asset.assets
@@ -1382,24 +1104,34 @@ func (s Service) CreateConversation(ctx context.Context, principal auth.Principa
 	if _, err := createAssetVersionWithDraft(ctx, tx, principal.OrganizationID, input.WorkspaceID, noteAsset, defaultModel, modelVersion, input.Title, "", nil, principal.UserID); err != nil {
 		return ConversationResult{}, err
 	}
+	// The conversation owns exactly one document: its note. The block tree of
+	// that container is the note's single editable source of truth; messages
+	// land there as blocks and commits freeze the tree into versions.
+	var noteContainer string
+	if err := tx.QueryRow(ctx, `
+		INSERT INTO content.containers (organization_id, workspace_id, kind, title, visibility, created_by, asset_id, revision)
+		VALUES ($1::uuid, $2::uuid, 'note', $3, $4, $5::uuid, $6::uuid, 1) RETURNING id::text
+	`, principal.OrganizationID, input.WorkspaceID, input.Title, input.Visibility, principal.UserID, noteAsset).Scan(&noteContainer); err != nil {
+		return ConversationResult{}, fmt.Errorf("create note document container: %w", err)
+	}
 	var conversationID string
 	if err := tx.QueryRow(ctx, `
 		INSERT INTO content.conversations
-			(organization_id, workspace_id, container_id, initiator_user_id, agent_application_id,
+			(organization_id, workspace_id, initiator_user_id, agent_application_id,
 			 bound_agent_user_id, title, source, visibility)
-		VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6::uuid, $7, $8, $9)
+		VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6, $7, $8)
 		RETURNING id::text
-	`, principal.OrganizationID, input.WorkspaceID, chatContainer, principal.UserID, appID, boundAgent, input.Title, input.Source, input.Visibility).Scan(&conversationID); err != nil {
+	`, principal.OrganizationID, input.WorkspaceID, principal.UserID, appID, boundAgent, input.Title, input.Source, input.Visibility).Scan(&conversationID); err != nil {
 		return ConversationResult{}, fmt.Errorf("create conversation: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO content.note_bindings
-			(organization_id, conversation_id, note_container_id, note_asset_id)
-		VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid)
-	`, principal.OrganizationID, conversationID, noteContainer, noteAsset); err != nil {
+			(organization_id, conversation_id, note_asset_id)
+		VALUES ($1::uuid, $2::uuid, $3::uuid)
+	`, principal.OrganizationID, conversationID, noteAsset); err != nil {
 		return ConversationResult{}, fmt.Errorf("bind conversation note: %w", err)
 	}
-	result := ConversationResult{ConversationID: conversationID, WorkspaceID: input.WorkspaceID, ContainerID: chatContainer, NoteContainerID: noteContainer, NoteAssetID: noteAsset, AgentApplicationID: appID, BoundAgentUserID: boundAgent, Status: "active"}
+	result := ConversationResult{ConversationID: conversationID, WorkspaceID: input.WorkspaceID, ContainerID: noteContainer, NoteAssetID: noteAsset, AgentApplicationID: appID, BoundAgentUserID: boundAgent, Status: "active"}
 	body, _ := json.Marshal(result)
 	if err := saveIdempotency(ctx, tx, principal, "conversation.create", idempotencyKey, body); err != nil {
 		return ConversationResult{}, err
@@ -1419,17 +1151,18 @@ func (s Service) GetConversation(ctx context.Context, principal auth.Principal, 
 	}
 	var result Conversation
 	err := s.Store.Pool.QueryRow(ctx, `
-		SELECT c.id::text, c.workspace_id::text, c.container_id::text, nb.note_container_id::text,
+		SELECT c.id::text, c.workspace_id::text, COALESCE(cc.id::text, ''),
 		       nb.note_asset_id::text, c.agent_application_id::text, c.bound_agent_user_id::text,
 		       c.status, c.title, c.source, c.visibility,
 		       COALESCE(c.parent_conversation_id::text, ''), COALESCE(c.origin_derivation_id::text, ''),
 		       c.created_at::text, c.updated_at::text
 		FROM content.conversations c
 		JOIN content.note_bindings nb ON nb.conversation_id = c.id
+		LEFT JOIN content.containers cc ON cc.organization_id = nb.organization_id AND cc.asset_id = nb.note_asset_id
 		JOIN content.workspace_members wm ON wm.workspace_id = c.workspace_id AND wm.user_id = $3::uuid
 		WHERE c.organization_id = $1::uuid AND c.id = $2::uuid
 	`, principal.OrganizationID, conversationID, principal.UserID).Scan(
-		&result.ConversationID, &result.WorkspaceID, &result.ContainerID, &result.NoteContainerID,
+		&result.ConversationID, &result.WorkspaceID, &result.ContainerID,
 		&result.NoteAssetID, &result.AgentApplicationID, &result.BoundAgentUserID, &result.Status,
 		&result.Title, &result.Source, &result.Visibility, &result.ParentConversationID,
 		&result.OriginDerivationID, &result.CreatedAt, &result.UpdatedAt)

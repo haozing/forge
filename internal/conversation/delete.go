@@ -159,19 +159,14 @@ func (s Service) Delete(ctx context.Context, principal auth.Principal, conversat
 		return DeleteResult{}, fmt.Errorf("delete message blocks: %w", err)
 	}
 
-	// Containers owned by the subtree: the per-conversation chat container and
-	// the note containers from the bindings. Collect note containers before
-	// dropping the bindings.
+	// Containers owned by the subtree: the note documents reachable through
+	// the bindings. Collect them before dropping the bindings.
 	var containerIDs []string
 	if err := tx.QueryRow(ctx, `
-		SELECT COALESCE(array_agg(c::text), '{}') FROM (
-			SELECT container_id AS c FROM content.conversations
-			WHERE organization_id = $1::uuid AND id = ANY($2::uuid[])
-			UNION
-			SELECT nb.note_container_id FROM content.note_bindings nb
-			JOIN content.conversations cv ON cv.id = nb.conversation_id AND cv.organization_id = $1::uuid
-			WHERE nb.conversation_id = ANY($2::uuid[])
-		) ids
+		SELECT COALESCE(array_agg(cc.id::text), '{}')
+		FROM content.note_bindings nb
+		JOIN content.containers cc ON cc.organization_id = nb.organization_id AND cc.asset_id = nb.note_asset_id
+		WHERE nb.organization_id = $1::uuid AND nb.conversation_id = ANY($2::uuid[])
 	`, principal.OrganizationID, ids).Scan(&containerIDs); err != nil {
 		return DeleteResult{}, fmt.Errorf("collect containers: %w", err)
 	}
@@ -268,23 +263,12 @@ func (s Service) Delete(ctx context.Context, principal auth.Principal, conversat
 		if err := tx.QueryRow(ctx, `
 			SELECT COALESCE(array_agg(DISTINCT bp.block_revision_id::text), '{}')
 			FROM content.block_placements bp
-			JOIN content.container_versions cv ON cv.organization_id = bp.organization_id AND cv.id = bp.container_version_id
-			WHERE bp.organization_id = $1::uuid AND cv.container_id = ANY($2::uuid[])
+			WHERE bp.organization_id = $1::uuid AND bp.container_id = ANY($2::uuid[])
 		`, principal.OrganizationID, containerIDs).Scan(&placedRevisions); err != nil {
 			return DeleteResult{}, fmt.Errorf("collect placed revisions: %w", err)
 		}
-		if _, err := tx.Exec(ctx, `UPDATE content.containers SET current_version_id = NULL WHERE organization_id = $1::uuid AND id = ANY($2::uuid[])`, principal.OrganizationID, containerIDs); err != nil {
-			return DeleteResult{}, fmt.Errorf("detach container versions: %w", err)
-		}
-		if _, err := tx.Exec(ctx, `
-			DELETE FROM content.block_placements
-			WHERE organization_id = $1::uuid
-			  AND container_version_id IN (SELECT id FROM content.container_versions WHERE organization_id = $1::uuid AND container_id = ANY($2::uuid[]))
-		`, principal.OrganizationID, containerIDs); err != nil {
+		if _, err := tx.Exec(ctx, `DELETE FROM content.block_placements WHERE organization_id = $1::uuid AND container_id = ANY($2::uuid[])`, principal.OrganizationID, containerIDs); err != nil {
 			return DeleteResult{}, fmt.Errorf("delete placements: %w", err)
-		}
-		if _, err := tx.Exec(ctx, `DELETE FROM content.container_versions WHERE organization_id = $1::uuid AND container_id = ANY($2::uuid[])`, principal.OrganizationID, containerIDs); err != nil {
-			return DeleteResult{}, fmt.Errorf("delete container versions: %w", err)
 		}
 		messageRevisions = append(messageRevisions, nonEmpty(placedRevisions)...)
 	}
@@ -331,8 +315,8 @@ func (s Service) Delete(ctx context.Context, principal auth.Principal, conversat
 		start = end
 	}
 
-	// The owned containers go last: conversations.container_id points at them,
-	// so the rows must be gone before the container delete is legal.
+	// The owned note containers go last: containers.asset_id references the
+	// (already soft-deleted) assets, so drop them after the conversations.
 	if len(containerIDs) > 0 {
 		if _, err := tx.Exec(ctx, `DELETE FROM content.containers WHERE organization_id = $1::uuid AND id = ANY($2::uuid[])`, principal.OrganizationID, containerIDs); err != nil {
 			return DeleteResult{}, fmt.Errorf("delete containers: %w", err)

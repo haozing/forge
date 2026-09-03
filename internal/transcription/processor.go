@@ -42,12 +42,14 @@ func (p Processor) Process(ctx context.Context, jobID, mediaID string) error {
 	var organizationID, conversationID, containerID, attachmentID, objectKey, filename, mediaType, language, createdBy, status string
 	var bodyRevision string
 	err := p.Store.Pool.QueryRow(jobCtx, `
-		SELECT j.organization_id::text, cm.conversation_id::text, c.container_id::text, cm.attachment_id::text,
+		SELECT j.organization_id::text, cm.conversation_id::text, cc.id::text, cm.attachment_id::text,
 		       at.object_key, at.original_filename, at.media_type, COALESCE(cm.language, ''),
 		       cm.created_by::text, cm.status, COALESCE(cm.transcription_block_revision_id::text, '')
 		FROM content.processing_jobs j
 		JOIN content.conversation_media cm ON cm.id = j.source_id AND cm.organization_id = j.organization_id
 		JOIN content.conversations c ON c.id = cm.conversation_id
+		JOIN content.note_bindings nb ON nb.conversation_id = c.id
+		JOIN content.containers cc ON cc.organization_id = nb.organization_id AND cc.asset_id = nb.note_asset_id
 		JOIN asset.attachments at ON at.id = cm.attachment_id
 		WHERE j.id = $1::uuid AND j.job_type = 'transcription' AND j.source_id = $2::uuid
 	`, jobID, mediaID).Scan(&organizationID, &conversationID, &containerID, &attachmentID, &objectKey, &filename, &mediaType, &language, &createdBy, &status, &bodyRevision)
@@ -94,21 +96,27 @@ func (p Processor) Process(ctx context.Context, jobID, mediaID string) error {
 		return fmt.Errorf("lock transcription media: %w", err)
 	}
 	if revisionID == "" {
-		var blockID, checksum, currentVersion, newVersion string
-		var versionNo, sequence int64
+		var blockID string
+		var sequence int64
+		var treeRevision int64
 		if err := tx.QueryRow(jobCtx, `
-			SELECT cv.id::text, cv.version_no
-			FROM content.containers c
-			JOIN content.container_versions cv ON cv.id = c.current_version_id
-			WHERE c.organization_id = $1::uuid AND c.id = $2::uuid
-			FOR UPDATE OF c, cv
-		`, organizationID, containerID).Scan(&currentVersion, &versionNo); err != nil {
-			return fmt.Errorf("load transcription container version: %w", err)
+			SELECT id::text, revision FROM content.containers
+			WHERE organization_id = $1::uuid AND id = $2::uuid
+			FOR UPDATE
+		`, organizationID, containerID).Scan(&containerID, &treeRevision); err != nil {
+			return fmt.Errorf("lock transcription container: %w", err)
 		}
 		if err := tx.QueryRow(jobCtx, `SELECT COALESCE(MAX(sequence_no), 0) + 1 FROM content.message_blocks WHERE conversation_id = $1::uuid`, conversationID).Scan(&sequence); err != nil {
 			return fmt.Errorf("allocate transcription sequence: %w", err)
 		}
-		checksum = checksumText(result.Text)
+		var nextPosition float64
+		if err := tx.QueryRow(jobCtx, `
+			SELECT COALESCE(MAX(position) + 1, 0) FROM content.block_placements
+			WHERE organization_id = $1::uuid AND container_id = $2::uuid
+		`, organizationID, containerID).Scan(&nextPosition); err != nil {
+			return fmt.Errorf("allocate transcription position: %w", err)
+		}
+		checksum := checksumText(result.Text)
 		if err := tx.QueryRow(jobCtx, `INSERT INTO content.blocks (organization_id, block_type, created_by) VALUES ($1::uuid, 'paragraph', $2::uuid) RETURNING id::text`, organizationID, createdBy).Scan(&blockID); err != nil {
 			return fmt.Errorf("create transcription block: %w", err)
 		}
@@ -119,33 +127,13 @@ func (p Processor) Process(ctx context.Context, jobID, mediaID string) error {
 		`, organizationID, blockID, result.Text, result.Language, createdBy, checksum).Scan(&revisionID); err != nil {
 			return fmt.Errorf("create transcription revision: %w", err)
 		}
-		versionChecksum := checksumText(currentVersion + "\n" + result.Text)
-		if err := tx.QueryRow(jobCtx, `
-			INSERT INTO content.container_versions (organization_id, container_id, version_no, created_by, content_checksum)
-			VALUES ($1::uuid, $2::uuid, $3, $4::uuid, $5) RETURNING id::text
-		`, organizationID, containerID, versionNo+1, createdBy, versionChecksum).Scan(&newVersion); err != nil {
-			return fmt.Errorf("create transcription container version: %w", err)
-		}
 		if _, err := tx.Exec(jobCtx, `
-			WITH mapping AS MATERIALIZED (
-				SELECT id AS old_id, gen_random_uuid() AS new_id, block_revision_id, parent_placement_id, position, role_in_parent
-				FROM content.block_placements
-				WHERE organization_id = $1::uuid AND container_version_id = $3::uuid
-			)
-			INSERT INTO content.block_placements
-				(id, organization_id, container_version_id, block_revision_id, parent_placement_id, position, role_in_parent)
-			SELECT m.new_id, $1::uuid, $2::uuid, m.block_revision_id, parent.new_id, m.position, m.role_in_parent
-			FROM mapping m LEFT JOIN mapping parent ON parent.old_id = m.parent_placement_id
-		`, organizationID, newVersion, currentVersion); err != nil {
-			return fmt.Errorf("copy transcription placements: %w", err)
-		}
-		if _, err := tx.Exec(jobCtx, `
-			INSERT INTO content.block_placements (organization_id, container_version_id, block_revision_id, position)
+			INSERT INTO content.block_placements (organization_id, container_id, block_revision_id, position)
 			VALUES ($1::uuid, $2::uuid, $3::uuid, $4)
-		`, organizationID, newVersion, revisionID, sequence-1); err != nil {
+		`, organizationID, containerID, revisionID, nextPosition); err != nil {
 			return fmt.Errorf("place transcription block: %w", err)
 		}
-		if _, err := tx.Exec(jobCtx, `UPDATE content.containers SET current_version_id = $2::uuid, updated_at = now() WHERE id = $1::uuid`, containerID, newVersion); err != nil {
+		if _, err := tx.Exec(jobCtx, `UPDATE content.containers SET revision = revision + 1, updated_at = now() WHERE id = $1::uuid`, containerID); err != nil {
 			return fmt.Errorf("advance transcription container: %w", err)
 		}
 		if _, err := tx.Exec(jobCtx, `

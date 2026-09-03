@@ -73,6 +73,8 @@ func ServiceError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusConflict, "attachments_not_clean")
 	case errors.Is(err, asset.ErrRequiredFieldMissing):
 		writeError(w, http.StatusConflict, "required_field_missing")
+	case errors.Is(err, asset.ErrNoteBlocksManaged):
+		writeError(w, http.StatusUnprocessableEntity, "note_blocks_managed")
 	case errors.Is(err, asset.ErrTagArchived):
 		writeError(w, http.StatusConflict, "tag_archived")
 	case errors.Is(err, asset.ErrTooManyTags):

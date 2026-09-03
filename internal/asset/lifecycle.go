@@ -23,7 +23,8 @@ var (
 	ErrConflict      = errors.New("asset state conflict")
 	ErrInvalidInput  = errors.New("invalid asset input")
 	ErrForbidden     = errors.New("asset action forbidden")
-	ErrAssetArchived = errors.New("asset is archived")
+	ErrAssetArchived      = errors.New("asset is archived")
+	ErrNoteBlocksManaged = errors.New("note content is managed as blocks")
 	ErrDraftDirty    = errors.New("asset draft revision mismatch")
 )
 
