@@ -61,16 +61,17 @@ type Run struct {
 }
 
 type Interaction struct {
-	ID          string
-	RunID       string
-	Type        string
-	Status      string
-	Prompt      string
-	Metadata    map[string]any
-	Response    map[string]any
-	RequestedAt time.Time
-	RespondedAt *time.Time
-	RespondedBy string
+	ID              string
+	RunID           string
+	Type            string
+	Status          string // open | resolved | expired
+	InterruptID     string
+	RequestPayload  map[string]any
+	DisplayPayload  map[string]any
+	ResumeSchema    map[string]any
+	ResponsePayload map[string]any
+	CreatedAt       time.Time
+	ResolvedAt      *time.Time
 }
 
 type Coordinator struct {
@@ -185,7 +186,7 @@ func (c Coordinator) RequestCancel(ctx context.Context, organizationID, runID, r
 }
 
 func (c Coordinator) WaitForInteraction(ctx context.Context, organizationID, runID, interactionType, prompt string, metadata map[string]any, idempotencyKey string) (Interaction, error) {
-	if c.Store == nil || c.Store.Pool == nil || !validID(organizationID) || !validID(runID) || (interactionType != "input" && interactionType != "approval") || strings.TrimSpace(prompt) == "" {
+	if c.Store == nil || c.Store.Pool == nil || !validID(organizationID) || !validID(runID) || (interactionType != "input" && interactionType != "approval") || strings.TrimSpace(prompt) == "" || strings.TrimSpace(idempotencyKey) == "" {
 		return Interaction{}, ErrInvalidRunRequest
 	}
 	tx, err := c.Store.Pool.Begin(ctx)
@@ -194,15 +195,21 @@ func (c Coordinator) WaitForInteraction(ctx context.Context, organizationID, run
 	}
 	defer tx.Rollback(ctx)
 	var interaction Interaction
+	// The idempotency key doubles as the interrupt key: the phase0 table
+	// design carries a single uniqueness axis (run_id, interrupt_id).
 	err = tx.QueryRow(ctx, `
-		INSERT INTO automation.interactions (organization_id, run_id, interaction_type, prompt, metadata, idempotency_key)
-		VALUES ($1::uuid, $2::uuid, $3, $4, $5::jsonb, NULLIF($6, ''))
-		ON CONFLICT (run_id, idempotency_key) DO UPDATE SET id = automation.interactions.id
-		RETURNING id::text, run_id::text, interaction_type, status, prompt, metadata, response, requested_at, responded_at, COALESCE(responded_by::text, '')
-	`, organizationID, runID, interactionType, prompt, mustJSON(nonNilMap(metadata)), idempotencyKey).Scan(
-		&interaction.ID, &interaction.RunID, &interaction.Type, &interaction.Status, &interaction.Prompt,
-		&metadataJSON{target: &interaction.Metadata}, &metadataJSON{target: &interaction.Response}, &interaction.RequestedAt,
-		&interaction.RespondedAt, &interaction.RespondedBy,
+		INSERT INTO automation.interactions
+			(organization_id, run_id, interaction_type, interrupt_id, status, request_payload)
+		VALUES ($1::uuid, $2::uuid, $3, $4, 'open', $5::jsonb)
+		ON CONFLICT (run_id, interrupt_id) WHERE interrupt_id IS NOT NULL
+		DO UPDATE SET interrupt_id = EXCLUDED.interrupt_id
+		RETURNING id::text, run_id::text, interaction_type, status,
+		          request_payload, display_payload, resume_schema, response_payload, created_at, resolved_at
+	`, organizationID, runID, interactionType, idempotencyKey, mustJSON(map[string]any{"prompt": prompt, "metadata": nonNilMap(metadata)})).Scan(
+		&interaction.ID, &interaction.RunID, &interaction.Type, &interaction.Status,
+		&metadataJSON{target: &interaction.RequestPayload}, &metadataJSON{target: &interaction.DisplayPayload},
+		&metadataJSON{target: &interaction.ResumeSchema}, &metadataJSON{target: &interaction.ResponsePayload},
+		&interaction.CreatedAt, &interaction.ResolvedAt,
 	)
 	if err != nil {
 		return Interaction{}, fmt.Errorf("create run interaction: %w", err)
@@ -246,29 +253,27 @@ func (c Coordinator) SuspendForInteraction(ctx context.Context, attemptID, worke
 		return Interaction{}, ErrInteractionState
 	}
 	var interaction Interaction
-	metadata := map[string]any{
-		"interrupt_id": interruptID, "display_payload": nonNilMap(displayPayload), "resume_schema": nonNilMap(resumeSchema),
-	}
 	err = tx.QueryRow(ctx, `
 		INSERT INTO automation.interactions
-			(organization_id, run_id, interaction_type, interrupt_id, prompt, metadata, display_payload, resume_schema, idempotency_key)
-		VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6::jsonb, $7::jsonb, $8::jsonb, $4)
+			(organization_id, run_id, interaction_type, interrupt_id, status, request_payload, display_payload, resume_schema)
+		VALUES ($1::uuid, $2::uuid, $3, $4, 'open', $5::jsonb, $6::jsonb, $7::jsonb)
 		ON CONFLICT (run_id, interrupt_id) WHERE interrupt_id IS NOT NULL
 		DO UPDATE SET interrupt_id = EXCLUDED.interrupt_id
-		RETURNING id::text, run_id::text, interaction_type, status, prompt, metadata, response,
-		          requested_at, responded_at, COALESCE(responded_by::text, '')
-	`, organizationID, runID, interactionType, interruptID, prompt, mustJSON(metadata),
+		RETURNING id::text, run_id::text, interaction_type, status,
+		          request_payload, display_payload, resume_schema, response_payload, created_at, resolved_at
+	`, organizationID, runID, interactionType, interruptID, mustJSON(map[string]any{"prompt": prompt}),
 		mustJSON(nonNilMap(displayPayload)), mustJSON(nonNilMap(resumeSchema))).Scan(
-		&interaction.ID, &interaction.RunID, &interaction.Type, &interaction.Status, &interaction.Prompt,
-		&metadataJSON{target: &interaction.Metadata}, &metadataJSON{target: &interaction.Response},
-		&interaction.RequestedAt, &interaction.RespondedAt, &interaction.RespondedBy,
+		&interaction.ID, &interaction.RunID, &interaction.Type, &interaction.Status,
+		&metadataJSON{target: &interaction.RequestPayload}, &metadataJSON{target: &interaction.DisplayPayload},
+		&metadataJSON{target: &interaction.ResumeSchema}, &metadataJSON{target: &interaction.ResponsePayload},
+		&interaction.CreatedAt, &interaction.ResolvedAt,
 	)
 	if err != nil {
 		return Interaction{}, fmt.Errorf("persist Eino interaction: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE automation.attempts
-		SET status = 'waiting', lease_expires_at = NULL, completed_at = now(), updated_at = now()
+		SET status = 'succeeded', lease_expires_at = NULL, completed_at = now(), updated_at = now()
 		WHERE id = $1::uuid AND status = 'started' AND claimed_by = $2
 	`, attemptID, workerID); err != nil {
 		return Interaction{}, err
@@ -302,6 +307,11 @@ func (c Coordinator) ResolveInteraction(ctx context.Context, organizationID, run
 	if c.Store == nil || c.Store.Pool == nil || !validID(organizationID) || !validID(runID) || !validID(interactionID) || !validID(responderID) || (status != "approved" && status != "rejected") {
 		return Run{}, ErrInvalidRunRequest
 	}
+	// The approved/rejected decision rides inside response_payload: the
+	// phase0 table vocabulary only carries open | resolved | expired.
+	decision := nonNilMap(response)
+	decision["approved"] = status == "approved"
+	decision["responder_id"] = responderID
 	tx, err := c.Store.Pool.Begin(ctx)
 	if err != nil {
 		return Run{}, err
@@ -309,15 +319,15 @@ func (c Coordinator) ResolveInteraction(ctx context.Context, organizationID, run
 	defer tx.Rollback(ctx)
 	if err := tx.QueryRow(ctx, `
 		UPDATE automation.interactions i
-		SET status = $4, response = $5::jsonb, responded_at = now(), responded_by = $3::uuid
+		SET status = 'resolved', response_payload = $3::jsonb, resolved_at = now()
 		FROM automation.runs r
-		WHERE i.organization_id = $1::uuid AND i.run_id = $2::uuid AND i.id = $6::uuid
-		  AND i.status = 'pending' AND r.id = i.run_id
+		WHERE i.organization_id = $1::uuid AND i.run_id = $2::uuid AND i.id = $4::uuid
+		  AND i.status = 'open' AND r.id = i.run_id
 		  AND r.organization_id = i.organization_id
 		  AND r.status IN ('waiting_input', 'waiting_approval')
 		  AND r.waiting_interaction_id = i.id
 		RETURNING i.run_id::text
-	`, organizationID, runID, responderID, status, mustJSON(nonNilMap(response)), interactionID).Scan(&runID); errors.Is(err, pgx.ErrNoRows) {
+	`, organizationID, runID, mustJSON(decision), interactionID).Scan(&runID); errors.Is(err, pgx.ErrNoRows) {
 		return Run{}, ErrInteractionState
 	} else if err != nil {
 		return Run{}, err

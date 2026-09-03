@@ -378,19 +378,17 @@ Eino checkpoint 保存引擎恢复所需状态，包括消息、Tool Call、Grap
 按锁定 Eino 版本的 CheckPointStore 接口实现 PostgreSQL adapter：
 
 ```text
-automation.checkpoints
+automation.checkpoints（0021 恢复版，与 internal/agentruntime/checkpoint 实现一致）
   id uuid primary key
+  organization_id uuid not null
   run_id uuid not null
-  checkpoint_id text not null
   sequence bigint not null
-  runtime_mode text not null
-  workflow_key text
-  code_version text not null
-  payload bytea not null
+  checkpoint_key text not null
+  payload_ciphertext bytea not null（加密）
   payload_checksum text not null
-  payload_format_version integer not null
+  graph_code_version bigint
   created_at timestamptz not null
-  unique(run_id, checkpoint_id, sequence)
+  unique(run_id, sequence)
 ```
 
 `payload` 用 `bytea` 保存 Eino 序列化结果，不假设它是 JSON。payload 使用 `AGENT_CHECKPOINT_ENCRYPTION_KEY` 做应用层 AEAD 加密，并设置保留期限。CheckPointStore 写入 checkpoint 时同步更新 `automation.runs.checkpoint_sequence`，保证业务索引不会指向不存在的 sequence。
@@ -587,17 +585,19 @@ automation.attempts.status:
 ### 11.6 Interaction
 
 ```text
-automation.interactions
+automation.interactions（phase0 重设计后的现行形状）
   id
+  organization_id
   run_id
-  interrupt_id
-  kind = input | approval | review
+  interaction_type = input | approval
+  status = open | resolved | expired
+  request_payload jsonb（含 prompt 与附加元数据）
+  response_payload jsonb（resolved 后含 approved 布尔决定与 responder_id）
+  interrupt_id text（run 内唯一）
   display_payload jsonb
   resume_schema jsonb
-  status = waiting | accepted | rejected | expired
-  expires_at
-  resolved_by
-  resolved_at
+  resume_consumed_at（恢复消费后置位）
+  created_at / resolved_at
 ```
 
 ### 11.7 事件与 Tool 审计
@@ -606,9 +606,9 @@ automation.interactions
 automation.run_events
   id, run_id, sequence, event_type, payload, created_at
 
-integration.agent_tool_calls
-  id, run_id, session_id, tool_call_id, tool_name,
-  arguments_summary, result_summary, status, duration_ms, created_at
+integration.agent_run_tools
+  id, organization_id, run_id, session_id, tool_call_id, tool_name,
+  arguments_summary, result_summary, status, created_at
 ```
 
 事件 payload 不包含 API Key、完整敏感字段、隐藏思维链或其他租户内容。

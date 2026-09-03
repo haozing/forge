@@ -183,7 +183,7 @@ func TestPersistentReActCrossProcessApprovalIntegration(t *testing.T) {
 	var interactionID, interruptID, interactionType string
 	if err := db.Pool.QueryRow(ctx, `
 		SELECT id::text, interrupt_id, interaction_type FROM automation.interactions
-		WHERE run_id = $1::uuid AND status = 'pending'
+		WHERE run_id = $1::uuid AND status = 'open'
 	`, run.ID).Scan(&interactionID, &interruptID, &interactionType); err != nil {
 		t.Fatalf("load ReAct interaction: %v", err)
 	}
@@ -217,7 +217,7 @@ func TestPersistentReActCrossProcessApprovalIntegration(t *testing.T) {
 	if err := db.Pool.QueryRow(ctx, `SELECT output_snapshot FROM automation.runs WHERE id = $1::uuid`, run.ID).Scan(&output); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Pool.QueryRow(ctx, `SELECT status FROM integration.agent_tool_calls WHERE run_id = $1::uuid AND tool_call_id = 'call-publish-1'`, run.ID).Scan(&toolStatus); err != nil {
+	if err := db.Pool.QueryRow(ctx, `SELECT status FROM integration.agent_run_tools WHERE run_id = $1::uuid AND tool_call_id = 'call-publish-1'`, run.ID).Scan(&toolStatus); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Pool.QueryRow(ctx, `SELECT count(*) FROM automation.checkpoints WHERE run_id = $1::uuid`, run.ID).Scan(&checkpointCount); err != nil {

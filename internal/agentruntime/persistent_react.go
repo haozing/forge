@@ -72,7 +72,7 @@ func (s PersistentReActService) Process(ctx context.Context, claimed automation.
 		result, err = executor.Execute(ctx, request, emit)
 	} else {
 		decision := runtimetools.ApprovalDecision{
-			Approved: run.Resume.Status == "approved", Reason: stringValue(run.Resume.Response["reason"]),
+			Approved: run.Resume.Approved, Reason: stringValue(run.Resume.Response["reason"]),
 		}
 		result, err = executor.ResumeApproval(ctx, request, run.Resume.InterruptID, decision, emit)
 	}
@@ -138,7 +138,7 @@ type persistentRun struct {
 type persistentResume struct {
 	ID          string
 	InterruptID string
-	Status      string
+	Approved    bool
 	Response    map[string]any
 }
 
@@ -178,11 +178,11 @@ func (s PersistentReActService) loadRun(ctx context.Context, runID string) (pers
 	var resume persistentResume
 	var response []byte
 	err = s.Store.Pool.QueryRow(ctx, `
-		SELECT id::text, interrupt_id, status, COALESCE(response_payload, '{}'::jsonb)
+		SELECT id::text, interrupt_id, COALESCE((response_payload->>'approved')::boolean, false), COALESCE(response_payload, '{}'::jsonb)
 		FROM automation.interactions
-		WHERE run_id = $1::uuid AND status IN ('approved', 'rejected') AND resume_consumed_at IS NULL
+		WHERE run_id = $1::uuid AND status = 'resolved' AND resume_consumed_at IS NULL
 		ORDER BY resolved_at DESC NULLS LAST LIMIT 1
-	`, runID).Scan(&resume.ID, &resume.InterruptID, &resume.Status, &response)
+	`, runID).Scan(&resume.ID, &resume.InterruptID, &resume.Approved, &response)
 	if err == nil {
 		resume.Response = map[string]any{}
 		_ = json.Unmarshal(response, &resume.Response)
