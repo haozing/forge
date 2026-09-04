@@ -22,6 +22,7 @@ var (
 	ErrNotFound      = errors.New("conversation not found")
 	ErrInvalidCursor = errors.New("invalid conversation cursor")
 	ErrInvalidID     = errors.New("invalid conversation id")
+	ErrInvalidStatus = errors.New("invalid conversation status filter")
 )
 
 type Service struct {
@@ -59,8 +60,8 @@ func (s Service) NoteView(ctx context.Context, principal auth.Principal, id stri
 func (s Service) NoteBlocks(ctx context.Context, principal auth.Principal, id string) ([]contentservice.NoteBlockEntry, int64, error) {
 	return s.contentService().NoteBlocks(ctx, principal, id)
 }
-func (s Service) AddNoteBlock(ctx context.Context, principal auth.Principal, key, id, kind, blockContent string) (contentservice.NoteBlockEntry, error) {
-	return s.contentService().AddNoteBlock(ctx, principal, key, id, kind, blockContent)
+func (s Service) AddNoteBlock(ctx context.Context, principal auth.Principal, key, id, kind, blockContent, fromBlockRevisionID string) (contentservice.NoteBlockEntry, error) {
+	return s.contentService().AddNoteBlock(ctx, principal, key, id, kind, blockContent, fromBlockRevisionID)
 }
 func (s Service) UpdateNoteBlock(ctx context.Context, principal auth.Principal, key, id, blockID, blockContent string) (contentservice.NoteBlockEntry, error) {
 	return s.contentService().UpdateNoteBlock(ctx, principal, key, id, blockID, blockContent)
@@ -94,14 +95,90 @@ type Summary struct {
 	Source               string    `json:"source"`
 	Visibility           string    `json:"visibility"`
 	Status               string    `json:"status"`
+	CardStatus           string    `json:"card_status"`
+	CardStatusDetail     string    `json:"card_status_detail,omitempty"`
+	HasNewChanges        bool      `json:"has_new_changes"`
 	ContainerID          string    `json:"container_id"`
 	NoteAssetID          string    `json:"note_asset_id"`
+	NoteFirstLine        string    `json:"note_first_line"`
 	ParentConversationID string    `json:"parent_conversation_id"`
 	OriginDerivationID   string    `json:"origin_derivation_id"`
 	LastMessagePreview   string    `json:"last_message_preview"`
 	MessageCount         int64     `json:"message_count"`
 	UpdatedAt            time.Time `json:"updated_at"`
 }
+
+// Card status values (product §5.1). The list derives them per row from the
+// note asset's publication state — the derivation order matters: a pending
+// review wins over everything, a rejection wins over the published state,
+// and a published card whose note moved on becomes pending_update.
+const (
+	CardOrganizing   = "organizing"   // 整理中：从未送审
+	CardReviewing    = "reviewing"    // 审核中：有送审在途
+	CardRejected     = "rejected"     // 未通过：最近一次送审被驳回
+	CardPublished    = "published"    // 已入库：笔记与知识库文档一致
+	CardPendingUpdate = "pending_update" // 待入库：已入库后笔记有新变化
+)
+
+func validCardStatus(value string) bool {
+	switch value {
+	case CardOrganizing, CardReviewing, CardRejected, CardPublished, CardPendingUpdate:
+		return true
+	}
+	return false
+}
+
+// noteStatusLateral computes every card-status input in one lateral join:
+// publication state, the latest finished review, dirty flags and the note's
+// first line.
+const noteStatusLateral = `
+	LEFT JOIN LATERAL (
+		SELECT nb.note_asset_id::text AS note_asset_id,
+		       cc.id::text AS container_id,
+		       (a.current_published_version_id IS NOT NULL) AS published,
+		       a.current_working_version_id::text AS working_version,
+		       a.current_published_version_id::text AS published_version,
+		       (a.current_working_version_id::text IS DISTINCT FROM a.current_published_version_id::text) AS working_moved,
+		       (COALESCE(d.revision, 0) <> COALESCE(d.committed_revision, 0)) AS dirty,
+		       EXISTS (SELECT 1 FROM asset.publication_requests pr
+		               WHERE pr.organization_id = nb.organization_id
+		                 AND pr.asset_id = nb.note_asset_id AND pr.status = 'pending') AS pending_review,
+		       (SELECT pr.asset_version_id::text
+		        FROM asset.publication_requests pr
+		        WHERE pr.organization_id = nb.organization_id AND pr.asset_id = nb.note_asset_id
+		          AND pr.status = 'pending'
+		        ORDER BY pr.submitted_at DESC LIMIT 1) AS submitted_version,
+		       (SELECT pr.decision_comment
+		        FROM asset.publication_requests pr
+		        WHERE pr.organization_id = nb.organization_id AND pr.asset_id = nb.note_asset_id
+		          AND pr.status IN ('approved', 'rejected')
+		        ORDER BY pr.submitted_at DESC LIMIT 1) AS last_comment,
+		       (SELECT pr.status
+		        FROM asset.publication_requests pr
+		        WHERE pr.organization_id = nb.organization_id AND pr.asset_id = nb.note_asset_id
+		          AND pr.status IN ('approved', 'rejected')
+		        ORDER BY pr.submitted_at DESC LIMIT 1) AS last_decision,
+		       (SELECT left(br.content, 200)
+		        FROM content.containers cc2
+		        JOIN content.block_placements bp ON bp.organization_id = cc2.organization_id AND bp.container_id = cc2.id
+		        JOIN content.block_revisions br ON br.organization_id = bp.organization_id AND br.id = bp.block_revision_id
+		        WHERE cc2.organization_id = nb.organization_id AND cc2.asset_id = nb.note_asset_id
+		        ORDER BY bp.position LIMIT 1) AS note_first_line
+		FROM content.note_bindings nb
+		JOIN asset.assets a ON a.organization_id = nb.organization_id AND a.id = nb.note_asset_id
+		LEFT JOIN asset.asset_drafts d ON d.organization_id = nb.organization_id AND d.asset_id = nb.note_asset_id
+		JOIN content.containers cc ON cc.organization_id = nb.organization_id AND cc.asset_id = nb.note_asset_id
+		WHERE nb.conversation_id = c.id
+	) note ON true`
+
+// cardStatusCASE derives the five-state badge from the lateral inputs.
+const cardStatusCASE = `CASE
+		WHEN note.pending_review THEN '%s'
+		WHEN note.last_decision = 'rejected' THEN '%s'
+		WHEN note.published AND (note.working_moved OR note.dirty) THEN '%s'
+		WHEN note.published THEN '%s'
+		ELSE '%s'
+	END`
 
 func (s Service) require(ctx context.Context, principal auth.Principal, workspaceID string) error {
 	if principal.UserType != "member" || s.Store == nil || s.Store.Pool == nil || s.Policy == nil {
@@ -115,40 +192,52 @@ func (s Service) require(ctx context.Context, principal auth.Principal, workspac
 }
 
 func (s Service) List(ctx context.Context, principal auth.Principal, workspaceID, query string, limit int) ([]Summary, error) {
-	items, _, _, err := s.ListPage(ctx, principal, workspaceID, query, limit, "")
+	items, _, _, err := s.ListPage(ctx, principal, workspaceID, query, limit, "", "")
 	return items, err
 }
 
-func (s Service) ListPage(ctx context.Context, principal auth.Principal, workspaceID, query string, limit int, cursor string) ([]Summary, bool, string, error) {
+// ListPage serves the "我的灵感" card list: only the member's own cards
+// (product: 灵感卡仅自己), each carrying the five-state badge, the note's
+// first line and a new-changes flag for cards under review. status filters
+// by badge (organizing/reviewing/rejected/published/pending_update).
+func (s Service) ListPage(ctx context.Context, principal auth.Principal, workspaceID, query string, limit int, cursor, status string) ([]Summary, bool, string, error) {
 	if err := s.require(ctx, principal, workspaceID); err != nil {
 		return nil, false, "", err
 	}
 	if limit <= 0 || limit > 100 {
 		limit = 50
 	}
+	if status != "" && !validCardStatus(status) {
+		return nil, false, "", ErrInvalidStatus
+	}
 	query = strings.TrimSpace(query)
 	cursorTime, cursorID, err := decodeConversationCursor(cursor)
 	if err != nil {
 		return nil, false, "", err
 	}
+	cardStatus := fmt.Sprintf(cardStatusCASE, CardReviewing, CardRejected, CardPendingUpdate, CardPublished, CardOrganizing)
 	rows, err := s.Store.Pool.Query(ctx, `
 		SELECT c.id::text, c.workspace_id::text, c.title, c.source, c.visibility, c.status,
-		       COALESCE(cc.id::text, ''), COALESCE(nb.note_asset_id::text, ''),
+		       `+cardStatus+`,
+		       COALESCE(note.last_comment, ''), COALESCE(note.note_first_line, ''),
+		       (note.pending_review AND (note.working_version IS DISTINCT FROM note.submitted_version OR note.dirty)),
+		       COALESCE(note.container_id, ''), COALESCE(note.note_asset_id, ''),
 		       COALESCE(c.parent_conversation_id::text, ''), COALESCE(c.origin_derivation_id::text, ''),
 		       COALESCE(last_message.content, ''), COALESCE(message_counts.message_count, 0), c.updated_at
 		FROM content.conversations c
-		LEFT JOIN content.note_bindings nb ON nb.conversation_id = c.id
-		LEFT JOIN content.containers cc ON cc.organization_id = nb.organization_id AND cc.asset_id = nb.note_asset_id
+		`+noteStatusLateral+`
 		LEFT JOIN LATERAL (SELECT br.content FROM content.message_blocks mb JOIN content.block_revisions br ON br.id = mb.block_revision_id WHERE mb.conversation_id = c.id ORDER BY mb.sequence_no DESC LIMIT 1) last_message ON true
 		LEFT JOIN LATERAL (SELECT count(*) AS message_count FROM content.message_blocks mb WHERE mb.conversation_id = c.id) message_counts ON true
 		WHERE c.organization_id = $1::uuid AND c.workspace_id = $2::uuid AND c.status <> 'archived'
+		  AND c.initiator_user_id = $3::uuid
 		  AND EXISTS (SELECT 1 FROM content.workspace_members wm
 		              WHERE wm.organization_id = c.organization_id AND wm.workspace_id = c.workspace_id
 		                AND wm.user_id = $3::uuid)
-		  AND ($4 = '' OR c.title ILIKE '%' || $4 || '%' OR last_message.content ILIKE '%' || $4 || '%')
-		  AND ($5 = '' OR c.updated_at < NULLIF($5, '')::timestamptz OR (c.updated_at = NULLIF($5, '')::timestamptz AND c.id > NULLIF($6, '')::uuid))
-		ORDER BY c.updated_at DESC, c.id LIMIT $7
-	`, principal.OrganizationID, workspaceID, principal.UserID, query, cursorTime, cursorID, limit+1)
+		  AND ($4 = '' OR `+cardStatus+` = $4)
+		  AND ($5 = '' OR c.title ILIKE '%' || $5 || '%' OR last_message.content ILIKE '%' || $5 || '%' OR note.note_first_line ILIKE '%' || $5 || '%')
+		  AND ($6 = '' OR c.updated_at < NULLIF($6, '')::timestamptz OR (c.updated_at = NULLIF($6, '')::timestamptz AND c.id > NULLIF($7, '')::uuid))
+		ORDER BY c.updated_at DESC, c.id LIMIT $8
+	`, principal.OrganizationID, workspaceID, principal.UserID, status, query, cursorTime, cursorID, limit+1)
 	if err != nil {
 		return nil, false, "", fmt.Errorf("list conversations: %w", err)
 	}
@@ -156,7 +245,11 @@ func (s Service) ListPage(ctx context.Context, principal auth.Principal, workspa
 	items := make([]Summary, 0, limit+1)
 	for rows.Next() {
 		var item Summary
-		if err := rows.Scan(&item.ConversationID, &item.WorkspaceID, &item.Title, &item.Source, &item.Visibility, &item.Status, &item.ContainerID, &item.NoteAssetID, &item.ParentConversationID, &item.OriginDerivationID, &item.LastMessagePreview, &item.MessageCount, &item.UpdatedAt); err != nil {
+		if err := rows.Scan(&item.ConversationID, &item.WorkspaceID, &item.Title, &item.Source, &item.Visibility, &item.Status,
+			&item.CardStatus, &item.CardStatusDetail, &item.NoteFirstLine, &item.HasNewChanges,
+			&item.ContainerID, &item.NoteAssetID,
+			&item.ParentConversationID, &item.OriginDerivationID,
+			&item.LastMessagePreview, &item.MessageCount, &item.UpdatedAt); err != nil {
 			return nil, false, "", fmt.Errorf("scan conversation summary: %w", err)
 		}
 		items = append(items, item)
@@ -221,8 +314,35 @@ func (s Service) ListChildren(ctx context.Context, principal auth.Principal, con
 	return items, nil
 }
 
-func validID(value string) bool {
-	value = strings.TrimSpace(value)
+// SourceConversation resolves the inspiration card a note asset came from —
+// the knowledge-base detail page's "来自灵感卡" backlink. The link is
+// author-private: only the card's initiator can resolve it, and it dies with
+// the binding when the card is deleted.
+func (s Service) SourceConversation(ctx context.Context, principal auth.Principal, assetID string) (string, error) {
+	if principal.UserType != "member" || !validID(principal.OrganizationID) || !validID(principal.UserID) || !validID(assetID) {
+		return "", ErrInvalidID
+	}
+	if s.Store == nil || s.Store.Pool == nil {
+		return "", ErrForbidden
+	}
+	var conversationID string
+	err := s.Store.Pool.QueryRow(ctx, `
+		SELECT nb.conversation_id::text
+		FROM content.note_bindings nb
+		JOIN content.conversations c ON c.organization_id = nb.organization_id AND c.id = nb.conversation_id
+		WHERE nb.organization_id = $1::uuid AND nb.note_asset_id = $2::uuid
+		  AND c.initiator_user_id = $3::uuid AND c.status <> 'archived'
+	`, principal.OrganizationID, assetID, principal.UserID).Scan(&conversationID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("resolve source conversation: %w", err)
+	}
+	return conversationID, nil
+}
+
+func validID(value string) bool {	value = strings.TrimSpace(value)
 	if len(value) != 36 {
 		return false
 	}

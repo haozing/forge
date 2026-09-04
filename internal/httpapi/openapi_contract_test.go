@@ -167,6 +167,7 @@ var routerTruth = map[string][]string{
 	"/api/assets/{assetId}/duplicate":                                         {"post"},
 	"/api/assets/{assetId}/lineage":                                           {"get"},
 	"/api/assets/{assetId}/relations":                                         {"get"},
+	"/api/assets/{assetId}/source-conversation":                               {"get"},
 	"/api/assets/{assetId}/versions":                                          {"get"},
 	"/api/attachments/{attachmentId}":                                         {"get", "patch", "delete"},
 	"/api/attachments/{attachmentId}/download":                                {"get"},

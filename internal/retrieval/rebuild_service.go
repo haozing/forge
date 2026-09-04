@@ -253,12 +253,12 @@ func ProcessBackfillPage(ctx context.Context, st *store.Store, queue QueueInsert
 		  AND a.publication_status = 'published'
 		  AND a.deleted_at IS NULL
 		  AND (
-		        COALESCE(mv.policy #>> '{retrieval,fulltext,enabled}','')::boolean
-		        OR COALESCE(mv.policy #>> '{retrieval,semantic,enabled}','')::boolean
+		        COALESCE((mv.policy #>> '{retrieval,fulltext,enabled}')::boolean, false)
+		        OR COALESCE((mv.policy #>> '{retrieval,semantic,enabled}')::boolean, false)
 		      )
 		  AND EXISTS (
 		        SELECT 1 FROM jsonb_object_keys(COALESCE(mv.policy->'channels','{}'::jsonb)) AS channel
-		        WHERE COALESCE(mv.policy #>> ARRAY['channels', channel, 'enabled'], 'false')::boolean
+		        WHERE COALESCE((mv.policy #>> ARRAY['channels', channel, 'enabled'])::boolean, false)
 		      )
 		  AND CASE $3
 		        WHEN 'workspace' THEN a.workspace_id::text = $4

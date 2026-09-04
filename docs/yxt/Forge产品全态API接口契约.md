@@ -529,7 +529,11 @@ Agent 应用：`{id,name,provider,status,capabilities,answer_posture,description
 
 创建：`{agent_application_id,title,source,visibility,container_id?}`。`source`：`chat_interface|document|asset|automation`；`visibility`：`private|workspace`。
 
-会话摘要：`{conversation_id,workspace_id,title,source,visibility,status,container_id,note_asset_id,parent_conversation_id,origin_derivation_id,last_message_preview,message_count,updated_at}`。状态：`active|archived|completed`。
+会话摘要（"我的灵感"卡片，列表仅返回当前成员自己发起的会话）：`{conversation_id,workspace_id,title,source,visibility,status,card_status,card_status_detail,has_new_changes,container_id,note_asset_id,note_first_line,parent_conversation_id,origin_derivation_id,last_message_preview,message_count,updated_at}`。会话状态：`active|archived|completed`；`card_status` 五态徽标（2026-09-04 对齐产品方案 §5.1）：`organizing`（整理中，从未送审）/`reviewing`（审核中，有 pending 送审）/`rejected`（未通过，`card_status_detail` 为驳回意见）/`published`（已入库且笔记无新变化）/`pending_update`（待入库，已入库后笔记有变化）；`has_new_changes` 为审核中"送审后又有改动"角标。列表支持 `?status=card_status` 筛选（非法值 422 `invalid_status`）与 `?q=`（标题/笔记首行/消息）。
+
+**笔记入库一律经管理员审核（无跳过路径，2026-09-04 起）**：builtin_note 为 approval 策略——直接 `POST /api/assets/{id}/publish` 返回 403 `action_not_allowed`；入库链路为 commit-draft → asset-versions confirm → `POST /api/workspaces/{ws}/publication-requests`（空笔记 422 拒绝）；批准（不可自批，409 `self_approval_not_allowed`）即上架并将资产可见性提升为 `organization`（知识库全员共享）；送审期间可继续编辑，批准上架的是送审时定格的版本；更新入库重复送审自动作废旧待审（cancel_reason=new_version）。
+
+**删除分叉**：`DELETE /api/conversations/{id}`（有派生子需 `?cascade_children=true`）——从未入库的笔记资产随卡归档；**已入库的文档保留**（响应含 `kept_document_asset_ids`），在途送审自动撤回（user_cancelled）；"来自灵感卡"回链 `GET /api/assets/{assetId}/source-conversation`（仅作者可解析，返回 `{conversation_id}`；卡删除后 404 `source_conversation_not_found`）。
 
 派生关系：`parent_conversation_id` 为来源思考 ID，`origin_derivation_id` 为产生本思考的派生记录 ID；根思考两者均为空字符串。会话列表、会话详情和 children 列表统一返回这两个字段，前端据此组装主干/派生树。
 
@@ -597,11 +601,11 @@ event: error\ndata: {"code":"upstream_unavailable","request_id":"..."}\n\n
 - `GET /api/frontend/conversations/{conversationId}/note`
 - `GET|POST /api/frontend/conversations/{conversationId}/note/blocks`、`PATCH|DELETE .../note/blocks/{blockId}`
 
-sync 无 body，生成/更新 note asset，返回 `{conversation_id,note_asset_id,asset_version_id,message_count,status}`；游标未推进（无新消息）时为幂等 no-op，`status=unchanged`、`asset_version_id` 为当前工作版本，不新建版本。
+**对话与笔记解耦（2026-09-04）**：会话消息只存聊天记录（`/messages`，只读、不可改不可删），永不进笔记、不弄脏笔记。笔记树初始为空，内容只有两个入口：手动块（`POST note/blocks` body `{kind, content}`，kind ∈ paragraph/heading/quote/code/list/callout）；"存入笔记"（同端点 body `{from_block_revision_id}`，可选 `kind: quote|paragraph` 缺省 quote——把会话某条消息的正文复制为摘录块，`content` 必须省略，溯源记 `block_revisions.props.source_block_revision_id/source_role`，摘录块此后独立可编辑）。AI 总结存笔记=普通一轮对话产出总结回复后由用户收录，无 Agent 直写通道。
 
 **笔记发布没有捷径端点**（`note/publish` 已作为治理旁路移除，2026-09-03）：笔记发布与其他资产同链路——`POST /api/assets/{note_asset_id}/asset-versions/{version_id}/confirm`（builtin_note 要求人工确认，confirm 派生 human_confirmed 子版本）后 `POST /api/assets/{note_asset_id}/publish`（body `{draft_revision}`，草稿乐观锁）。审核制模型则走 `POST /api/workspaces/{ws}/publication-requests`。
 
-GET note 返回（0019 块树模型）`{conversation_id,note_asset_id,container_id,asset_version_id,title,markdown,fields,revision,committed_revision,draft_markdown,dirty,publication_status,confirmation_status,message_count}`：`markdown` 为当前工作版本的冻结产物，`draft_markdown` 为活块树实时渲染（只读），`dirty` 表示活树较最近固化有变化，`revision` 即提交乐观锁 `draft_revision`。笔记编辑走 `GET/POST /api/frontend/conversations/{id}/note/blocks`、`PATCH/DELETE .../note/blocks/{blockId}`（消息块不可改不可删）；"保存"= `POST /api/assets/{note_asset_id}/commit-draft`。会话不存在或未绑定笔记 404 `conversation_or_note_not_found`。
+GET note 返回`{conversation_id,note_asset_id,container_id,asset_version_id,title,markdown,fields,revision,committed_revision,draft_markdown,dirty,publication_status,confirmation_status,message_count}`：`markdown` 为当前工作版本的冻结产物，`draft_markdown` 为活块树实时渲染（只读），`dirty` 表示活树较最近固化有变化，`revision` 即提交乐观锁 `draft_revision`。冻结产物=干净成文（仅手动块与收录摘录，无 `## User/## Assistant` 对话体）。笔记编辑走 `GET/POST /api/frontend/conversations/{id}/note/blocks`、`PATCH/DELETE .../note/blocks/{blockId}`；"保存"= `POST /api/assets/{note_asset_id}/commit-draft`。会话不存在或未绑定笔记 404 `conversation_or_note_not_found`。
 
 ### 12.2 派生内容
 
@@ -617,7 +621,7 @@ GET note 返回（0019 块树模型）`{conversation_id,note_asset_id,container_
 {"source_block_revision_ids":["uuid"],"context_policy":"summary_only","title":"镜头清单"}
 ```
 
-`context_policy`：`summary_only|selected_only|full`。派生对象：`{derivation_id,source_conversation_id,target_conversation_id,target_note_asset_id,operation,context_policy,status,created_at,completed_at}`。
+`context_policy`：`summary_only|selected_only|full`。派生对象：`{derivation_id,source_conversation_id,target_conversation_id,target_note_asset_id,operation,context_policy,status,created_at,completed_at}`。选块范围=源笔记树（手动块与收录摘录，`sources[].origin` 统一为 `note`）；注入产物=派生会话**笔记**的开场 quote 引用块（携带所选上下文），派生会话的对话从空白开始（2026-09-04 起，不再是注入 assistant 开场消息）。
 
 finalize：
 

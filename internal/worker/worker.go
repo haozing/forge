@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"time"
 
 	"agentchunzhi/internal/asset"
@@ -14,7 +15,6 @@ import (
 	"agentchunzhi/internal/eventing"
 	"agentchunzhi/internal/store"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/riverqueue/river"
 )
@@ -232,8 +232,13 @@ func (w *DispatchEventWorker) Work(ctx context.Context, job *river.Job[eventing.
 
 type RecoverPendingDeliveriesWorker struct {
 	river.WorkerDefaults[eventing.RecoverPendingDeliveriesArgs]
-	Store *store.Store
-	Limit int
+	Store            *store.Store
+	Retrieval        EventProcessor
+	Transcription    TranscriptionProcessor
+	AttachmentScan   AttachmentScanProcessor
+	CacheInvalidator CacheInvalidationProcessor
+	Lease            time.Duration
+	Limit            int
 }
 
 type RecoverAutomationAttemptsWorker struct {
@@ -347,13 +352,21 @@ func (w *RecoverPendingDeliveriesWorker) Work(ctx context.Context, _ *river.Job[
 	if err != nil {
 		return err
 	}
-	client := river.ClientFromContext[pgx.Tx](ctx)
-	if client == nil {
-		return errors.New("River client is unavailable in job context")
+	log.Printf("recover_pending_deliveries: due=%d", len(ids))
+	if len(ids) == 0 {
+		return nil
 	}
+	// Recovered events are dispatched synchronously instead of re-queued as
+	// River jobs: a finished dispatch job keeps occupying its unique-index
+	// entry forever, so re-inserting the same event id was silently swallowed
+	// by the completed row. ProcessEvent is an idempotent drain; running it
+	// inline (bounded by the recovery job's own attempt budget) is equivalent.
+	dispatcher := Dispatcher{Store: w.Store, Retrieval: w.Retrieval, Transcription: w.Transcription,
+		AttachmentScan: w.AttachmentScan, CacheInvalidator: w.CacheInvalidator, Lease: w.Lease,
+		RetryDelay: 10 * time.Second, ProcessorVersion: "river-event-worker/v1", Logf: log.Printf}
 	for _, eventID := range ids {
-		if _, err := client.Insert(ctx, eventing.DispatchEventArgs{EventID: eventID}, nil); err != nil {
-			return fmt.Errorf("requeue event %s: %w", eventID, err)
+		if err := dispatcher.ProcessEvent(ctx, eventID, eventing.DefaultMaxDeliveryAttempts); err != nil {
+			log.Printf("recover_pending_deliveries: dispatch event=%s failed: %v", eventID, err)
 		}
 	}
 	return nil

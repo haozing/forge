@@ -206,12 +206,12 @@ func TestPatternLifecycleIntegration(t *testing.T) {
 		[]PatternBlock{{Kind: "paragraph", Content: "v2"}}, ""); err != nil {
 		t.Fatalf("CreatePattern upsert: %v", err)
 	}
-	items, err := service.ListPatterns(context.Background(), principal, 10)
-	if err != nil || len(items) != 2 {
-		// Two patterns exist at this point: "IT 样板" (created below) and the
-		// snapshot created later in the test — order-free assertion.
-		t.Fatalf("ListPatterns: %v items=%d", err, len(items))
+	items, err := service.ListPatterns(context.Background(), principal, 20)
+	if err != nil {
+		t.Fatalf("ListPatterns: %v", err)
 	}
+	// The shared dev database carries patterns from other suites and from
+	// earlier runs of this test; only this run's own upsert is asserted.
 	found := false
 	for _, item := range items {
 		if item.Name == "IT 样板" && len(item.Blocks) == 1 {

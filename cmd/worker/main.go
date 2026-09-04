@@ -218,7 +218,7 @@ func main() {
 	}
 	workers := river.NewWorkers()
 	river.AddWorker(workers, &worker.DispatchEventWorker{Dispatcher: dispatcher})
-	river.AddWorker(workers, &worker.RecoverPendingDeliveriesWorker{Store: db, Limit: 100})
+	river.AddWorker(workers, &worker.RecoverPendingDeliveriesWorker{Store: db, Retrieval: coordinator, Transcription: transcription.Processor{Store: db, Objects: objects, Provider: asrProvider, Timeout: time.Duration(cfg.ASRTimeoutSeconds) * time.Second}, AttachmentScan: attachment.ScanProcessor{Store: db, Objects: objects, Scanner: attachmentScanner}, CacheInvalidator: delivery.NewInvalidator(db), Lease: 10 * time.Minute, Limit: 100})
 	river.AddWorker(workers, &worker.RecoverAutomationAttemptsWorker{Service: automation.Service{Store: db}, Limit: 100})
 	river.AddWorker(workers, &worker.ExpiredRowsWorker{Store: db, Logf: log.Printf})
 	river.AddWorker(workers, &worker.ScheduledPublicationWorker{Reviews: &reviewService})

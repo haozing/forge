@@ -15,15 +15,21 @@ import (
 var ErrHasChildren = fmt.Errorf("conversation has derived children")
 
 type DeleteResult struct {
-	ConversationID  string   `json:"conversation_id"`
+	ConversationID string `json:"conversation_id"`
 	DeletedChildren []string `json:"deleted_children"`
+	// KeptDocumentAssetIDs lists knowledge-base documents that outlived their
+	// card (published notes graduate to standalone assets on card delete).
+	KeptDocumentAssetIDs []string `json:"kept_document_asset_ids"`
 }
 
 // Delete removes a conversation. Thoughts are the process layer, so this is a
-// hard delete inside one transaction. The bound note assets soft-delete with
-// it (the conversation was their only entry point; harvest outputs live on as
-// separate assets); asset relation edges survive with the derivation pointer
-// nulled.
+// hard delete inside one transaction. The bound note asset forks by
+// publication state: never-published notes soft-delete with the card, while
+// notes that reached the knowledge base survive as standalone assets (the
+// card's transcript and live tree go, the published document and its version
+// history stay — the "来自灵感卡" backlink dies with the binding);
+// harvest outputs always live on as separate assets; asset relation edges
+// survive with the derivation pointer nulled.
 //
 // Deleting a thought with derived children is blocked (container-delete
 // precedent: not-empty refuses) unless cascade is requested, in which case the
@@ -184,11 +190,13 @@ func (s Service) Delete(ctx context.Context, principal auth.Principal, conversat
 			return DeleteResult{}, fmt.Errorf("lock note containers for delete: %w", err)
 		}
 	}
-	// Note assets bound to the subtree die with it: the conversation was their
-	// only entry point (harvest outputs survive as separate assets). Soft
-	// delete keeps version history auditable; pending publication requests of
-	// those assets are cancelled, and one asset.archived fact per asset fans
-	// out to the retrieval projection and site cache invalidation.
+	// Note assets fork by publication state (product decision 2026-09-04 #1):
+	// a never-published note dies with its card (soft delete, requests
+	// cancelled as asset_archived); a note that reached the knowledge base is
+	// KEPT — the conversation side (binding, transcript, live tree) goes, the
+	// published document graduates to a standalone asset with its version
+	// history intact. Any in-flight review of a kept asset is withdrawn
+	// (user_cancelled) first.
 	var noteAssets []struct {
 		id          string
 		revision    int64
@@ -224,28 +232,39 @@ func (s Service) Delete(ctx context.Context, principal auth.Principal, conversat
 	if _, err := tx.Exec(ctx, `DELETE FROM content.note_bindings WHERE conversation_id = ANY($1::uuid[])`, ids); err != nil {
 		return DeleteResult{}, fmt.Errorf("delete note bindings: %w", err)
 	}
-	if len(noteAssets) > 0 {
-		assetIDs := make([]string, 0, len(noteAssets))
-		for _, item := range noteAssets {
-			assetIDs = append(assetIDs, item.id)
+	keptDocuments := []string{}
+	archivedAssets := []string{}
+	for _, item := range noteAssets {
+		row := assetservice.LifecycleRow{
+			ID: item.id, OrganizationID: principal.OrganizationID, WorkspaceID: item.workspaceID, Revision: item.revision,
 		}
+		if item.published != "" {
+			// The card's document stays in the knowledge base.
+			keptDocuments = append(keptDocuments, item.id)
+			if _, err := assetservice.CancelPendingRequestsTx(ctx, tx, &s.Content.Events, row, principal, "user_cancelled"); err != nil {
+				return DeleteResult{}, fmt.Errorf("withdraw kept note review: %w", err)
+			}
+			continue
+		}
+		archivedAssets = append(archivedAssets, item.id)
+		if _, err := assetservice.CancelPendingRequestsTx(ctx, tx, &s.Content.Events, row, principal, "asset_archived"); err != nil {
+			return DeleteResult{}, fmt.Errorf("cancel note publication requests: %w", err)
+		}
+	}
+	if len(archivedAssets) > 0 {
 		if _, err := tx.Exec(ctx, `
 			UPDATE asset.assets
 			SET deleted_at = now(), publication_status = 'archived',
 			    current_published_version_id = NULL, published_at = NULL, updated_at = now()
 			WHERE organization_id = $1::uuid AND id = ANY($2::uuid[]) AND deleted_at IS NULL
-		`, principal.OrganizationID, assetIDs); err != nil {
+		`, principal.OrganizationID, archivedAssets); err != nil {
 			return DeleteResult{}, fmt.Errorf("archive note assets: %w", err)
-		}
-		for _, item := range noteAssets {
-			if _, err := assetservice.CancelPendingRequestsTx(ctx, tx, &s.Content.Events, assetservice.LifecycleRow{
-				ID: item.id, OrganizationID: principal.OrganizationID, WorkspaceID: item.workspaceID, Revision: item.revision,
-			}, principal, "asset_archived"); err != nil {
-				return DeleteResult{}, fmt.Errorf("cancel note publication requests: %w", err)
-			}
 		}
 		if s.Content.Events.Queue != nil {
 			for _, item := range noteAssets {
+				if item.published != "" {
+					continue
+				}
 				if _, err := s.Content.Events.AppendTx(ctx, tx, eventing.Event{
 					OrganizationID:   principal.OrganizationID,
 					WorkspaceID:      item.workspaceID,
@@ -320,7 +339,7 @@ func (s Service) Delete(ctx context.Context, principal auth.Principal, conversat
 	if err := tx.Commit(ctx); err != nil {
 		return DeleteResult{}, fmt.Errorf("commit conversation delete: %w", err)
 	}
-	return DeleteResult{ConversationID: conversationID, DeletedChildren: children}, nil
+	return DeleteResult{ConversationID: conversationID, DeletedChildren: children, KeptDocumentAssetIDs: keptDocuments}, nil
 }
 
 // nonEmpty keeps pgx from receiving an empty array as SQL NULL.

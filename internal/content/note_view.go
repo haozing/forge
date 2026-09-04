@@ -105,8 +105,6 @@ type NoteBlockEntry struct {
 	RevisionID   string  `json:"block_revision_id"`
 	Position     float64 `json:"position"`
 	Kind         string  `json:"kind"`
-	Role         string  `json:"role,omitempty"`
-	Status       string  `json:"status,omitempty"`
 	Content      string  `json:"content"`
 	EditableKind bool    `json:"editable"`
 }
@@ -124,12 +122,10 @@ func (s Service) NoteBlocks(ctx context.Context, principal auth.Principal, conve
 		return nil, 0, err
 	}
 	rows, err := s.Store.Pool.Query(ctx, `
-		SELECT b.id::text, br.id::text, bp.position, b.block_type,
-		       COALESCE(mb.role, ''), COALESCE(mb.status, ''), br.content
+		SELECT b.id::text, br.id::text, bp.position, b.block_type, br.content
 		FROM content.block_placements bp
 		JOIN content.block_revisions br ON br.organization_id = bp.organization_id AND br.id = bp.block_revision_id
 		JOIN content.blocks b ON b.organization_id = br.organization_id AND b.id = br.block_id
-		LEFT JOIN content.message_blocks mb ON mb.organization_id = bp.organization_id AND mb.block_revision_id = br.id
 		WHERE bp.organization_id = $1::uuid AND bp.container_id = $2::uuid
 		ORDER BY bp.position
 	`, principal.OrganizationID, containerID)
@@ -140,7 +136,7 @@ func (s Service) NoteBlocks(ctx context.Context, principal auth.Principal, conve
 	entries := []NoteBlockEntry{}
 	for rows.Next() {
 		var entry NoteBlockEntry
-		if err := rows.Scan(&entry.BlockID, &entry.RevisionID, &entry.Position, &entry.Kind, &entry.Role, &entry.Status, &entry.Content); err != nil {
+		if err := rows.Scan(&entry.BlockID, &entry.RevisionID, &entry.Position, &entry.Kind, &entry.Content); err != nil {
 			return nil, 0, fmt.Errorf("scan note block: %w", err)
 		}
 		entry.EditableKind = editableNoteKind(entry.Kind)
@@ -152,9 +148,35 @@ func (s Service) NoteBlocks(ctx context.Context, principal auth.Principal, conve
 	return entries, revision, nil
 }
 
-// AddNoteBlock appends a manual block to the live tree.
-func (s Service) AddNoteBlock(ctx context.Context, principal auth.Principal, idempotencyKey, conversationID, kind, content string) (NoteBlockEntry, error) {
-	if err := s.noteBlockGuard(principal, idempotencyKey, conversationID, kind, content); err != nil {
+// AddNoteBlock appends a block to the live tree. It is the single write
+// entry into the note besides block editing: either a manual block
+// (kind+content), or a saved excerpt of one conversation message
+// (fromBlockRevisionID; content is copied verbatim from the message — the
+// note copy becomes independently editable while the transcript stays
+// immutable — with provenance recorded in block props).
+func (s Service) AddNoteBlock(ctx context.Context, principal auth.Principal, idempotencyKey, conversationID, kind, content, fromBlockRevisionID string) (NoteBlockEntry, error) {
+	props := ""
+	if fromBlockRevisionID != "" {
+		if principal.UserType != "member" || !validID(principal.OrganizationID) || !validID(principal.UserID) ||
+			!validID(conversationID) || !validID(fromBlockRevisionID) || !validIdempotencyKey(idempotencyKey) {
+			return NoteBlockEntry{}, ErrInvalidInput
+		}
+		if s.Store == nil || s.Store.Pool == nil {
+			return NoteBlockEntry{}, errors.New("database store is not initialized")
+		}
+		switch kind {
+		case "", "quote", "paragraph":
+			if kind == "" {
+				kind = "quote"
+			}
+		default:
+			return NoteBlockEntry{}, ErrInvalidInput
+		}
+		if strings.TrimSpace(content) != "" {
+			// The excerpt body must come from the message itself.
+			return NoteBlockEntry{}, ErrInvalidInput
+		}
+	} else if err := s.noteBlockGuard(principal, idempotencyKey, conversationID, kind, content); err != nil {
 		return NoteBlockEntry{}, err
 	}
 	tx, err := s.Store.Pool.Begin(ctx)
@@ -164,10 +186,11 @@ func (s Service) AddNoteBlock(ctx context.Context, principal auth.Principal, ide
 	defer tx.Rollback(ctx)
 	state, err := reserveIdempotency(ctx, tx, principal, "conversation.note.block.add", idempotencyKey,
 		hashRequest(struct {
-			ConversationID string
-			Kind           string
-			Content        string
-		}{conversationID, kind, content}))
+			ConversationID       string
+			Kind                 string
+			Content              string
+			FromBlockRevisionID  string
+		}{conversationID, kind, content, fromBlockRevisionID}))
 	if err != nil {
 		return NoteBlockEntry{}, err
 	}
@@ -178,11 +201,32 @@ func (s Service) AddNoteBlock(ctx context.Context, principal auth.Principal, ide
 		}
 		return replayed, nil
 	}
+	if fromBlockRevisionID != "" {
+		var messageContent, sourceRole string
+		err := tx.QueryRow(ctx, `
+			SELECT br.content, mb.role
+			FROM content.block_revisions br
+			JOIN content.message_blocks mb ON mb.organization_id = br.organization_id AND mb.block_revision_id = br.id
+			WHERE br.organization_id = $1::uuid AND br.id = $2::uuid AND mb.conversation_id = $3::uuid
+		`, principal.OrganizationID, fromBlockRevisionID, conversationID).Scan(&messageContent, &sourceRole)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return NoteBlockEntry{}, ErrNotFound
+		}
+		if err != nil {
+			return NoteBlockEntry{}, fmt.Errorf("load message excerpt source: %w", err)
+		}
+		if strings.TrimSpace(messageContent) == "" {
+			return NoteBlockEntry{}, ErrInvalidInput
+		}
+		content = messageContent
+		encoded, _ := json.Marshal(map[string]string{"source_block_revision_id": fromBlockRevisionID, "source_role": sourceRole})
+		props = string(encoded)
+	}
 	containerID, noteAssetID, revision, err := lockNoteContainer(ctx, tx, principal, conversationID)
 	if err != nil {
 		return NoteBlockEntry{}, err
 	}
-	entry, err := insertManualBlock(ctx, tx, principal.OrganizationID, containerID, noteAssetID, revision, kind, content, principal.UserID)
+	entry, err := insertManualBlock(ctx, tx, principal.OrganizationID, containerID, noteAssetID, revision, kind, content, props, principal.UserID)
 	if err != nil {
 		return NoteBlockEntry{}, err
 	}
@@ -429,7 +473,7 @@ func lockNoteContainer(ctx context.Context, tx pgx.Tx, principal auth.Principal,
 	return containerID, noteAssetID, revision, nil
 }
 
-func insertManualBlock(ctx context.Context, tx pgx.Tx, organizationID, containerID, noteAssetID string, revision int64, kind, content, userID string) (NoteBlockEntry, error) {
+func insertManualBlock(ctx context.Context, tx pgx.Tx, organizationID, containerID, noteAssetID string, revision int64, kind, content, props, userID string) (NoteBlockEntry, error) {
 	var nextPosition float64
 	if err := tx.QueryRow(ctx, `
 		SELECT COALESCE(MAX(position) + 1, 0) FROM content.block_placements
@@ -448,10 +492,10 @@ func insertManualBlock(ctx context.Context, tx pgx.Tx, organizationID, container
 	var revisionID string
 	if err := tx.QueryRow(ctx, `
 		INSERT INTO content.block_revisions
-			(organization_id, block_id, revision_no, content, content_format, created_by, content_checksum)
-		VALUES ($1::uuid, $2::uuid, 1, $3, 'markdown', $4::uuid, $5)
+			(organization_id, block_id, revision_no, content, content_format, props, created_by, content_checksum)
+		VALUES ($1::uuid, $2::uuid, 1, $3, 'markdown', COALESCE(NULLIF($4, '')::jsonb, '{}'::jsonb), $5::uuid, $6)
 		RETURNING id::text
-	`, organizationID, blockID, content, userID, checksum).Scan(&revisionID); err != nil {
+	`, organizationID, blockID, content, props, userID, checksum).Scan(&revisionID); err != nil {
 		return NoteBlockEntry{}, fmt.Errorf("create block revision: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `

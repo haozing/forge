@@ -1,10 +1,12 @@
 // Package noteblocks is the read/render side of the live note block tree.
 // One conversation owns one note document (content.containers, kind='note',
-// asset_id set): chat messages and manual edits are blocks of that single
-// tree. Markdown is a derived artifact — this package is the only place that
-// freezes a tree into the deterministic markdown stored on immutable asset
-// versions, together with the reference-style snapshot that lets a version be
-// replayed without embedding block bodies.
+// asset_id set). Chat messages are NOT part of the tree: they live only in
+// message_blocks as an immutable transcript, while the tree holds what the
+// member deliberately put into the note — manual blocks and saved message
+// excerpts. Markdown is a derived artifact — this package is the only place
+// that freezes a tree into the deterministic markdown stored on immutable
+// asset versions, together with the reference-style snapshot that lets a
+// version be replayed without embedding block bodies.
 package noteblocks
 
 import (
@@ -26,12 +28,10 @@ type Querier interface {
 
 // Block is one positioned node of the live tree.
 type Block struct {
-	Position  float64 `json:"position"`
-	RevisionID string `json:"block_revision_id"`
-	Kind      string  `json:"kind"`
-	Role      string  `json:"role,omitempty"` // message blocks carry user/assistant/system/tool
-	Status    string  `json:"status,omitempty"`
-	Content   string  `json:"content"`
+	Position   float64 `json:"position"`
+	RevisionID string  `json:"block_revision_id"`
+	Kind       string  `json:"kind"`
+	Content    string  `json:"content"`
 }
 
 // Tree is the loaded live tree of one note document.
@@ -108,12 +108,10 @@ func LoadTreeByAssetView(ctx context.Context, q Querier, organizationID, assetID
 
 func loadBlocks(ctx context.Context, tx Querier, organizationID, containerID string) ([]Block, error) {
 	rows, err := tx.Query(ctx, `
-		SELECT bp.position, br.id::text, b.block_type,
-		       COALESCE(mb.role, ''), COALESCE(mb.status, ''), br.content
+		SELECT bp.position, br.id::text, b.block_type, br.content
 		FROM content.block_placements bp
 		JOIN content.block_revisions br ON br.organization_id = bp.organization_id AND br.id = bp.block_revision_id
 		JOIN content.blocks b ON b.organization_id = br.organization_id AND b.id = br.block_id
-		LEFT JOIN content.message_blocks mb ON mb.organization_id = bp.organization_id AND mb.block_revision_id = br.id
 		WHERE bp.organization_id = $1::uuid AND bp.container_id = $2::uuid
 	`, organizationID, containerID)
 	if err != nil {
@@ -123,7 +121,7 @@ func loadBlocks(ctx context.Context, tx Querier, organizationID, containerID str
 	blocks := []Block{}
 	for rows.Next() {
 		var block Block
-		if err := rows.Scan(&block.Position, &block.RevisionID, &block.Kind, &block.Role, &block.Status, &block.Content); err != nil {
+		if err := rows.Scan(&block.Position, &block.RevisionID, &block.Kind, &block.Content); err != nil {
 			return nil, fmt.Errorf("scan note block: %w", err)
 		}
 		blocks = append(blocks, block)
@@ -143,51 +141,29 @@ func (t Tree) AppendPosition() float64 {
 	return t.Blocks[len(t.Blocks)-1].Position + 1
 }
 
-// RenderMarkdown freezes the tree into deterministic markdown. Non-completed
-// message blocks stay in the live tree but never reach a frozen artifact.
+// RenderMarkdown freezes the tree into deterministic markdown. Only note
+// content (manual blocks and saved excerpts) ever reaches a frozen artifact;
+// conversation messages never do.
 func RenderMarkdown(tree Tree) string {
 	var builder strings.Builder
 	for _, block := range tree.Blocks {
-		switch {
-		case block.Kind == "message" && block.Role == "transcription":
-			if block.Status != "completed" {
-				continue
-			}
-			// Transcripts are document content, not dialogue turns.
-			builder.WriteString(strings.TrimRight(block.Content, "\n"))
-			builder.WriteString("\n\n")
-		case block.Kind == "message":
-			if block.Status != "completed" {
-				continue
-			}
-			heading := "## User"
-			if block.Role == "assistant" {
-				heading = "## Assistant"
-			} else if block.Role == "system" {
-				heading = "## System"
-			} else if block.Role == "tool" {
-				heading = "## Tool"
-			}
-			builder.WriteString(heading)
-			builder.WriteString("\n\n")
-			builder.WriteString(strings.TrimRight(block.Content, "\n"))
-			builder.WriteString("\n\n")
-		case block.Kind == "heading":
+		switch block.Kind {
+		case "heading":
 			builder.WriteString("### ")
 			builder.WriteString(strings.TrimSpace(block.Content))
 			builder.WriteString("\n\n")
-		case block.Kind == "quote":
+		case "quote":
 			for _, line := range strings.Split(strings.TrimRight(block.Content, "\n"), "\n") {
 				builder.WriteString("> ")
 				builder.WriteString(line)
 				builder.WriteString("\n")
 			}
 			builder.WriteString("\n")
-		case block.Kind == "code":
+		case "code":
 			builder.WriteString("```\n")
 			builder.WriteString(strings.TrimRight(block.Content, "\n"))
 			builder.WriteString("\n```\n\n")
-		case block.Kind == "list":
+		case "list":
 			for _, line := range strings.Split(strings.TrimSpace(block.Content), "\n") {
 				if strings.TrimSpace(line) == "" {
 					continue
@@ -197,7 +173,7 @@ func RenderMarkdown(tree Tree) string {
 				builder.WriteString("\n")
 			}
 			builder.WriteString("\n")
-		case block.Kind == "callout":
+		case "callout":
 			builder.WriteString("> [!NOTE]\n")
 			builder.WriteString("> ")
 			builder.WriteString(strings.TrimSpace(block.Content))
@@ -223,7 +199,6 @@ type SnapshotEntry struct {
 	Position   float64 `json:"position"`
 	RevisionID string  `json:"block_revision_id"`
 	Kind       string  `json:"kind"`
-	Role       string  `json:"role,omitempty"`
 }
 
 // SnapshotJSON renders the tree into the asset_versions.blocks payload.
@@ -231,7 +206,7 @@ func SnapshotJSON(tree Tree) ([]byte, error) {
 	snapshot := Snapshot{ContainerID: tree.ContainerID, Revision: tree.Revision, Blocks: make([]SnapshotEntry, 0, len(tree.Blocks))}
 	for _, block := range tree.Blocks {
 		snapshot.Blocks = append(snapshot.Blocks, SnapshotEntry{
-			Position: block.Position, RevisionID: block.RevisionID, Kind: block.Kind, Role: block.Role,
+			Position: block.Position, RevisionID: block.RevisionID, Kind: block.Kind,
 		})
 	}
 	return json.Marshal(snapshot)
@@ -243,29 +218,19 @@ func SnapshotJSON(tree Tree) ([]byte, error) {
 func ReplayMarkdown(ctx context.Context, tx Querier, organizationID string, snapshot Snapshot) (string, error) {
 	blocks := make([]Block, 0, len(snapshot.Blocks))
 	for _, entry := range snapshot.Blocks {
-		var content, status string
-		var role *string
+		var content string
 		err := tx.QueryRow(ctx, `
-			SELECT br.content, COALESCE(mb.status, ''), mb.role
+			SELECT br.content
 			FROM content.block_revisions br
-			LEFT JOIN content.message_blocks mb ON mb.organization_id = br.organization_id AND mb.block_revision_id = br.id
 			WHERE br.organization_id = $1::uuid AND br.id = $2::uuid
-		`, organizationID, entry.RevisionID).Scan(&content, &status, &role)
+		`, organizationID, entry.RevisionID).Scan(&content)
 		if err != nil {
 			return "", fmt.Errorf("replay block revision: %w", err)
 		}
 		blocks = append(blocks, Block{
-			Position: entry.Position, RevisionID: entry.RevisionID, Kind: entry.Kind,
-			Role: valueOr(role), Status: status, Content: content,
+			Position: entry.Position, RevisionID: entry.RevisionID, Kind: entry.Kind, Content: content,
 		})
 	}
 	sort.SliceStable(blocks, func(i, j int) bool { return blocks[i].Position < blocks[j].Position })
 	return RenderMarkdown(Tree{Blocks: blocks}), nil
-}
-
-func valueOr(value *string) string {
-	if value == nil {
-		return ""
-	}
-	return *value
 }

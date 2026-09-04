@@ -220,6 +220,7 @@ func registerWorkspaceRoutes(deps Dependencies, mux *http.ServeMux) {
 func registerAssetRoutes(deps Dependencies, mux *http.ServeMux) {
 	mux.HandleFunc("/api/workspaces/{workspaceId}/assets", memberAssetsCollection(deps))
 	mux.HandleFunc("/api/assets/{assetId}", assetResource(deps))
+	mux.HandleFunc("/api/assets/{assetId}/source-conversation", assetSourceConversation(deps))
 	mux.HandleFunc("/api/assets/{assetId}/lineage", assetLineage(deps))
 	mux.HandleFunc("/api/assets/{assetId}/relations", assetRelations(deps))
 	mux.HandleFunc("/api/assets/{assetId}/versions", assetVersionCollection(deps))

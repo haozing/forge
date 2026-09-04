@@ -34,7 +34,13 @@ const (
 // DispatchEventArgs is the durable River trigger for all deliveries created
 // for one outbox event. The event itself stays in audit.outbox_events.
 type DispatchEventArgs struct {
-	EventID string `json:"event_id" river:"unique"`
+	// Deliberately no `river:"unique"` tag: the unique index row of a
+	// COMPLETED job keeps matching its own state bitmask forever, so a
+	// failed delivery waiting for retry could never be re-dispatched (the
+	// recovery worker's insert was silently swallowed by the finished job).
+	// Duplicate dispatch jobs are harmless — ProcessEvent is an idempotent
+	// drain — so in-flight dedup is done by the recovery worker instead.
+	EventID string `json:"event_id"`
 }
 
 func (DispatchEventArgs) Kind() string { return DispatchEventKind }

@@ -232,6 +232,19 @@ func (s Service) Submit(ctx context.Context, principal auth.Principal, workspace
 	if err != nil {
 		return Request{}, err
 	}
+	// The knowledge base takes finished prose, never blank content: a note
+	// whose frozen tree is empty (no manual blocks, nothing saved from the
+	// conversation) cannot enter review.
+	var versionMarkdown string
+	if err := tx.QueryRow(ctx, `
+		SELECT btrim(markdown) FROM asset.asset_versions
+		WHERE organization_id = $1::uuid AND id = $2::uuid
+	`, principal.OrganizationID, versionID).Scan(&versionMarkdown); err != nil {
+		return Request{}, fmt.Errorf("load submitted version markdown: %w", err)
+	}
+	if versionMarkdown == "" {
+		return Request{}, fmt.Errorf("%w: blank note content", ErrInvalidInput)
+	}
 	// Only approval-policy assets enter the queue: a direct-policy submission
 	// would strand a permanently pending request on the per-asset unique index
 	// (mirrors the Approve-side mode check below).
@@ -589,17 +602,10 @@ func (s Service) decide(ctx context.Context, principal auth.Principal, workspace
 	if decision == "approve" && submittedBy == principal.UserID {
 		return Request{}, ErrSelfApproval
 	}
-	// The request must still reference the asset's current working version.
-	var workingVersion string
-	if err := tx.QueryRow(ctx, `
-		SELECT current_working_version_id::text FROM asset.assets
-		WHERE organization_id = $1::uuid AND id = $2::uuid
-	`, principal.OrganizationID, assetID).Scan(&workingVersion); err != nil {
-		return Request{}, err
-	}
-	if workingVersion != versionID {
-		return Request{}, ErrVersionSuperseded
-	}
+	// The submitted version is frozen and decides on its own: edits made to
+	// the note while the request was pending do not affect the review (the
+	// product turns the card to pending_update after such an approval), so
+	// there is deliberately no working-version freshness check here.
 	nextStatus := RequestRejected
 	executeNow := false
 	var executionProvenance map[string]any
@@ -969,6 +975,17 @@ func (s Service) executeApprovedTx(ctx context.Context, tx pgx.Tx, principal aut
 			return nil, ErrVersionSuperseded
 		}
 		return nil, err
+	}
+	// Entering the knowledge base means organization-wide sharing: approval
+	// upgrades a still workspace-private asset to organization visibility
+	// (product: 知识库=全员共享). Public stays public.
+	if row.Visibility == access.VisibilityWorkspace {
+		if _, err := tx.Exec(ctx, `
+			UPDATE asset.assets SET visibility = 'organization', updated_at = now()
+			WHERE organization_id = $1::uuid AND id = $2::uuid
+		`, principal.OrganizationID, assetID); err != nil {
+			return nil, fmt.Errorf("promote approved asset visibility: %w", err)
+		}
 	}
 	if err := asset.AppendAssetEventTx(ctx, tx, s.Events, row, principal, eventing.EventAssetPublished, eventing.PayloadVersionV1, eventing.AssetPublishedPayload{
 		AssetID:           row.ID,

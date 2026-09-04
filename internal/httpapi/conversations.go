@@ -27,13 +27,17 @@ func listConversations(deps Dependencies) http.HandlerFunc {
 			}
 			limit = parsed
 		}
-		items, hasMore, nextCursor, err := deps.ConversationService.ListPage(r.Context(), principal, r.PathValue("workspaceId"), r.URL.Query().Get("q"), limit, r.URL.Query().Get("cursor"))
+		items, hasMore, nextCursor, err := deps.ConversationService.ListPage(r.Context(), principal, r.PathValue("workspaceId"), r.URL.Query().Get("q"), limit, r.URL.Query().Get("cursor"), r.URL.Query().Get("status"))
 		if errors.Is(err, conversation.ErrForbidden) {
 			writeError(w, http.StatusForbidden, "workspace_access_denied")
 			return
 		}
 		if errors.Is(err, conversation.ErrInvalidCursor) {
 			writeError(w, http.StatusUnprocessableEntity, "invalid_cursor")
+			return
+		}
+		if errors.Is(err, conversation.ErrInvalidStatus) {
+			writeError(w, http.StatusUnprocessableEntity, "invalid_status")
 			return
 		}
 		if err != nil {
@@ -57,6 +61,39 @@ func conversationsCollection(deps Dependencies) http.HandlerFunc {
 			return
 		}
 		create(w, r)
+	}
+}
+
+// assetSourceConversation serves the author-private "来自灵感卡" backlink of
+// a knowledge-base document: the conversation whose note became this asset.
+func assetSourceConversation(deps Dependencies) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
+			return
+		}
+		principal, ok := requireMemberSession(w, r, deps)
+		if !ok {
+			return
+		}
+		conversationID, err := deps.ConversationService.SourceConversation(r.Context(), principal, r.PathValue("assetId"))
+		if errors.Is(err, conversation.ErrInvalidID) {
+			writeError(w, http.StatusUnprocessableEntity, "invalid_asset_id")
+			return
+		}
+		if errors.Is(err, conversation.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "source_conversation_not_found")
+			return
+		}
+		if errors.Is(err, conversation.ErrForbidden) {
+			writeError(w, http.StatusForbidden, "workspace_access_denied")
+			return
+		}
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "source_conversation_failed")
+			return
+		}
+		writeData(w, r, http.StatusOK, map[string]string{"conversation_id": conversationID})
 	}
 }
 

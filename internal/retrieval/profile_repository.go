@@ -232,14 +232,14 @@ func CountEligibleVersions(ctx context.Context, q rowQuerier, organizationID str
 		  AND a.deleted_at IS NULL
 		  AND a.current_published_version_id IS NOT NULL
 		  AND (
-		        COALESCE(mv.policy #>> '{retrieval,fulltext,enabled}','')::boolean
-		        OR COALESCE(mv.policy #>> '{retrieval,semantic,enabled}','')::boolean
+		        COALESCE((mv.policy #>> '{retrieval,fulltext,enabled}')::boolean, false)
+		        OR COALESCE((mv.policy #>> '{retrieval,semantic,enabled}')::boolean, false)
 		      )
 		  AND EXISTS (
 		        SELECT 1
 		        FROM jsonb_object_keys(COALESCE(mv.policy->'channels','{}'::jsonb)) AS channel
-		        WHERE COALESCE(mv.policy #>>
-		              ARRAY['channels', channel, 'enabled'], 'false')::boolean
+		        WHERE COALESCE((mv.policy #>>
+			      ARRAY['channels', channel, 'enabled'])::boolean, false)
 		      )
 	`, organizationID).Scan(&count)
 	return count, err
@@ -266,14 +266,14 @@ func CountCoveredVersions(ctx context.Context, q rowQuerier, organizationID, pro
 		  AND a.deleted_at IS NULL
 		  AND a.current_published_version_id IS NOT NULL
 		  AND (
-		        COALESCE(mv.policy #>> '{retrieval,fulltext,enabled}','')::boolean
-		        OR COALESCE(mv.policy #>> '{retrieval,semantic,enabled}','')::boolean
+		        COALESCE((mv.policy #>> '{retrieval,fulltext,enabled}')::boolean, false)
+		        OR COALESCE((mv.policy #>> '{retrieval,semantic,enabled}')::boolean, false)
 		      )
 		  AND EXISTS (
 		        SELECT 1
 		        FROM jsonb_object_keys(COALESCE(mv.policy->'channels','{}'::jsonb)) AS channel
-		        WHERE COALESCE(mv.policy #>>
-		              ARRAY['channels', channel, 'enabled'], 'false')::boolean
+		        WHERE COALESCE((mv.policy #>>
+			      ARRAY['channels', channel, 'enabled'])::boolean, false)
 		      )
 	`, organizationID, profileID).Scan(&count)
 	return count, err

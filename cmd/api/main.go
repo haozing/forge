@@ -202,7 +202,7 @@ func main() {
 		},
 		AdminService:         adminservice.Service{Store: db},
 		WorkspaceService:     workspace.Service{Store: db, Events: &events},
-		ResourceModelService: resourcemodel.Service{Store: db, Policy: authz.WorkspacePolicyService{Store: db}},
+		ResourceModelService: resourcemodel.Service{Store: db, Policy: authz.WorkspacePolicyService{Store: db}, Events: &events},
 		MemberAssetService:   memberAssetService,
 		SuggestionReviews:    &assetservice.SuggestionReviewService{Store: db, Policy: authz.WorkspacePolicyService{Store: db}},
 		TransferService:      assetservice.TransferService{Store: db, Policy: authz.WorkspacePolicyService{Store: db}},

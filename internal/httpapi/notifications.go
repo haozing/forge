@@ -46,7 +46,7 @@ func listNotifications(deps Dependencies) http.HandlerFunc {
 			limit = 50
 		}
 		unreadOnly := r.URL.Query().Get("unread_only") == "true"
-		rows, err := deps.Store.Pool.Query(r.Context(), `SELECT id::text, workspace_id::text, type, title, body, COALESCE(object_type, ''), COALESCE(object_id::text, ''), metadata, read_at, created_at FROM content.notifications WHERE organization_id = $1::uuid AND workspace_id = $2::uuid AND recipient_user_id = $3::uuid AND ($4 = false OR read_at IS NULL) ORDER BY created_at DESC, id DESC LIMIT $5`, principal.OrganizationID, workspaceID, principal.UserID, unreadOnly, limit+1)
+		rows, err := deps.Store.Pool.Query(r.Context(), `SELECT id::text, workspace_id::text, kind, payload, read_at, created_at FROM content.notifications WHERE organization_id = $1::uuid AND workspace_id = $2::uuid AND recipient_user_id = $3::uuid AND ($4 = false OR read_at IS NULL) ORDER BY stream_id DESC LIMIT $5`, principal.OrganizationID, workspaceID, principal.UserID, unreadOnly, limit+1)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "notifications_list_failed")
 			return
@@ -55,13 +55,19 @@ func listNotifications(deps Dependencies) http.HandlerFunc {
 		items := make([]finalNotification, 0, limit)
 		for rows.Next() {
 			var item finalNotification
-			var metadata []byte
-			if err := rows.Scan(&item.ID, &item.WorkspaceID, &item.Type, &item.Title, &item.Body, &item.ObjectType, &item.ObjectID, &metadata, &item.ReadAt, &item.CreatedAt); err != nil {
+			var payload []byte
+			if err := rows.Scan(&item.ID, &item.WorkspaceID, &item.Type, &payload, &item.ReadAt, &item.CreatedAt); err != nil {
 				writeError(w, http.StatusInternalServerError, "notifications_list_failed")
 				return
 			}
 			item.Metadata = map[string]any{}
-			_ = json.Unmarshal(metadata, &item.Metadata)
+			_ = json.Unmarshal(payload, &item.Metadata)
+			if title, ok := item.Metadata["title"].(string); ok {
+				item.Title = title
+			}
+			if body, ok := item.Metadata["message"].(string); ok {
+				item.Body = body
+			}
 			items = append(items, item)
 		}
 		if err := rows.Err(); err != nil {

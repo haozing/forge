@@ -85,7 +85,7 @@ func SeedBuiltinResourceModels(ctx context.Context, s *Store, organizationID str
 			     "semantic": {"enabled": true}
 			   },
 			   "publishing": {
-			     "mode": "direct",
+			     "mode": "approval",
 			     "required_fields": [],
 			     "require_clean_attachments": true,
 			     "require_human_confirmation": true

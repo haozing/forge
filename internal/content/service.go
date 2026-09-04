@@ -234,7 +234,8 @@ func (s Service) CreateDerivation(ctx context.Context, principal auth.Principal,
 		&noteModelID, &noteModelVersionID)
 	if err == nil {
 		// The seeding context reads the LIVE tree render, not the last frozen
-		// markdown, so unsaved messages and manual blocks travel too.
+		// markdown, so unsaved note edits travel too. Conversation messages
+		// are not note content and never travel.
 		if sourceTree, found, treeErr := noteblocks.LoadTreeByAssetTx(ctx, tx, principal.OrganizationID, sourceNoteAsset); treeErr != nil {
 			return DerivationResult{}, treeErr
 		} else if found {
@@ -249,11 +250,9 @@ func (s Service) CreateDerivation(ctx context.Context, principal auth.Principal,
 	}
 	sources := make(map[string]derivationSourceBlock, len(input.SourceBlockRevisionIDs))
 	rows, err := tx.Query(ctx, `
-		SELECT br.id::text, br.content,
-		       CASE WHEN mb.block_revision_id IS NULL THEN 'manual' ELSE 'message' END
+		SELECT br.id::text, br.content, 'note'
 		FROM content.block_placements bp
 		JOIN content.block_revisions br ON br.organization_id = bp.organization_id AND br.id = bp.block_revision_id
-		LEFT JOIN content.message_blocks mb ON mb.organization_id = bp.organization_id AND mb.block_revision_id = br.id
 		WHERE bp.organization_id = $1::uuid AND bp.container_id = $3::uuid AND br.id = ANY($2::uuid[])
 	`, principal.OrganizationID, input.SourceBlockRevisionIDs, sourceContainerID)
 	if err != nil {
@@ -365,12 +364,11 @@ func (s Service) CreateDerivation(ctx context.Context, principal auth.Principal,
 	return result, nil
 }
 
-// appendMessageBlockTx appends one message as a block of the conversation's
-// live note tree: block + revision + placement at the tree tail, tree
-// revision bump (the draft epoch advances with it so publish sees the dirty
-// state), message metadata and references. Callers must hold the transaction
-// and have locked the container row.
-func appendMessageBlockTx(ctx context.Context, tx pgx.Tx, organizationID, conversationID, containerID, noteAssetID string, input AppendMessageInput, userID string) (MessageResult, error) {
+// appendMessageBlockTx records one message of the conversation transcript.
+// Messages never enter the note tree: the transcript lives in message_blocks
+// (immutable, read-only), and the note tree holds only what the member
+// deliberately saved or wrote. Callers must hold the transaction.
+func appendMessageBlockTx(ctx context.Context, tx pgx.Tx, organizationID, conversationID string, input AppendMessageInput, userID string) (MessageResult, error) {
 	var nextSequence int64
 	if err := tx.QueryRow(ctx, `
 		SELECT COALESCE(MAX(sequence_no), 0) + 1
@@ -378,14 +376,6 @@ func appendMessageBlockTx(ctx context.Context, tx pgx.Tx, organizationID, conver
 		WHERE organization_id = $1::uuid AND conversation_id = $2::uuid
 	`, organizationID, conversationID).Scan(&nextSequence); err != nil {
 		return MessageResult{}, fmt.Errorf("allocate message sequence: %w", err)
-	}
-	var nextPosition float64
-	if err := tx.QueryRow(ctx, `
-		SELECT COALESCE(MAX(position) + 1, 0)
-		FROM content.block_placements
-		WHERE organization_id = $1::uuid AND container_id = $2::uuid
-	`, organizationID, containerID).Scan(&nextPosition); err != nil {
-		return MessageResult{}, fmt.Errorf("allocate block position: %w", err)
 	}
 	checksum := hashBytes(input.Content)
 	var blockID, revisionID string
@@ -402,27 +392,6 @@ func appendMessageBlockTx(ctx context.Context, tx pgx.Tx, organizationID, conver
 		RETURNING id::text
 	`, organizationID, blockID, input.Content, input.ContentFormat, userID, checksum).Scan(&revisionID); err != nil {
 		return MessageResult{}, fmt.Errorf("create message revision: %w", err)
-	}
-	if _, err := tx.Exec(ctx, `
-		INSERT INTO content.block_placements
-			(organization_id, container_id, block_revision_id, position)
-		VALUES ($1::uuid, $2::uuid, $3::uuid, $4)
-	`, organizationID, containerID, revisionID, nextPosition); err != nil {
-		return MessageResult{}, fmt.Errorf("place message block: %w", err)
-	}
-	if _, err := tx.Exec(ctx, `
-		UPDATE content.containers SET revision = revision + 1, updated_at = now() WHERE id = $1::uuid
-	`, containerID); err != nil {
-		return MessageResult{}, fmt.Errorf("advance note tree: %w", err)
-	}
-	if noteAssetID != "" {
-		if tag, err := tx.Exec(ctx, `
-			UPDATE asset.asset_drafts SET revision = revision + 1, updated_at = now() WHERE organization_id = $1::uuid AND asset_id = $2::uuid
-		`, organizationID, noteAssetID); err != nil {
-			return MessageResult{}, fmt.Errorf("advance note draft epoch: %w", err)
-		} else if tag.RowsAffected() == 0 {
-			return MessageResult{}, errors.New("note draft row missing for epoch advance")
-		}
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO content.message_blocks
@@ -445,12 +414,65 @@ func appendMessageBlockTx(ctx context.Context, tx pgx.Tx, organizationID, conver
 	return MessageResult{BlockRevisionID: revisionID, BlockID: blockID, ConversationID: conversationID, SequenceNo: nextSequence, Role: input.Role, Status: input.Status}, nil
 }
 
-// injectDerivationContext seeds the derived conversation with an opening
-// assistant message carrying the selected source material, so the new chat
-// starts from the harvested context instead of a blank slate. The context
-// policy decides how much travels: summary_only keeps a short digest of each
-// selected block, selected_only carries the excerpts verbatim, full prepends
-// the whole source note markdown.
+// appendNoteBlockTx places one note block at the tail of the conversation's
+// live note tree (block + revision + placement, tree revision and draft epoch
+// advance). This is the write path for deliberately authored note content;
+// messages never travel it. Callers must hold the transaction.
+func appendNoteBlockTx(ctx context.Context, tx pgx.Tx, organizationID, containerID, noteAssetID, kind, content, props, userID string) (string, error) {
+	var nextPosition float64
+	if err := tx.QueryRow(ctx, `
+		SELECT COALESCE(MAX(position) + 1, 0)
+		FROM content.block_placements
+		WHERE organization_id = $1::uuid AND container_id = $2::uuid
+	`, organizationID, containerID).Scan(&nextPosition); err != nil {
+		return "", fmt.Errorf("allocate block position: %w", err)
+	}
+	checksum := hashBytes(content)
+	var blockID string
+	if err := tx.QueryRow(ctx, `
+		INSERT INTO content.blocks (organization_id, block_type, created_by)
+		VALUES ($1::uuid, $2, $3::uuid) RETURNING id::text
+	`, organizationID, kind, userID).Scan(&blockID); err != nil {
+		return "", fmt.Errorf("create note block: %w", err)
+	}
+	var revisionID string
+	if err := tx.QueryRow(ctx, `
+		INSERT INTO content.block_revisions
+			(organization_id, block_id, revision_no, content, content_format, props, created_by, content_checksum)
+		VALUES ($1::uuid, $2::uuid, 1, $3, 'markdown', COALESCE(NULLIF($4, '')::jsonb, '{}'::jsonb), $5::uuid, $6)
+		RETURNING id::text
+	`, organizationID, blockID, content, props, userID, checksum).Scan(&revisionID); err != nil {
+		return "", fmt.Errorf("create note revision: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO content.block_placements
+			(organization_id, container_id, block_revision_id, position)
+		VALUES ($1::uuid, $2::uuid, $3::uuid, $4)
+	`, organizationID, containerID, revisionID, nextPosition); err != nil {
+		return "", fmt.Errorf("place note block: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE content.containers SET revision = revision + 1, updated_at = now() WHERE id = $1::uuid
+	`, containerID); err != nil {
+		return "", fmt.Errorf("advance note tree: %w", err)
+	}
+	if tag, err := tx.Exec(ctx, `
+		UPDATE asset.asset_drafts SET revision = revision + 1, updated_at = now() WHERE organization_id = $1::uuid AND asset_id = $2::uuid
+	`, organizationID, noteAssetID); err != nil {
+		return "", fmt.Errorf("advance note draft epoch: %w", err)
+	} else if tag.RowsAffected() == 0 {
+		return "", errors.New("note draft row missing for epoch advance")
+	}
+	return revisionID, nil
+}
+
+// injectDerivationContext seeds the derived conversation's note with an
+// opening quote block carrying the selected source material, so the new
+// thought starts from the harvested context instead of a blank slate. It is
+// note content, not a dialogue turn: the derived chat itself stays empty. The
+// context policy decides how much travels: summary_only keeps a short digest
+// of each selected block, selected_only carries the excerpts verbatim, full
+// prepends the whole source note markdown.
 func injectDerivationContext(ctx context.Context, tx pgx.Tx, organizationID, conversationID, containerID, noteAssetID, policy, sourceTitle, sourceMarkdown string, blocks []derivationSourceBlock, userID string) error {
 	excerptLimit := 2000
 	if policy == "summary_only" {
@@ -481,10 +503,9 @@ func injectDerivationContext(ctx context.Context, tx pgx.Tx, organizationID, con
 	if runes := []rune(content); len(runes) > 24000 {
 		content = string(runes[:24000]) + "\n\n…(truncated)"
 	}
-	message := fmt.Sprintf("> Derived from %q · context policy: %s\n\n%s", sourceTitle, policy, content)
-	_, err := appendMessageBlockTx(ctx, tx, organizationID, conversationID, containerID, noteAssetID, AppendMessageInput{
-		Role: "assistant", Content: message, ContentFormat: "markdown", Status: "completed",
-	}, userID)
+	content = fmt.Sprintf("> Derived from %q · context policy: %s\n\n%s", sourceTitle, policy, content)
+	props, _ := json.Marshal(map[string]string{"source": sourceTitle, "context_policy": policy})
+	_, err := appendNoteBlockTx(ctx, tx, organizationID, containerID, noteAssetID, "quote", content, string(props), userID)
 	return err
 }
 
@@ -515,8 +536,8 @@ func (s Service) GetDerivation(ctx context.Context, principal auth.Principal, de
 	if err != nil {
 		return DerivationResult{}, fmt.Errorf("load derivation: %w", err)
 	}
-	// The per-block origin (message / chat / note) only lives in the context
-	// snapshot; derivation_sources keeps the container pointers and excerpts.
+	// The per-block origin ('note') only lives in the context snapshot;
+	// derivation_sources keeps the container pointers and excerpts.
 	var snapshot struct {
 		Blocks []derivationSourceBlock `json:"blocks"`
 	}
@@ -925,23 +946,21 @@ func (s Service) AppendMessage(ctx context.Context, principal auth.Principal, id
 		}
 		return result, nil
 	}
-	var workspaceID, containerID, noteAssetID string
+	var workspaceID string
 	if err := tx.QueryRow(ctx, `
-		SELECT c.workspace_id::text, cc.id::text, nb.note_asset_id::text
+		SELECT c.workspace_id::text
 		FROM content.conversations c
 				JOIN content.workspace_members wm ON wm.workspace_id = c.workspace_id AND wm.user_id = $3::uuid
-				JOIN content.note_bindings nb ON nb.conversation_id = c.id
-				JOIN content.containers cc ON cc.organization_id = nb.organization_id AND cc.asset_id = nb.note_asset_id
-				WHERE c.organization_id = $1::uuid AND c.id = $2::uuid AND c.status = 'active'
-				  AND wm.role <> 'viewer'
-				FOR UPDATE OF c, cc
-	`, principal.OrganizationID, input.ConversationID, principal.UserID).Scan(&workspaceID, &containerID, &noteAssetID); err != nil {
+		WHERE c.organization_id = $1::uuid AND c.id = $2::uuid AND c.status = 'active'
+		  AND wm.role <> 'viewer'
+		FOR UPDATE OF c
+	`, principal.OrganizationID, input.ConversationID, principal.UserID).Scan(&workspaceID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return MessageResult{}, ErrNotFound
 		}
 		return MessageResult{}, fmt.Errorf("load conversation for message: %w", err)
 	}
-	result, err := appendMessageBlockTx(ctx, tx, principal.OrganizationID, input.ConversationID, containerID, noteAssetID, input, principal.UserID)
+	result, err := appendMessageBlockTx(ctx, tx, principal.OrganizationID, input.ConversationID, input, principal.UserID)
 	if err != nil {
 		return MessageResult{}, err
 	}

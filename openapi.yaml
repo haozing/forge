@@ -505,6 +505,26 @@ paths:
                   - $ref: '#/components/schemas/Asset'
                   - $ref: '#/components/schemas/Envelope'
         '422': { $ref: '#/components/responses/Error' }
+  /api/assets/{assetId}/source-conversation:
+    get:
+      tags: [assets]
+      operationId: getAssetSourceConversation
+      description: 知识库详情页的"来自灵感卡"回链（仅作者可解析）：返回孕育该资产的会话。灵感卡删除（binding 消失）后 404。
+      parameters:
+        - $ref: '#/components/parameters/AssetId'
+      responses:
+        '200':
+          description: 灵感卡 ID
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    properties:
+                      conversation_id: { type: string, format: uuid }
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
   /api/assets/{assetId}:
     get:
       tags: [assets]
@@ -4057,16 +4077,21 @@ paths:
     get:
       tags: [conversations]
       operationId: listConversations
+      description: "我的灵感"卡片列表——仅返回当前成员自己发起的会话；每张卡携带五态徽标（card_status）、驳回意见（card_status_detail）、送审期间新改动角标（has_new_changes）与笔记首行摘要（note_first_line）。
       parameters:
         - $ref: '#/components/parameters/WorkspaceId'
         - name: q
           in: query
           schema: { type: string }
+        - name: status
+          in: query
+          description: 按卡片状态筛选 organizing(整理中)/reviewing(审核中)/rejected(未通过)/published(已入库)/pending_update(待入库)
+          schema: { type: string, enum: [organizing, reviewing, rejected, published, pending_update] }
         - $ref: '#/components/parameters/Limit'
         - $ref: '#/components/parameters/Cursor'
       responses:
         '200':
-          description: 会话列表（含派生关系字段）
+          description: 会话列表（含派生关系与卡片状态字段）
           content:
             application/json:
               schema:
@@ -4348,7 +4373,7 @@ paths:
     post:
       tags: [conversations]
       operationId: addNoteBlock
-      description: 向笔记文档追加一个手动块（kind: paragraph/heading/quote/code/list/callout）
+      description: 向笔记文档追加一个块。两种入口：手动块（kind+content）；或存入笔记——从会话某条消息收录摘录（from_block_revision_id，正文取自该消息，kind 仅 quote/paragraph、缺省 quote，溯源记入块 props）。会话消息永不自动进笔记。
       parameters:
         - $ref: '#/components/parameters/ConversationId'
         - $ref: '#/components/parameters/IdempotencyKey'
@@ -4358,10 +4383,10 @@ paths:
           application/json:
             schema:
               type: object
-              required: [kind, content]
               properties:
-                kind: { type: string, enum: [paragraph, heading, quote, code, list, callout] }
-                content: { type: string }
+                kind: { type: string, enum: [paragraph, heading, quote, code, list, callout], description: 手动块必填；收录摘录时仅 quote/paragraph（缺省 quote） }
+                content: { type: string, description: 手动块必填；收录摘录时必须省略（正文取自消息） }
+                from_block_revision_id: { type: string, format: uuid, description: 收录摘录：要存入笔记的消息 block_revision_id（须属于本会话） }
       responses:
         '201':
           description: 已追加
@@ -5588,8 +5613,12 @@ components:
         source: { type: string, enum: [chat_interface, document, asset, automation] }
         visibility: { type: string, enum: [workspace, organization, public] }
         status: { type: string, enum: [active, completed, archived, failed] }
+        card_status: { type: string, enum: [organizing, reviewing, rejected, published, pending_update], description: 灵感卡五态徽标（整理中/审核中/未通过/已入库/待入库），由发布状态推导 }
+        card_status_detail: { type: string, description: 未通过时的驳回意见 }
+        has_new_changes: { type: boolean, description: 审核中角标：送审后笔记又有改动 }
         container_id: { type: string, format: uuid }
         note_asset_id: { type: string }
+        note_first_line: { type: string, description: 笔记首行摘要（树中第一个块的内容截断） }
         parent_conversation_id: { type: string, description: 来源思考 ID，根思考为空字符串 }
         origin_derivation_id: { type: string, description: 产生本思考的派生记录 ID，根思考为空字符串 }
         last_message_preview: { type: string }
@@ -5738,9 +5767,7 @@ components:
         block_id: { type: string, format: uuid }
         block_revision_id: { type: string, format: uuid }
         position: { type: number }
-        kind: { type: string, description: message=会话消息（不可改）；paragraph/heading/quote/code/list/callout=手动块（可改可删） }
-        role: { type: string, description: 消息块角色 user/assistant }
-        status: { type: string }
+        kind: { type: string, description: paragraph/heading/quote/code/list/callout（笔记树只含手动块与收录的消息摘录；会话消息不在树中） }
         content: { type: string }
         editable: { type: boolean }
     Derivation:
@@ -5751,19 +5778,19 @@ components:
         target_conversation_id: { type: string, format: uuid }
         target_note_asset_id: { type: string, format: uuid }
         operation: { type: string, enum: [create_chat, link, merge] }
-        context_policy: { type: string, enum: [summary_only, selected_only, full], description: 决定注入派生会话开场消息的内容量：摘要(200字/块)/选中原文(2000字/块)/源笔记全文 }
+        context_policy: { type: string, enum: [summary_only, selected_only, full], description: 决定注入派生会话笔记开场引用块的内容量：摘要(200字/块)/选中原文(2000字/块)/源笔记全文 }
         status: { type: string, enum: [requested, discussing, result_ready, finalizing, completed, failed, cancelled] }
         created_at: { type: string, format: date-time }
         completed_at: { type: string, format: date-time, description: 未完成时为空字符串 }
         sources:
           type: array
-          description: 选中源块明细（GET 详情返回）；origin 标记来源=message 消息块 / manual 手动块
+          description: 选中源块明细（GET 详情返回）；选块范围为源笔记树（手动块与收录摘录）
           items: { $ref: '#/components/schemas/DerivationSource' }
     DerivationSource:
       type: object
       properties:
         ordinal: { type: integer }
-        origin: { type: string, enum: [message, manual] }
+        origin: { type: string, enum: [note], description: 源笔记块 }
         source_container_id: { type: string, format: uuid }
         source_block_revision_id: { type: string, format: uuid }
         source_excerpt: { type: string }

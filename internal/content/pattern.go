@@ -294,7 +294,7 @@ func (s Service) ApplyPattern(ctx context.Context, principal auth.Principal, ide
 		return 0, err
 	}
 	for _, block := range blocks {
-		if _, err := insertManualBlock(ctx, tx, principal.OrganizationID, containerID, noteAssetID, revision, block.Kind, block.Content, principal.UserID); err != nil {
+		if _, err := insertManualBlock(ctx, tx, principal.OrganizationID, containerID, noteAssetID, revision, block.Kind, block.Content, "", principal.UserID); err != nil {
 			return 0, err
 		}
 		revision++

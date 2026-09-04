@@ -651,11 +651,11 @@ func BuildEligibilityTx(ctx context.Context, tx pgx.Tx, organizationID, assetVer
 	var eligible bool
 	err := tx.QueryRow(ctx, `
 		SELECT (
-		    COALESCE(mv.policy #>> '{retrieval,fulltext,enabled}','')::boolean
-		    OR COALESCE(mv.policy #>> '{retrieval,semantic,enabled}','')::boolean
+		    COALESCE((mv.policy #>> '{retrieval,fulltext,enabled}')::boolean, false)
+		    OR COALESCE((mv.policy #>> '{retrieval,semantic,enabled}')::boolean, false)
 		) AND EXISTS (
 		    SELECT 1 FROM jsonb_object_keys(COALESCE(mv.policy->'channels','{}'::jsonb)) AS channel
-		    WHERE COALESCE(mv.policy #>> ARRAY['channels', channel, 'enabled'], 'false')::boolean
+		    WHERE COALESCE((mv.policy #>> ARRAY['channels', channel, 'enabled'])::boolean, false)
 		)
 		FROM asset.asset_versions v
 		JOIN model.resource_model_versions mv

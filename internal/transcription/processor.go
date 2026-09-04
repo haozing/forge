@@ -39,20 +39,18 @@ func (p Processor) Process(ctx context.Context, jobID, mediaID string) error {
 		jobCtx, cancel = context.WithTimeout(ctx, p.Timeout)
 		defer cancel()
 	}
-	var organizationID, conversationID, containerID, noteAssetID, attachmentID, objectKey, filename, mediaType, language, createdBy, status string
+	var organizationID, conversationID, attachmentID, objectKey, filename, mediaType, language, createdBy, status string
 	var bodyRevision string
 	err := p.Store.Pool.QueryRow(jobCtx, `
-		SELECT j.organization_id::text, cm.conversation_id::text, cc.id::text, nb.note_asset_id::text, cm.attachment_id::text,
+		SELECT j.organization_id::text, cm.conversation_id::text, cm.attachment_id::text,
 		       at.object_key, at.original_filename, at.media_type, COALESCE(cm.language, ''),
 		       cm.created_by::text, cm.status, COALESCE(cm.transcription_block_revision_id::text, '')
 		FROM content.processing_jobs j
 		JOIN content.conversation_media cm ON cm.id = j.source_id AND cm.organization_id = j.organization_id
 		JOIN content.conversations c ON c.id = cm.conversation_id
-		JOIN content.note_bindings nb ON nb.conversation_id = c.id
-		JOIN content.containers cc ON cc.organization_id = nb.organization_id AND cc.asset_id = nb.note_asset_id
 		JOIN asset.attachments at ON at.id = cm.attachment_id
 		WHERE j.id = $1::uuid AND j.job_type = 'transcription' AND j.source_id = $2::uuid
-	`, jobID, mediaID).Scan(&organizationID, &conversationID, &containerID, &noteAssetID, &attachmentID, &objectKey, &filename, &mediaType, &language, &createdBy, &status, &bodyRevision)
+	`, jobID, mediaID).Scan(&organizationID, &conversationID, &attachmentID, &objectKey, &filename, &mediaType, &language, &createdBy, &status, &bodyRevision)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("transcription job not found")
 	}
@@ -98,26 +96,14 @@ func (p Processor) Process(ctx context.Context, jobID, mediaID string) error {
 	if revisionID == "" {
 		var blockID string
 		var sequence int64
-		var treeRevision int64
-		if err := tx.QueryRow(jobCtx, `
-			SELECT id::text, revision FROM content.containers
-			WHERE organization_id = $1::uuid AND id = $2::uuid
-			FOR UPDATE
-		`, organizationID, containerID).Scan(&containerID, &treeRevision); err != nil {
-			return fmt.Errorf("lock transcription container: %w", err)
-		}
 		if err := tx.QueryRow(jobCtx, `SELECT COALESCE(MAX(sequence_no), 0) + 1 FROM content.message_blocks WHERE conversation_id = $1::uuid`, conversationID).Scan(&sequence); err != nil {
 			return fmt.Errorf("allocate transcription sequence: %w", err)
 		}
-		var nextPosition float64
-		if err := tx.QueryRow(jobCtx, `
-			SELECT COALESCE(MAX(position) + 1, 0) FROM content.block_placements
-			WHERE organization_id = $1::uuid AND container_id = $2::uuid
-		`, organizationID, containerID).Scan(&nextPosition); err != nil {
-			return fmt.Errorf("allocate transcription position: %w", err)
-		}
 		checksum := checksumText(result.Text)
-		if err := tx.QueryRow(jobCtx, `INSERT INTO content.blocks (organization_id, block_type, created_by) VALUES ($1::uuid, 'paragraph', $2::uuid) RETURNING id::text`, organizationID, createdBy).Scan(&blockID); err != nil {
+		// The transcript is a conversation message (immutable transcript
+		// record), not note content: it never enters the note tree; members
+		// save it into the note explicitly like any other message.
+		if err := tx.QueryRow(jobCtx, `INSERT INTO content.blocks (organization_id, block_type, created_by) VALUES ($1::uuid, 'message', $2::uuid) RETURNING id::text`, organizationID, createdBy).Scan(&blockID); err != nil {
 			return fmt.Errorf("create transcription block: %w", err)
 		}
 		if err := tx.QueryRow(jobCtx, `
@@ -126,25 +112,6 @@ func (p Processor) Process(ctx context.Context, jobID, mediaID string) error {
 			RETURNING id::text
 		`, organizationID, blockID, result.Text, result.Language, createdBy, checksum).Scan(&revisionID); err != nil {
 			return fmt.Errorf("create transcription revision: %w", err)
-		}
-		if _, err := tx.Exec(jobCtx, `
-			INSERT INTO content.block_placements (organization_id, container_id, block_revision_id, position)
-			VALUES ($1::uuid, $2::uuid, $3::uuid, $4)
-		`, organizationID, containerID, revisionID, nextPosition); err != nil {
-			return fmt.Errorf("place transcription block: %w", err)
-		}
-		if _, err := tx.Exec(jobCtx, `UPDATE content.containers SET revision = revision + 1, updated_at = now() WHERE id = $1::uuid`, containerID); err != nil {
-			return fmt.Errorf("advance transcription container: %w", err)
-		}
-		// The tree moved: advance the note's draft epoch so the next freeze
-		// sees dirty state and the transcription reaches a frozen version.
-		if tag, err := tx.Exec(jobCtx, `
-			UPDATE asset.asset_drafts SET revision = revision + 1, updated_at = now()
-			WHERE organization_id = $1::uuid AND asset_id = $2::uuid
-		`, organizationID, noteAssetID); err != nil {
-			return fmt.Errorf("advance transcription draft epoch: %w", err)
-		} else if tag.RowsAffected() == 0 {
-			return fmt.Errorf("note draft row missing for transcription epoch advance")
 		}
 		if _, err := tx.Exec(jobCtx, `
 			INSERT INTO content.message_blocks (organization_id, block_revision_id, conversation_id, role, status, sequence_no, reference_metadata)

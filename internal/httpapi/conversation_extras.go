@@ -255,14 +255,15 @@ func noteBlocks(deps Dependencies) http.HandlerFunc {
 			}
 		case http.MethodPost:
 			var body struct {
-				Kind    string `json:"kind"`
-				Content string `json:"content"`
+				Kind                string `json:"kind"`
+				Content             string `json:"content"`
+				FromBlockRevisionID string `json:"from_block_revision_id"`
 			}
 			if !decodeNoteBlockBody(w, r, &body, 64*1024) {
 				return
 			}
 			var entry contentservice.NoteBlockEntry
-			entry, err = deps.ConversationService.AddNoteBlock(r.Context(), principal, idempotencyKey, conversationID, body.Kind, body.Content)
+			entry, err = deps.ConversationService.AddNoteBlock(r.Context(), principal, idempotencyKey, conversationID, body.Kind, body.Content, body.FromBlockRevisionID)
 			if err == nil {
 				writeData(w, r, http.StatusCreated, entry)
 			}
