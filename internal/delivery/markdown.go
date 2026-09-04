@@ -52,7 +52,9 @@ func buildMarkdownPolicy() *bluemonday.Policy {
 	policy.AllowAttrs("href", "title").OnElements("a")
 	policy.AllowAttrs("id").OnElements("h1", "h2", "h3", "h4", "h5", "h6")
 	policy.AllowAttrs("src").Matching(siteMediaSrcPattern).OnElements("img")
-	policy.AllowAttrs("alt", "width", "height").OnElements("img")
+	// title carries the image block's caption through the freeze; alt is the
+	// accessibility fallback resolved at freeze time.
+	policy.AllowAttrs("alt", "title", "width", "height").OnElements("img")
 	policy.AllowAttrs("type").Matching(regexp.MustCompile(`^checkbox$`)).OnElements("input")
 	policy.AllowAttrs("disabled", "checked").OnElements("input")
 	policy.AllowAttrs("start").OnElements("ol")

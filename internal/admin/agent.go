@@ -1,6 +1,10 @@
 package admin
 
 import (
+	"slices"
+
+	"agentchunzhi/internal/agentruntime/tools"
+
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -292,14 +296,23 @@ func validCapabilities(values []string) bool {
 	return true
 }
 
+// allowedAgentCapability accepts the builtin tool registry's closed
+// vocabulary (single source of truth, so new tools like attachment.read are
+// grantable the day they register) plus the non-tool capability strings the
+// open-API gates require. The hand-maintained list previously drifted from
+// the registry and rejected valid grants (site.style, attachment.read, ...).
 func allowedAgentCapability(value string) bool {
+	registryTools := tools.KnownCapabilities()
+	if slices.Contains(registryTools, value) {
+		return true
+	}
 	switch value {
 	// query.execute is required by the open-API unified query gate
 	// (ForOpenAPI); without it an application can never be granted search.
 	// publication.submit gates the open publication-request surface — it was
 	// missing here, which made that endpoint unreachable for every key
 	// (latent defect surfaced by the p10b acceptance).
-	case "query.read", "query.execute", "reference.read", "asset.create", "asset.edit", "asset.publish", "asset.archive", "publication.submit", "agent.run":
+	case "query.execute", "reference.read", "publication.submit", "agent.run":
 		return true
 	default:
 		return false
