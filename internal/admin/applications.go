@@ -33,6 +33,7 @@ type AgentApplicationSummary struct {
 	Name              string    `json:"name"`
 	Status            string    `json:"status"`
 	Capabilities      []string  `json:"capabilities"`
+	ToolPolicy        any       `json:"tool_policy,omitempty"`
 	APIKeyActive      bool      `json:"api_key_active"`
 	Ready             bool      `json:"ready"`
 	CreatedAt         time.Time `json:"created_at"`
@@ -147,6 +148,7 @@ func (s Service) GetAgentApplication(ctx context.Context, principal auth.Princip
 	}
 	var item AgentApplicationSummary
 	var capabilities []byte
+	var toolPolicy []byte
 	err := s.Store.Pool.QueryRow(ctx, `
 		SELECT aa.id::text,
 		       aa.bound_agent_user_id::text,
@@ -163,6 +165,7 @@ func (s Service) GetAgentApplication(ctx context.Context, principal auth.Princip
 		       aa.name,
 		       aa.status,
 		       aa.capabilities,
+		       COALESCE(aa.tool_policy, '{}'::jsonb),
 		       EXISTS (
 		           SELECT 1
 		           FROM identity.api_keys ak
@@ -203,6 +206,7 @@ func (s Service) GetAgentApplication(ctx context.Context, principal auth.Princip
 		&item.Name,
 		&item.Status,
 		&capabilities,
+		&toolPolicy,
 		&item.APIKeyActive,
 		&item.Ready,
 		&item.CreatedAt,
@@ -219,6 +223,14 @@ func (s Service) GetAgentApplication(ctx context.Context, principal auth.Princip
 		if err := json.Unmarshal(capabilities, &item.Capabilities); err != nil {
 			return AgentApplicationSummary{}, fmt.Errorf("decode agent application capabilities: %w", err)
 		}
+	}
+	item.ToolPolicy = map[string]any{}
+	if len(toolPolicy) > 0 {
+		decoded := map[string]any{}
+		if err := json.Unmarshal(toolPolicy, &decoded); err != nil {
+			return AgentApplicationSummary{}, fmt.Errorf("decode agent application tool policy: %w", err)
+		}
+		item.ToolPolicy = decoded
 	}
 	return item, nil
 }

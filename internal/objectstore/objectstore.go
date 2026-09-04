@@ -22,6 +22,11 @@ type Object struct {
 
 type ObjectRef struct {
 	Key string
+	// Process carries an optional provider-side image processing directive
+	// (G5 responsive variants). It is always a server-mapped closed enum —
+	// never raw user input — and implementations without processing support
+	// ignore it and return the original object.
+	Process string
 }
 
 type ObjectReader struct {

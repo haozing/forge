@@ -1,5 +1,5 @@
 {{define "card"}}<article class="card">
-  {{with .CoverURL}}<div class="card-cover"><img src="{{.}}" alt="{{$.Title}}" loading="lazy"></div>{{end}}
+  {{with .CoverURL}}<div class="card-cover"><img src="{{.}}?variant=card" srcset="{{.}}?variant=thumb 320w, {{.}}?variant=card 640w, {{.}} 1280w" sizes="(max-width: 640px) 100vw, 400px" alt="{{$.Title}}" loading="lazy"></div>{{end}}
   <h3 class="card-title"><a href="{{.Href}}">{{.Title}}</a></h3>
   {{with .Summary}}<p class="card-summary">{{.}}</p>{{end}}
   <footer class="card-meta">

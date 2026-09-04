@@ -1124,7 +1124,7 @@ func (s MemberService) ConfirmVersion(ctx context.Context, principal auth.Princi
 	if err != nil {
 		return MemberAssetVersion{}, err
 	}
-	coverID, err := loadVersionCoverID(ctx, tx, versionID)
+	coverID, coverAlt, err := loadVersionCoverID(ctx, tx, versionID)
 	if err != nil {
 		return MemberAssetVersion{}, err
 	}
@@ -1162,6 +1162,7 @@ func (s MemberService) ConfirmVersion(ctx context.Context, principal auth.Princi
 		TagIDs:                 tagIDs,
 		AttachmentIDs:          attachmentIDs,
 		CoverAttachmentID:      coverID,
+		CoverAlt:               coverAlt,
 		CreatedBy:              principal.UserID,
 	})
 	if err != nil {

@@ -57,17 +57,28 @@ func TestRenderPagesSmoke(t *testing.T) {
 		}
 	}
 
-	detail := DetailVM{Page: Page{Kind: "detail", Site: chrome, Title: "Post · Demo", Canonical: "http://x/sites/demo/posts/hello", JSONLD: articleJSONLD(site.SiteFacts{Site: site.Site{Name: "Demo Site"}}, site.PublicPostContent{Title: "Post"}, "http://x")}}
+	detail := DetailVM{Page: Page{Kind: "detail", Site: chrome, Title: "Post · Demo", Canonical: "http://x/sites/demo/posts/hello", CanonicalImage: "http://x/sites/demo/media/att-1", JSONLD: articleJSONLD(site.SiteFacts{Site: site.Site{Name: "Demo Site"}}, site.PublicPostContent{Title: "Post"}, "http://x/sites/demo/posts/hello", "http://x/sites/demo", "", "http://x/sites/demo/media/att-1")}}
 	detail.ContentHTML = "<h2 id=\"a\">A</h2><p>body</p>"
 	detail.TOC = []Heading{{ID: "a", Text: "A", Level: 2}, {ID: "b", Text: "B", Level: 2}}
 	body, err = renderer.RenderPage("detail", detail)
 	if err != nil {
 		t.Fatalf("detail render: %v", err)
 	}
-	for _, marker := range []string{"application/ld+json", `"@type":"Article"`, "article-body", "toc"} {
+	for _, marker := range []string{"application/ld+json", `"@type":"Article"`, `"@type":"BreadcrumbList"`, `property="og:image"`, "summary_large_image", "article-body", "toc"} {
 		if !strings.Contains(string(body), marker) {
 			t.Fatalf("detail output missing %q", marker)
 		}
+	}
+	noCover := DetailVM{Page: Page{Kind: "detail", Site: chrome, Title: "Plain · Demo", Canonical: "http://x/sites/demo/posts/plain", JSONLD: articleJSONLD(site.SiteFacts{Site: site.Site{Name: "Demo Site"}}, site.PublicPostContent{Title: "Plain"}, "http://x/sites/demo/posts/plain", "http://x/sites/demo", "", "")}}
+	noCover.ContentHTML = "<p>body</p>"
+	body, _ = renderer.RenderPage("detail", noCover)
+	for _, marker := range []string{`name="twitter:card" content="summary"`} {
+		if !strings.Contains(string(body), marker) {
+			t.Fatalf("no-cover detail output missing %q", marker)
+		}
+	}
+	if strings.Contains(string(body), `property="og:image"`) {
+		t.Fatal("no-cover detail must not emit og:image")
 	}
 
 	// The markdown sanitizer pipeline output is marked safe by noescape —

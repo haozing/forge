@@ -7,15 +7,28 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
 	"agentchunzhi/internal/auth"
+	runtimetools "agentchunzhi/internal/agentruntime/tools"
 
 	"github.com/jackc/pgx/v5"
 )
 
 var ErrApplicationUpdateInvalidInput = errors.New("invalid agent application update input")
+
+// ToolPolicyPatch is the admin-facing subset of tool_policy the update
+// endpoint may change. allow_high_write stays SQL-only by design: it widens
+// the approval surface and has no console channel yet.
+type ToolPolicyPatch struct {
+	AllowedCapabilities *[]string `json:"allowed_capabilities"`
+	ApproveLowWrite     *bool     `json:"approve_low_write"`
+	// AllowLowWrite toggles the low-write tool class itself (G3/G6/G8 low
+	// writes: cover alt, pattern save); without it those tools never run.
+	AllowLowWrite *bool `json:"allow_low_write"`
+}
 
 type UpdateAgentApplicationInput struct {
 	ApplicationID   string
@@ -25,6 +38,7 @@ type UpdateAgentApplicationInput struct {
 	WorkflowKey     *string
 	Capabilities    *[]string
 	AnswerPosture   *string
+	ToolPolicy      *ToolPolicyPatch
 	IdempotencyKey  string
 }
 
@@ -71,13 +85,14 @@ func (s Service) UpdateAgentApplication(ctx context.Context, principal auth.Prin
 
 	var currentName, currentEndpointID, currentRuntimeMode, currentWorkflowKey, currentAnswerPosture string
 	var currentCapabilitiesJSON []byte
+	var currentToolPolicyJSON []byte
 	err = tx.QueryRow(ctx, `
-		SELECT name, model_endpoint_id::text, runtime_mode, COALESCE(workflow_key, ''), capabilities, answer_posture
+		SELECT name, model_endpoint_id::text, runtime_mode, COALESCE(workflow_key, ''), capabilities, answer_posture, COALESCE(tool_policy, '{}'::jsonb)
 		FROM integration.agent_applications
 		WHERE id = $1::uuid AND organization_id = $2::uuid
 		FOR UPDATE
 	`, input.ApplicationID, principal.OrganizationID).Scan(
-		&currentName, &currentEndpointID, &currentRuntimeMode, &currentWorkflowKey, &currentCapabilitiesJSON, &currentAnswerPosture,
+		&currentName, &currentEndpointID, &currentRuntimeMode, &currentWorkflowKey, &currentCapabilitiesJSON, &currentAnswerPosture, &currentToolPolicyJSON,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return UpdateAgentApplicationResult{}, ErrApplicationNotFound
@@ -137,6 +152,46 @@ func (s Service) UpdateAgentApplication(ctx context.Context, principal auth.Prin
 	if err != nil {
 		return UpdateAgentApplicationResult{}, fmt.Errorf("encode agent application capabilities: %w", err)
 	}
+
+	// tool_policy patch: merge into the stored JSON object so keys managed
+	// outside this channel (allow_high_write) survive untouched. Capability
+	// values must come from the closed builtin vocabulary.
+	toolPolicy := make(map[string]any)
+	if len(currentToolPolicyJSON) > 0 {
+		if err := json.Unmarshal(currentToolPolicyJSON, &toolPolicy); err != nil {
+			return UpdateAgentApplicationResult{}, fmt.Errorf("decode current tool policy: %w", err)
+		}
+	}
+	if input.ToolPolicy != nil {
+		if input.ToolPolicy.AllowedCapabilities != nil {
+			known := make(map[string]bool)
+			for _, capability := range runtimetools.KnownCapabilities() {
+				known[capability] = true
+			}
+			normalized := make([]string, 0, len(*input.ToolPolicy.AllowedCapabilities))
+			seen := make(map[string]bool)
+			for _, capability := range *input.ToolPolicy.AllowedCapabilities {
+				capability = strings.TrimSpace(capability)
+				if !known[capability] || seen[capability] {
+					return UpdateAgentApplicationResult{}, ErrApplicationUpdateInvalidInput
+				}
+				seen[capability] = true
+				normalized = append(normalized, capability)
+			}
+			sort.Strings(normalized)
+			toolPolicy["allowed_capabilities"] = normalized
+		}
+		if input.ToolPolicy.ApproveLowWrite != nil {
+			toolPolicy["approve_low_write"] = *input.ToolPolicy.ApproveLowWrite
+		}
+		if input.ToolPolicy.AllowLowWrite != nil {
+			toolPolicy["allow_low_write"] = *input.ToolPolicy.AllowLowWrite
+		}
+	}
+	toolPolicyJSON, err := json.Marshal(toolPolicy)
+	if err != nil {
+		return UpdateAgentApplicationResult{}, fmt.Errorf("encode agent application tool policy: %w", err)
+	}
 	if err := requireModelEndpointForRuntime(ctx, tx, principal.OrganizationID, endpointID, runtimeMode); err != nil {
 		if errors.Is(err, ErrInvalidInput) {
 			return UpdateAgentApplicationResult{}, ErrApplicationUpdateInvalidInput
@@ -153,10 +208,11 @@ func (s Service) UpdateAgentApplication(ctx context.Context, principal auth.Prin
 		    workflow_key = $6,
 		    capabilities = $7::jsonb,
 		    answer_posture = $8,
+		    tool_policy = $9::jsonb,
 		    updated_at = now()
 		WHERE id = $1::uuid AND organization_id = $2::uuid
 		RETURNING id::text, model_endpoint_id::text, runtime_mode, COALESCE(workflow_key, ''), answer_posture, updated_at
-	`, input.ApplicationID, principal.OrganizationID, name, endpointID, runtimeMode, nullableText(workflowKey), string(capabilitiesJSON), answerPosture).Scan(
+	`, input.ApplicationID, principal.OrganizationID, name, endpointID, runtimeMode, nullableText(workflowKey), string(capabilitiesJSON), answerPosture, string(toolPolicyJSON)).Scan(
 		&result.ApplicationID, &result.ModelEndpointID, &result.RuntimeMode, &result.WorkflowKey, &result.AnswerPosture, &result.UpdatedAt,
 	)
 	if err != nil {
@@ -168,6 +224,8 @@ func (s Service) UpdateAgentApplication(ctx context.Context, principal auth.Prin
 		"model_endpoint_id":          result.ModelEndpointID,
 		"previous_runtime_mode":      currentRuntimeMode,
 		"runtime_mode":               result.RuntimeMode,
+		"previous_tool_policy":       json.RawMessage(currentToolPolicyJSON),
+		"tool_policy":                json.RawMessage(toolPolicyJSON),
 	})
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO audit.audit_log
@@ -194,7 +252,7 @@ func (s Service) UpdateAgentApplication(ctx context.Context, principal auth.Prin
 }
 
 func hasApplicationPatch(input UpdateAgentApplicationInput) bool {
-	return input.Name != nil || input.ModelEndpointID != nil || input.RuntimeMode != nil || input.WorkflowKey != nil || input.Capabilities != nil || input.AnswerPosture != nil
+	return input.Name != nil || input.ModelEndpointID != nil || input.RuntimeMode != nil || input.WorkflowKey != nil || input.Capabilities != nil || input.AnswerPosture != nil || input.ToolPolicy != nil
 }
 
 func applicationUpdateRequestHash(input UpdateAgentApplicationInput) (string, error) {

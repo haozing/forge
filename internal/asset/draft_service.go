@@ -290,6 +290,9 @@ type VersionMaterial struct {
 	// CoverAttachmentID marks one of AttachmentIDs as the version cover
 	// (二期 §6); it flows into asset_version_attachments.role.
 	CoverAttachmentID string
+	// CoverAlt is the cover's alt text (G6): freezes into the version link
+	// alongside the role, so accessibility text is versioned with its image.
+	CoverAlt string
 	Relations        []RelationMaterial // materialize as asset_relations rows (source='ai')
 	SourceRawInputID string
 	// Blocks is the reference-style frozen tree snapshot (noteblocks.SnapshotJSON)
@@ -438,14 +441,16 @@ func createVersionTx(ctx context.Context, tx pgx.Tx, material VersionMaterial) (
 	}
 	for _, attachmentID := range dedupeSort(material.AttachmentIDs) {
 		role := "body"
+		altText := ""
 		if attachmentID == material.CoverAttachmentID {
 			role = "cover"
+			altText = material.CoverAlt
 		}
 		if _, err := tx.Exec(ctx, `
-			INSERT INTO asset.asset_version_attachments (organization_id, workspace_id, asset_version_id, attachment_id, created_by, role)
-			VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, NULLIF($5,'')::uuid, $6)
+			INSERT INTO asset.asset_version_attachments (organization_id, workspace_id, asset_version_id, attachment_id, created_by, role, alt_text)
+			VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, NULLIF($5,'')::uuid, $6, $7)
 			ON CONFLICT DO NOTHING
-		`, material.OrganizationID, material.WorkspaceID, versionID, attachmentID, material.CreatedBy, role); err != nil {
+		`, material.OrganizationID, material.WorkspaceID, versionID, attachmentID, material.CreatedBy, role, altText); err != nil {
 			return "", 0, nil, fmt.Errorf("insert version attachment: %w", err)
 		}
 	}
@@ -827,15 +832,17 @@ func commitDraftTx(ctx context.Context, tx pgx.Tx, events *eventing.EventStore, 
 	if err != nil {
 		return CommitResult{}, err
 	}
-	attachmentIDs, draftCover, err := loadDraftAttachments(ctx, tx, draft.DraftID)
+	attachmentIDs, draftCover, draftCoverAlt, err := loadDraftAttachments(ctx, tx, draft.DraftID)
 	if err != nil {
 		return CommitResult{}, err
 	}
 	// The draft's explicit cover wins; otherwise the previous version's
-	// cover carries into the new snapshot (republishing keeps the image).
+	// cover carries into the new snapshot (republishing keeps the image and
+	// its alt text).
 	coverID := draftCover
+	coverAlt := draftCoverAlt
 	if coverID == "" && row.CurrentWorkingVersionID != "" {
-		coverID, err = loadVersionCoverID(ctx, tx, row.CurrentWorkingVersionID)
+		coverID, coverAlt, err = loadVersionCoverID(ctx, tx, row.CurrentWorkingVersionID)
 		if err != nil {
 			return CommitResult{}, err
 		}
@@ -857,6 +864,7 @@ func commitDraftTx(ctx context.Context, tx pgx.Tx, events *eventing.EventStore, 
 		TagIDs:          tagIDs,
 		AttachmentIDs:   attachmentIDs,
 		CoverAttachmentID: coverID,
+		CoverAlt:        coverAlt,
 		Relations:       relations,
 		CreatedBy:       principal.UserID,
 	}
@@ -1020,27 +1028,30 @@ func loadDraftTagIDs(ctx context.Context, tx pgx.Tx, draftID string) ([]string, 
 	return ids, rows.Err()
 }
 
-// loadDraftAttachments returns the draft's attachment ids and its explicit
-// cover id (二期 §6: the cover rides the commit into the sealed version).
-func loadDraftAttachments(ctx context.Context, tx pgx.Tx, draftID string) ([]string, string, error) {
-	rows, err := tx.Query(ctx, `SELECT attachment_id::text, role FROM asset.asset_draft_attachments WHERE asset_draft_id = $1::uuid ORDER BY attachment_id`, draftID)
+// loadDraftAttachments returns the draft's attachment ids, its explicit cover
+// id and the cover's alt text (二期 §6 cover + G6 alt both ride the commit
+// into the sealed version).
+func loadDraftAttachments(ctx context.Context, tx pgx.Tx, draftID string) ([]string, string, string, error) {
+	rows, err := tx.Query(ctx, `SELECT attachment_id::text, role, alt_text FROM asset.asset_draft_attachments WHERE asset_draft_id = $1::uuid ORDER BY attachment_id`, draftID)
 	if err != nil {
-		return nil, "", fmt.Errorf("load draft attachments: %w", err)
+		return nil, "", "", fmt.Errorf("load draft attachments: %w", err)
 	}
 	defer rows.Close()
 	ids := []string{}
 	cover := ""
+	coverAlt := ""
 	for rows.Next() {
-		var id, role string
-		if err := rows.Scan(&id, &role); err != nil {
-			return nil, "", err
+		var id, role, alt string
+		if err := rows.Scan(&id, &role, &alt); err != nil {
+			return nil, "", "", err
 		}
 		ids = append(ids, id)
 		if role == "cover" {
 			cover = id
+			coverAlt = alt
 		}
 	}
-	return ids, cover, rows.Err()
+	return ids, cover, coverAlt, rows.Err()
 }
 
 // loadDraftRelationMaterials reads the AI relations accepted onto the draft,

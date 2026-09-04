@@ -18,6 +18,7 @@ import (
 	"agentchunzhi/internal/authz"
 	"agentchunzhi/internal/automation"
 	"agentchunzhi/internal/config"
+	"agentchunzhi/internal/content"
 	"agentchunzhi/internal/deletion"
 	"agentchunzhi/internal/delivery"
 	"agentchunzhi/internal/eventing"
@@ -26,6 +27,7 @@ import (
 	"agentchunzhi/internal/objectstore"
 	"agentchunzhi/internal/query"
 	"agentchunzhi/internal/retrieval"
+	"agentchunzhi/internal/review"
 	"agentchunzhi/internal/site"
 	"agentchunzhi/internal/store"
 	"agentchunzhi/internal/tag"
@@ -162,11 +164,13 @@ func main() {
 		QueryTimeout:    cfg.RetrievalQueryTimeout,
 	}
 	var siteServiceForTools = site.Service{Store: db, Events: &events, Policy: authz.WorkspacePolicyService{Store: db}}
+	reviewService := review.Service{Store: db, Events: &events, Policy: authz.WorkspacePolicyService{Store: db}}
+	contentServiceForTools := content.Service{Store: db, Events: events}
 	reactProcessor := &agentruntime.PersistentReActService{
 		Store: db, Cipher: checkpointCipher, Models: modelRegistry,
 		ToolFactory: agentruntime.DomainToolFactory{
 			Store: db, Events: events, Query: queryService, Models: modelRegistry,
-			Sites: &siteServiceForTools,
+			Sites: &siteServiceForTools, Reviews: &reviewService, Contents: &contentServiceForTools,
 		},
 		Coordinator: agentruntime.Coordinator{Store: db},
 	}
@@ -217,6 +221,7 @@ func main() {
 	river.AddWorker(workers, &worker.RecoverPendingDeliveriesWorker{Store: db, Limit: 100})
 	river.AddWorker(workers, &worker.RecoverAutomationAttemptsWorker{Service: automation.Service{Store: db}, Limit: 100})
 	river.AddWorker(workers, &worker.ExpiredRowsWorker{Store: db, Logf: log.Printf})
+	river.AddWorker(workers, &worker.ScheduledPublicationWorker{Reviews: &reviewService})
 	river.AddWorker(workers, &retrieval.BuildProjectionRunWorker{Engine: retrievalEngine})
 	river.AddWorker(workers, &retrieval.EmbedChunkBatchWorker{Engine: retrievalEngine})
 	river.AddWorker(workers, &retrieval.FinalizeProjectionRunWorker{Engine: retrievalEngine})
@@ -265,6 +270,11 @@ func main() {
 			// buckets.
 			river.NewPeriodicJob(river.PeriodicInterval(time.Minute), func() (river.JobArgs, *river.InsertOpts) {
 				return worker.CleanupExpiredRowsArgs{}, nil
+			}, nil),
+			// G4 scheduled publishing: flip due approved intents once a
+			// minute (effective-time tolerance ≤1m, see design doc §15).
+			river.NewPeriodicJob(river.PeriodicInterval(time.Minute), func() (river.JobArgs, *river.InsertOpts) {
+				return worker.ScheduledPublicationArgs{}, nil
 			}, nil),
 		},
 	})

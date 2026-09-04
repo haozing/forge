@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"agentchunzhi/internal/site"
 
@@ -14,9 +15,11 @@ import (
 	assetservice "agentchunzhi/internal/asset"
 	"agentchunzhi/internal/auth"
 	"agentchunzhi/internal/authz"
+	"agentchunzhi/internal/content"
 	"agentchunzhi/internal/eventing"
 	agentquery "agentchunzhi/internal/query"
 	"agentchunzhi/internal/resourcemodel"
+	"agentchunzhi/internal/review"
 	"agentchunzhi/internal/store"
 
 	"github.com/cloudwego/eino/compose"
@@ -33,6 +36,12 @@ type DomainToolFactory struct {
 	// Sites gives the style tools the site domain surface (preset save and
 	// preset expansion); nil disables those tools.
 	Sites StyleSiteService
+	// Reviews carries the scheduled-publish registration for the
+	// publish_asset tool's scheduled_at parameter (nil disables deferral).
+	Reviews *review.Service
+	// Contents carries the content-pattern domain surface for the G8 tools
+	// (nil disables the pattern tools).
+	Contents *content.Service
 }
 
 // StyleSiteService is the narrow site surface the style tools need.
@@ -220,6 +229,19 @@ func (f DomainToolFactory) Build(ctx context.Context, scope ReActToolScope, rawP
 			}, readable, editable)
 		},
 		PublishAsset: func(ctx context.Context, arguments map[string]any) (any, error) {
+			// A future scheduled_at defers the publish (G4): the intent lands
+			// as a scheduled publication request the worker executes at the
+			// due moment — same approval flow as the immediate path.
+			if raw := stringValue(arguments["scheduled_at"]); raw != "" {
+				moment, err := time.Parse(time.RFC3339, strings.TrimSpace(raw))
+				if err != nil {
+					return nil, errors.New("scheduled_at must be an RFC3339 timestamp")
+				}
+				if f.Reviews == nil {
+					return nil, errors.New("scheduled publishing is unavailable")
+				}
+				return f.Reviews.ScheduleDirect(ctx, principal, stringValue(arguments["asset_id"]), moment)
+			}
 			models, err := allowed(ctx, "asset.publish")
 			if err != nil {
 				return nil, err
@@ -233,6 +255,47 @@ func (f DomainToolFactory) Build(ctx context.Context, scope ReActToolScope, rawP
 			}
 			return assets.Archive(ctx, principal, models, stringValue(arguments["asset_id"]))
 		},
+		// G3/G6 content-quality tools: the read-only trio ships whenever the
+		// structured endpoint registry exists; cover alt additionally needs
+		// the asset.write capability gate.
+		PublishChecklist: func(ctx context.Context, arguments map[string]any) (any, error) {
+			if _, err := allowed(ctx, "asset.read"); err != nil {
+				return nil, err
+			}
+			return f.publishChecklist(ctx, scope, stringValue(arguments["asset_id"]), boolValue(arguments["check_links"]))
+		},
+		ListStaleAssets: func(ctx context.Context, arguments map[string]any) (any, error) {
+			if _, err := allowed(ctx, "asset.read"); err != nil {
+				return nil, err
+			}
+			days, _ := arguments["days"].(float64)
+			return f.listStaleAssets(ctx, scope, int64(days))
+		},
+		SuggestCoverAlt: func(ctx context.Context, arguments map[string]any) (any, error) {
+			if _, err := allowed(ctx, "asset.write"); err != nil {
+				return nil, err
+			}
+			return f.suggestCoverAlt(ctx, scope, principal.UserID, stringValue(arguments["asset_id"]), stringValue(arguments["alt_text"]))
+		},
+	}
+	if f.Contents != nil {
+		handlers.SaveContentPattern = func(ctx context.Context, arguments map[string]any) (any, error) {
+			blocks := []content.PatternBlock{}
+			if raw, ok := arguments["blocks"].([]any); ok && len(raw) > 0 {
+				encoded, err := json.Marshal(raw)
+				if err != nil {
+					return nil, errors.New("blocks must be a list of {kind, content} objects")
+				}
+				if err := json.Unmarshal(encoded, &blocks); err != nil {
+					return nil, errors.New("blocks must be a list of {kind, content} objects")
+				}
+			}
+			return f.Contents.CreatePattern(ctx, principal, stringValue(arguments["name"]), stringValue(arguments["description"]), blocks, stringValue(arguments["from_asset_id"]))
+		}
+		handlers.ListContentPatterns = func(ctx context.Context, arguments map[string]any) (any, error) {
+			limit, _ := arguments["limit"].(float64)
+			return f.Contents.ListPatterns(ctx, principal, int(limit))
+		}
 	}
 	if boolValue(rawPolicy["allow_attachment_text"]) {
 		handlers.GetAttachmentText = func(ctx context.Context, arguments map[string]any) (any, error) {
@@ -244,6 +307,9 @@ func (f DomainToolFactory) Build(ctx context.Context, scope ReActToolScope, rawP
 		}
 	}
 	if f.Models != nil {
+		handlers.SuggestDisplayPath = func(ctx context.Context, arguments map[string]any) (any, error) {
+			return f.suggestDisplayPath(ctx, scope, stringValue(arguments["title"]), stringValue(arguments["asset_id"]))
+		}
 		handlers.SiteStyleSuggest = func(ctx context.Context, arguments map[string]any) (any, error) {
 			// Read-only tool (design doc §8.3): the site row is scoped to
 			// the run's organization and workspace; no site.manage involved.

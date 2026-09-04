@@ -149,3 +149,9 @@ h2 { font-size: 1.35em; }
 .comment-form textarea { border: 1px solid var(--c-border); border-radius: var(--radius); background: var(--c-bg); color: var(--c-text); padding: var(--space); font: inherit; min-height: 96px; resize: vertical; }
 .comment-form button { justify-self: start; border: none; border-radius: var(--radius); background: var(--c-primary); color: var(--c-on-primary); padding: calc(var(--space) * .7) calc(var(--space) * 2); font: inherit; cursor: pointer; }
 .comment-form .comment-hint { color: var(--c-muted); font-size: .85em; }
+
+/* Related posts block (G7): detail page bottom, cards reuse the card styles. */
+.related-posts { margin-top: calc(var(--space) * 4); }
+.related-posts h2 { font-size: 1.25em; margin: 0 0 calc(var(--space) * 1.5); }
+.related-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: calc(var(--space) * 1.5); }
+@media (max-width: 640px) { .related-grid { grid-template-columns: 1fr; } }

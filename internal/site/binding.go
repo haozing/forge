@@ -433,6 +433,15 @@ func (s Service) UpdateBinding(ctx context.Context, principal auth.Principal, wo
 		}
 		return Binding{}, fmt.Errorf("update binding: %w", err)
 	}
+	if input.DisplayPath != nil {
+		// A moved display_path leaves a one-hop 301 from the old path so
+		// external links and search weight survive the rename (G2).
+		if newPath := strings.TrimSpace(*input.DisplayPath); newPath != current.DisplayPath {
+			if err := recordPathRedirectTx(ctx, tx, principal.OrganizationID, siteID, bindingID, current.DisplayPath, newPath, principal.UserID); err != nil {
+				return Binding{}, err
+			}
+		}
+	}
 	site, err = bumpSiteRevision(ctx, tx, principal.OrganizationID, workspaceID, siteID)
 	if err != nil {
 		return Binding{}, err
@@ -589,4 +598,27 @@ func recordBindingAudit(ctx context.Context, tx pgx.Tx, principal auth.Principal
 	metadata["site_id"] = item.SiteID
 	entry := store.NewAuditEntry(action, principal.OrganizationID, principal.UserID, "site_binding", item.ID, metadata)
 	_ = store.AppendAuditTx(ctx, tx, entry, workspaceID)
+}
+
+// recordPathRedirectTx captures a display_path change as a same-site 301
+// (old → new) and flattens any existing chain pointing at the old path, so
+// every redirect resolves in exactly one hop (A→B then B→C rewrites A→C).
+func recordPathRedirectTx(ctx context.Context, tx pgx.Tx, organizationID, siteID, bindingID, fromPath, toPath, userID string) error {
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO site.path_redirects
+			(organization_id, site_id, from_path, to_path, binding_id, created_by)
+		VALUES ($1::uuid, $2::uuid, $3, $4, $5::uuid, $6::uuid)
+		ON CONFLICT (site_id, from_path) DO UPDATE
+		SET to_path = EXCLUDED.to_path, updated_at = now()
+	`, organizationID, siteID, fromPath, toPath, bindingID, userID); err != nil {
+		return fmt.Errorf("record path redirect: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE site.path_redirects
+		SET to_path = $4, updated_at = now()
+		WHERE organization_id = $1::uuid AND site_id = $2::uuid AND to_path = $3 AND from_path <> $4
+	`, organizationID, siteID, fromPath, toPath); err != nil {
+		return fmt.Errorf("flatten path redirect chain: %w", err)
+	}
+	return nil
 }

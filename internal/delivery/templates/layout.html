@@ -11,6 +11,14 @@
 {{with .Description}}<meta property="og:description" content="{{.}}">{{end}}
 <meta property="og:site_name" content="{{.Site.Name}}">
 <meta property="og:type" content="{{if eq .Kind "detail"}}article{{else}}website{{end}}">
+<meta property="og:url" content="{{.Canonical}}">
+{{if .CanonicalImage}}
+<meta property="og:image" content="{{.CanonicalImage}}">
+<meta property="og:image:alt" content="{{.CanonicalImageAlt}}">
+<meta name="twitter:card" content="summary_large_image">
+{{else}}
+<meta name="twitter:card" content="summary">
+{{end}}
 {{with .ModifiedISO}}<meta property="article:modified_time" content="{{.}}">{{end}}
 {{with .JSONLD}}<script type="application/ld+json">{{.}}</script>{{end}}
 <style>{{.Site.StyleCSSVars}}</style>

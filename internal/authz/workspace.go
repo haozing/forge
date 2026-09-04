@@ -80,13 +80,18 @@ func (p WorkspacePolicyService) Require(ctx context.Context, principal auth.Prin
 	}
 	if principal.UserType == auth.UserTypeAgent {
 		var allowed []string
+		// Organization-level policy rows (workspace_id NULL) answer for every
+		// workspace of the organization — the same C11-family NULL semantics
+		// already fixed for models and webhooks. A workspace-specific row
+		// wins over the org-level fallback (narrowest grant first).
 		err := p.Store.Pool.QueryRow(ctx, `
 			SELECT COALESCE(ap.actions, '{}'::text[])
 			FROM content.agent_access_policies ap
-			WHERE ap.organization_id = $1::uuid AND ap.workspace_id = $2::uuid
+			WHERE ap.organization_id = $1::uuid
+			  AND (ap.workspace_id = $2::uuid OR ap.workspace_id IS NULL)
 			  AND ap.agent_user_id = $3::uuid
 			  AND ($4 = '' OR ap.resource_model_id = NULLIF($4, '')::uuid)
-			ORDER BY ap.resource_model_id NULLS LAST
+			ORDER BY ap.workspace_id NULLS LAST, ap.resource_model_id NULLS LAST
 			LIMIT 1
 		`, principal.OrganizationID, workspaceID, principal.UserID, resourceModelID).Scan(&allowed)
 		if errors.Is(err, pgx.ErrNoRows) || (!containsAction(allowed, action) && !containsAction(principal.Capabilities, action)) {

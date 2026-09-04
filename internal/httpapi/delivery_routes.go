@@ -49,6 +49,16 @@ func deliveryBaseURL(r *http.Request) string {
 // writeDeliveryPage stamps the delivery headers and writes the page body;
 // a matching If-None-Match answers 304 without a body.
 func writeDeliveryPage(w http.ResponseWriter, r *http.Request, service *delivery.Service, page *delivery.Response) {
+	if page.RedirectPath != "" {
+		// Same-site 301 (moved display_path, G2): Location only, no body,
+		// no CSP/ETag machinery — never cached by the page cache.
+		w.Header().Set("Location", page.RedirectPath)
+		w.Header().Set("Content-Type", page.ContentType)
+		w.Header().Set("Cache-Control", page.CacheControl)
+		w.Header().Set("X-Robots-Tag", "noindex, nofollow")
+		w.WriteHeader(page.Status)
+		return
+	}
 	writeETag(w, page.ETag)
 	w.Header().Set("Content-Type", page.ContentType)
 	w.Header().Set("Cache-Control", page.CacheControl)
@@ -433,17 +443,50 @@ func deliverySiteMedia(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusNotFound, "site_not_found")
 			return
 		}
-		reader, err := service.Objects.Get(r.Context(), objectstore.ObjectRef{Key: media.ObjectKey})
+		// G5 responsive variants: the query parameter selects one entry of a
+		// server-owned closed enum — the OSS process directive itself never
+		// travels through the request. Unknown values answer 400; the
+		// Content-Type comes from the same enum (never the upstream header).
+		variant := r.URL.Query().Get("variant")
+		process, variantType := "", ""
+		switch variant {
+		case "":
+		case "full":
+			process, variantType = "image/resize,w_1280", ""
+		case "card":
+			process, variantType = "image/resize,w_640/format,webp", "image/webp"
+		case "thumb":
+			process, variantType = "image/resize,w_320/format,webp", "image/webp"
+		default:
+			writeError(w, http.StatusBadRequest, "variant_invalid")
+			return
+		}
+		reader, err := service.Objects.Get(r.Context(), objectstore.ObjectRef{Key: media.ObjectKey, Process: process})
+		if err != nil && process != "" {
+			// Processing failed upstream (quota, unsupported source): degrade
+			// to the original rather than a broken image.
+			reader, err = service.Objects.Get(r.Context(), objectstore.ObjectRef{Key: media.ObjectKey})
+		}
 		if err != nil {
 			writeError(w, http.StatusNotFound, "site_not_found")
 			return
 		}
 		defer reader.Body.Close()
-		w.Header().Set("Content-Type", media.MediaType)
+		contentType := media.MediaType
+		if process != "" && variantType != "" {
+			contentType = variantType
+		}
+		w.Header().Set("Content-Type", contentType)
 		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
-		if media.ByteSize > 0 {
-			w.Header().Set("Content-Length", strconv.FormatInt(media.ByteSize, 10))
+		// The original's length is known from the DB; a processed variant
+		// reports its own length from the object store response.
+		responseLength := media.ByteSize
+		if process != "" {
+			responseLength = reader.ContentLength
+		}
+		if responseLength > 0 {
+			w.Header().Set("Content-Length", strconv.FormatInt(responseLength, 10))
 		}
 		w.WriteHeader(http.StatusOK)
 		if r.Method != http.MethodHead {

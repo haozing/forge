@@ -2,7 +2,7 @@
 <div class="article-layout{{if ne .Site.Style.Sidebar "none"}} has-sidebar{{end}}">
 <article class="article">
   <h1 class="article-title">{{.Title}}</h1>
-  {{with .CoverURL}}<div class="article-cover"><img src="{{.}}" alt="{{$.Title}}" loading="lazy"></div>{{end}}
+  {{with .CoverURL}}<div class="article-cover"><img src="{{.}}?variant=full" srcset="{{.}}?variant=card 640w, {{.}}?variant=full 1280w, {{.}} 1600w" sizes="(max-width: 900px) 100vw, 860px" alt="{{if $.CoverAlt}}{{$.CoverAlt}}{{else}}{{$.Title}}{{end}}" loading="lazy"></div>{{end}}
   <footer class="card-meta article-meta">
     {{with .PublishedOn}}<time>发布于 {{.}}</time>{{end}}
     {{with .Section}}{{if ne . ""}}<a href="{{$.SectionHref}}">{{.}}</a>{{end}}{{end}}
@@ -10,6 +10,10 @@
   </footer>
   {{if and (ne .Site.Style.Sidebar "toc") (gt (len .TOC) 1)}}<nav class="toc"><h2>目录</h2><ul>{{range .TOC}}<li class="toc-l{{.Level}}"><a href="#{{.ID}}">{{.Text}}</a></li>{{end}}</ul></nav>{{end}}
   <div class="article-body">{{noescape .ContentHTML}}</div>
+  {{if .Related}}<section class="related-posts">
+    <h2>相关文章</h2>
+    <div class="related-grid">{{range .Related}}{{template "card" .}}{{end}}</div>
+  </section>{{end}}
   {{if .CommentsEnabled}}
   <section class="comments" id="comments">
     <h2>评论</h2>

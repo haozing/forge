@@ -90,10 +90,16 @@ func (s *OSS) Get(ctx context.Context, ref ObjectRef) (ObjectReader, error) {
 	if err != nil {
 		return ObjectReader{}, err
 	}
-	result, err := s.client.GetObject(ctx, &oss.GetObjectRequest{
+	request := &oss.GetObjectRequest{
 		Bucket: oss.Ptr(s.bucket),
 		Key:    oss.Ptr(key),
-	})
+	}
+	// G5 responsive variants: the closed server-side enum maps to OSS image
+	// processing (resize / webp). Empty Process returns the original bytes.
+	if ref.Process != "" {
+		request.Process = oss.Ptr(ref.Process)
+	}
+	result, err := s.client.GetObject(ctx, request)
 	if err != nil {
 		return ObjectReader{}, fmt.Errorf("get OSS object: %w", err)
 	}

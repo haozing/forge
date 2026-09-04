@@ -73,6 +73,10 @@ paths:
                   type: integer
                 comment:
                   type: string
+                scheduled_at:
+                  type: string
+                  format: date-time
+                  description: 可选的未来时刻；批准后在到点由 worker 执行发布（定时发布 G4）
       responses:
         '201':
           description: 已创建
@@ -373,9 +377,15 @@ paths:
               type: object
               properties:
                 draft_revision: { type: integer }
+                scheduled_at:
+                  type: string
+                  format: date-time
+                  description: 可选的未来时刻（direct 模式）；登记定时发布意图而非立即切指针（G4）
       responses:
         '200':
           description: 已发布
+        '202':
+          description: 已登记定时发布意图（direct 模式 + scheduled_at）
           content:
             application/json:
               schema:
@@ -3342,9 +3352,15 @@ paths:
               required: [version_id]
               properties:
                 version_id: { type: string, format: uuid }
+                scheduled_at:
+                  type: string
+                  format: date-time
+                  description: Optional future moment (direct-policy assets); registers a scheduled publish intent instead of switching the pointer now
       responses:
         '200':
           description: 已发布
+        '202':
+          description: Scheduled publish intent registered
           content:
             application/json:
               schema:
@@ -3580,6 +3596,14 @@ paths:
                   type: array
                   items: { type: string }
                 answer_posture: { type: string }
+                tool_policy:
+                  type: object
+                  description: 工具策略补丁（闭集校验）；allowed_capabilities 替换为内置 capability 词表的子集，approve_low_write 开关低写审批。allow_high_write 仍走 SQL 通道
+                  properties:
+                    allowed_capabilities:
+                      type: array
+                      items: { type: string }
+                    approve_low_write: { type: boolean }
       responses:
         '200':
           description: 已更新
@@ -6375,10 +6399,10 @@ components:
         has_more: { type: boolean }
     PublicationRequestStatus:
       type: string
-      enum: [pending, approved, rejected, cancelled]
+      enum: [pending, approved, rejected, cancelled, scheduled]
     PublicationCancelReason:
       type: string
-      enum: [user_cancelled, new_version, asset_archived, admin_cancelled]
+      enum: [user_cancelled, new_version, asset_archived, admin_cancelled, execution_failed]
     PublicationRequest:
       type: object
       properties:
@@ -6394,6 +6418,8 @@ components:
         cancel_reason: { $ref: '#/components/schemas/PublicationCancelReason' }
         submitted_at: { type: string, format: date-time }
         decided_at: { type: string, format: date-time, nullable: true }
+        scheduled_at: { type: string, format: date-time, nullable: true }
+        executed_at: { type: string, format: date-time, nullable: true }
         revision: { type: integer }
     PublicationRequestListData:
       type: object

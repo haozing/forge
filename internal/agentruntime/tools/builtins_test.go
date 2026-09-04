@@ -110,3 +110,21 @@ func TestModelDraftToolsRequireExplicitCapabilityAndHighWrite(t *testing.T) {
 		t.Fatal("suggest tool needs schema.read, not model.manage")
 	}
 }
+
+// TestKnownCapabilitiesCoversG8Vocabulary pins the closed capability
+// vocabulary the admin tool_policy channel validates against (G0/P0): the
+// new G3-G8 tools must be grantable, and nothing else may sneak in.
+func TestKnownCapabilitiesCoversG8Vocabulary(t *testing.T) {
+	known := make(map[string]bool)
+	for _, capability := range KnownCapabilities() {
+		known[capability] = true
+	}
+	for _, want := range []string{"query.read", "asset.read", "asset.write", "site.style", "model.manage", "content.patterns"} {
+		if !known[want] {
+			t.Errorf("KnownCapabilities missing %q", want)
+		}
+	}
+	if known["bogus.capability"] {
+		t.Error("KnownCapabilities must not contain unknown values")
+	}
+}

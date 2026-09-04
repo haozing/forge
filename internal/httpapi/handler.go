@@ -1714,6 +1714,10 @@ func writeAssetMutationError(w http.ResponseWriter, err error, fallback string) 
 
 type publishAssetRequest struct {
 	VersionID string `json:"version_id"`
+	// ScheduledAt optionally defers the publish to a future moment for
+	// direct-policy assets (G4): a scheduled intent instead of an immediate
+	// pointer switch.
+	ScheduledAt *time.Time `json:"scheduled_at"`
 }
 
 func publishAsset(deps Dependencies) http.HandlerFunc {
@@ -1740,6 +1744,17 @@ func publishAsset(deps Dependencies) http.HandlerFunc {
 		decoder.DisallowUnknownFields()
 		if err := decoder.Decode(&input); err != nil || !agentquery.ValidUUID(input.VersionID) {
 			writeError(w, http.StatusUnprocessableEntity, "version_id_required")
+			return
+		}
+		// A future scheduled_at defers the publish (G4): the intent lands as
+		// a scheduled publication request executed at the due moment.
+		if input.ScheduledAt != nil {
+			request, err := deps.ReviewService.ScheduleDirect(r.Context(), principal, assetID, *input.ScheduledAt)
+			if err != nil {
+				writePublicationSubmitError(w, err)
+				return
+			}
+			writeJSON(w, http.StatusAccepted, request)
 			return
 		}
 		allowedModels, err := deps.ScopeResolver.AllowedModelIDs(r.Context(), principal, "asset.publish")
@@ -1823,6 +1838,8 @@ type agentSubmitPublicationInput struct {
 	AssetID       string `json:"asset_id"`
 	DraftRevision *int64 `json:"draft_revision"`
 	Comment       string `json:"comment"`
+	// ScheduledAt optionally defers publication (G4); approval still applies.
+	ScheduledAt *time.Time `json:"scheduled_at"`
 }
 
 // submitPublicationRequest lets an agent submit an approval-policy asset for
@@ -1855,7 +1872,7 @@ func submitPublicationRequest(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusUnprocessableEntity, "invalid_publication_submission")
 			return
 		}
-		request, err := deps.ReviewService.Submit(r.Context(), principal, workspaceID, input.AssetID, *input.DraftRevision, r.Header.Get("Idempotency-Key"), input.Comment)
+		request, err := deps.ReviewService.Submit(r.Context(), principal, workspaceID, input.AssetID, *input.DraftRevision, r.Header.Get("Idempotency-Key"), input.Comment, input.ScheduledAt)
 		if err != nil {
 			writePublicationSubmitError(w, err)
 			return

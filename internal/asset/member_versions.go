@@ -160,18 +160,19 @@ func loadVersionTagIDs(ctx context.Context, tx pgx.Tx, versionID string) ([]stri
 	return ids, rows.Err()
 }
 
-// loadVersionCoverID returns the version's cover attachment id (二期 §6).
-func loadVersionCoverID(ctx context.Context, tx pgx.Tx, versionID string) (string, error) {
-	var cover string
+// loadVersionCoverID returns the version's cover attachment id and its alt
+// text (二期 §6 cover; G6 alt rides the same inheritance path).
+func loadVersionCoverID(ctx context.Context, tx pgx.Tx, versionID string) (string, string, error) {
+	var cover, alt string
 	err := tx.QueryRow(ctx, `
-		SELECT attachment_id::text FROM asset.asset_version_attachments
+		SELECT attachment_id::text, alt_text FROM asset.asset_version_attachments
 		WHERE asset_version_id = $1::uuid AND role = 'cover'
 		LIMIT 1
-	`, versionID).Scan(&cover)
+	`, versionID).Scan(&cover, &alt)
 	if err == nil || errors.Is(err, pgx.ErrNoRows) {
-		return cover, nil
+		return cover, alt, nil
 	}
-	return "", fmt.Errorf("load version cover: %w", err)
+	return "", "", fmt.Errorf("load version cover: %w", err)
 }
 
 func loadVersionAttachmentIDs(ctx context.Context, tx pgx.Tx, versionID string) ([]string, error) {

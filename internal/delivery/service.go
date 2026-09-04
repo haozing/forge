@@ -12,9 +12,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"log"
+	"net/http"
 	"strings"
 	"time"
 
@@ -83,15 +85,20 @@ type Response struct {
 	CacheControl string
 	NoIndex      bool
 	Status       int
+	// RedirectPath, when set, makes the response a same-site redirect
+	// (Status carries the code, Location the path). Redirects bypass the
+	// page cache by construction.
+	RedirectPath string
 }
 
 // renderOutput is what one page builder produces: either a pre-rendered page
 // (gate, feeds) or a template kind plus its view model.
 type renderOutput struct {
-	page    *Response
-	kind    string
-	vm      any
-	noIndex bool
+	page     *Response
+	kind     string
+	vm       any
+	noIndex  bool
+	redirect string
 }
 
 // buildFunc builds one page against already-loaded facts and visitor band.
@@ -212,6 +219,17 @@ func (s *Service) pipeline(ctx context.Context, addr string, principal auth.Prin
 		output, err := build(ctx, facts, band)
 		if err != nil {
 			return nil, err
+		}
+		if output.redirect != "" {
+			// Same-site 301 (moved display_path): served per request, never
+			// cached — the underlying page keeps its own cache entry.
+			return &Response{
+				ContentType:  contentHTML,
+				CacheControl: "private, max-age=30",
+				NoIndex:      true,
+				Status:       http.StatusMovedPermanently,
+				RedirectPath: output.redirect,
+			}, nil
 		}
 		if output.page != nil {
 			s.storeEntry(key, revision(facts), band, routePath, output.page)
@@ -382,6 +400,13 @@ func (s *Service) Post(ctx context.Context, addr string, principal auth.Principa
 		config := style(facts)
 		content, err := s.Reader.Post(ctx, addr, principal, slug, displayPath)
 		if err != nil {
+			// A path with no live binding may have been renamed: answer one
+			// hop 301 to the moved target (G2) before giving up on the 404.
+			if errors.Is(err, site.ErrSiteNotFound) {
+				if to, ok, redirectErr := s.Reader.PathRedirect(ctx, slug, displayPath); redirectErr == nil && ok {
+					return renderOutput{redirect: "/sites/" + slug + "/posts/" + to}, nil
+				}
+			}
 			return renderOutput{}, err
 		}
 		vm := ResolveDetail(slug, content)
@@ -389,10 +414,22 @@ func (s *Service) Post(ctx context.Context, addr string, principal auth.Principa
 		vm.Title = content.Title + " · " + facts.Site.Name
 		vm.Description = content.Summary
 		vm.Canonical = baseURL + routePath
+		if vm.CoverURL != "" {
+			vm.CanonicalImage = baseURL + vm.CoverURL
+			vm.CanonicalImageAlt = vm.Title
+			if vm.CoverAlt != "" {
+				vm.CanonicalImageAlt = vm.CoverAlt
+			}
+		}
 		vm.NoIndex = !vm.Site.ScopePublic
 		vm.ModifiedISO = vm.UpdatedISO
-		vm.JSONLD = articleJSONLD(facts, content, baseURL+routePath)
+		sectionURL := ""
+		if content.Section != "" {
+			sectionURL = baseURL + "/sites/" + slug + "/sections/" + content.Section + "/"
+		}
+		vm.JSONLD = articleJSONLD(facts, content, vm.Canonical, baseURL+"/sites/"+slug, sectionURL, vm.CanonicalImage)
 		s.attachDetailComments(ctx, &vm, facts, band, slug)
+		s.attachDetailRelated(ctx, addr, principal, slug, content, &vm)
 		return renderOutput{kind: "detail", vm: vm, noIndex: vm.NoIndex}, nil
 	})
 }
@@ -606,10 +643,11 @@ func rssDate(value *time.Time) string {
 	return value.UTC().Format(time.RFC1123Z)
 }
 
-// articleJSONLD builds the detail structured data (Article + Organization
-// publisher). json.Marshal escapes <, > and & so the script context is closed.
-func articleJSONLD(facts site.SiteFacts, content site.PublicPostContent, canonical string) template.JS {
-	document := map[string]any{
+// articleJSONLD builds the detail structured data: an Article document (with
+// cover image when present) plus a BreadcrumbList (home → section → post).
+// json.Marshal escapes <, > and & so the script context is closed.
+func articleJSONLD(facts site.SiteFacts, content site.PublicPostContent, canonical, homeURL, sectionURL, coverImage string) template.JS {
+	article := map[string]any{
 		"@context":         "https://schema.org",
 		"@type":            "Article",
 		"headline":         content.Title,
@@ -617,13 +655,30 @@ func articleJSONLD(facts site.SiteFacts, content site.PublicPostContent, canonic
 		"author":           map[string]any{"@type": "Organization", "name": facts.Site.Name},
 		"publisher":        map[string]any{"@type": "Organization", "name": facts.Site.Name},
 	}
+	if coverImage != "" {
+		article["image"] = coverImage
+	}
 	if content.PublishedAt != nil && !content.PublishedAt.IsZero() {
-		document["datePublished"] = content.PublishedAt.UTC().Format(time.RFC3339)
+		article["datePublished"] = content.PublishedAt.UTC().Format(time.RFC3339)
 	}
 	if content.UpdatedAt != nil && !content.UpdatedAt.IsZero() {
-		document["dateModified"] = content.UpdatedAt.UTC().Format(time.RFC3339)
+		article["dateModified"] = content.UpdatedAt.UTC().Format(time.RFC3339)
 	}
-	body, err := json.Marshal(document)
+	crumbs := []any{
+		map[string]any{"@type": "ListItem", "position": 1, "name": facts.Site.Name, "item": homeURL},
+	}
+	position := 2
+	if sectionURL != "" {
+		crumbs = append(crumbs, map[string]any{"@type": "ListItem", "position": position, "name": content.Section, "item": sectionURL})
+		position++
+	}
+	crumbs = append(crumbs, map[string]any{"@type": "ListItem", "position": position, "name": content.Title, "item": canonical})
+	breadcrumb := map[string]any{
+		"@context":        "https://schema.org",
+		"@type":           "BreadcrumbList",
+		"itemListElement": crumbs,
+	}
+	body, err := json.Marshal([]any{article, breadcrumb})
 	if err != nil {
 		return ""
 	}

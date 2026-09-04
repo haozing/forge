@@ -296,7 +296,10 @@ func allowedAgentCapability(value string) bool {
 	switch value {
 	// query.execute is required by the open-API unified query gate
 	// (ForOpenAPI); without it an application can never be granted search.
-	case "query.read", "query.execute", "reference.read", "asset.create", "asset.edit", "asset.publish", "asset.archive", "agent.run":
+	// publication.submit gates the open publication-request surface — it was
+	// missing here, which made that endpoint unreachable for every key
+	// (latent defect surfaced by the p10b acceptance).
+	case "query.read", "query.execute", "reference.read", "asset.create", "asset.edit", "asset.publish", "asset.archive", "publication.submit", "agent.run":
 		return true
 	default:
 		return false

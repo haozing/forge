@@ -118,6 +118,7 @@ func (s *Service) RenderPreview(ctx context.Context, principal auth.Principal, w
 		vm.Site = chrome(facts, config, "detail")
 		vm.Title = content.Title + " · " + row.Name + "（预览）"
 		vm.NoIndex = true
+		s.attachDetailRelated(ctx, previewAddr, principal, row.Slug, content, &vm)
 		return render("detail", vm)
 	default:
 		return nil, site.ErrInvalidInput

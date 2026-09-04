@@ -59,6 +59,10 @@ type Request struct {
 	CancelReason    *string    `json:"cancel_reason"`
 	SubmittedAt     time.Time  `json:"submitted_at"`
 	DecidedAt       *time.Time `json:"decided_at"`
+	// ScheduledAt is the future publish moment (pending submission intent or
+	// approved-and-waiting row); ExecutedAt stamps the worker run (G4).
+	ScheduledAt     *time.Time `json:"scheduled_at,omitempty"`
+	ExecutedAt      *time.Time `json:"executed_at,omitempty"`
 	Revision        int64      `json:"revision"`
 	ETag            string     `json:"etag"`
 	Title           string     `json:"title,omitempty"`
@@ -152,11 +156,15 @@ func (s Service) validID(value string) bool {
 // role action; agents need publication.submit (and asset.write for the commit
 // step) in their AgentAccessPolicy — doc §3.5/§11.1 "agents may submit under
 // the policy but never approve".
-func (s Service) Submit(ctx context.Context, principal auth.Principal, workspaceID, assetID string, expectedDraftRevision int64, idempotencyKey, comment string) (Request, error) {
+func (s Service) Submit(ctx context.Context, principal auth.Principal, workspaceID, assetID string, expectedDraftRevision int64, idempotencyKey, comment string, scheduledAt *time.Time) (Request, error) {
 	if !s.validID(assetID) {
 		return Request{}, ErrInvalidInput
 	}
 	if expectedDraftRevision <= 0 {
+		return Request{}, ErrInvalidInput
+	}
+	// A scheduled submission must give the queue a clear future moment (G4).
+	if scheduledAt != nil && !scheduledAt.After(time.Now().UTC().Add(time.Minute)) {
 		return Request{}, ErrInvalidInput
 	}
 	if s.Store == nil || s.Store.Pool == nil || s.Policy == nil {
@@ -234,16 +242,16 @@ func (s Service) Submit(ctx context.Context, principal auth.Principal, workspace
 	var decisionComment, cancelReason *string
 	err = tx.QueryRow(ctx, `
 		INSERT INTO asset.publication_requests
-			(organization_id, workspace_id, asset_id, asset_version_id, status, submitted_by, decision_comment)
-		VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, 'pending', $5::uuid, NULLIF($6, ''))
+			(organization_id, workspace_id, asset_id, asset_version_id, status, submitted_by, decision_comment, scheduled_at)
+		VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, 'pending', $5::uuid, NULLIF($6, ''), $7)
 		ON CONFLICT DO NOTHING
 		RETURNING id::text, workspace_id::text, asset_id::text, asset_version_id::text, status,
 		          submitted_by::text, decided_by::text, decision_comment, cancelled_by::text,
-		          cancel_reason, submitted_at, decided_at, revision
-	`, principal.OrganizationID, assetWorkspace, assetID, versionID, principal.UserID, comment).Scan(
+		          cancel_reason, submitted_at, decided_at, revision, scheduled_at, executed_at
+	`, principal.OrganizationID, assetWorkspace, assetID, versionID, principal.UserID, comment, scheduledAt).Scan(
 		&request.ID, &request.WorkspaceID, &request.AssetID, &request.AssetVersionID, &request.Status,
 		&request.SubmittedBy, &request.DecidedBy, &decisionComment, &request.CancelledBy,
-		&cancelReason, &request.SubmittedAt, &request.DecidedAt, &request.Revision)
+		&cancelReason, &request.SubmittedAt, &request.DecidedAt, &request.Revision, &request.ScheduledAt, &request.ExecutedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		// Partial unique index: one pending request per asset.
 		return Request{}, ErrConflict
@@ -316,7 +324,9 @@ func enforcePublishPolicyTx(ctx context.Context, tx pgx.Tx, organizationID, asse
 
 func publicationEventFor(status, _ string) string {
 	switch status {
-	case RequestApproved:
+	case RequestApproved, RequestScheduled:
+		// Scheduled is an approved intent waiting for its moment; the fact
+		// event stays "approved" so listeners need no new vocabulary (G4).
 		return eventing.EventPublicationApproved
 	case RequestRejected:
 		return eventing.EventPublicationRejected
@@ -558,14 +568,15 @@ func (s Service) decide(ctx context.Context, principal auth.Principal, workspace
 	defer tx.Rollback(ctx)
 	var status, submittedBy, assetID, versionID, assetWorkspace, assetModel string
 	var revision int64
+	var scheduledAt *time.Time
 	err = tx.QueryRow(ctx, `
 		SELECT pr.status, pr.submitted_by::text, pr.asset_id::text, pr.asset_version_id::text, pr.revision,
-		       a.workspace_id::text, a.resource_model_id::text
+		       a.workspace_id::text, a.resource_model_id::text, pr.scheduled_at
 		FROM asset.publication_requests pr
 		JOIN asset.assets a ON a.organization_id = pr.organization_id AND a.id = pr.asset_id
 		WHERE pr.organization_id = $1::uuid AND pr.id = $2::uuid AND pr.workspace_id = $3::uuid
 		FOR UPDATE OF pr
-	`, principal.OrganizationID, requestID, workspaceID).Scan(&status, &submittedBy, &assetID, &versionID, &revision, &assetWorkspace, &assetModel)
+	`, principal.OrganizationID, requestID, workspaceID).Scan(&status, &submittedBy, &assetID, &versionID, &revision, &assetWorkspace, &assetModel, &scheduledAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Request{}, ErrNotFound
 	}
@@ -590,8 +601,17 @@ func (s Service) decide(ctx context.Context, principal auth.Principal, workspace
 		return Request{}, ErrVersionSuperseded
 	}
 	nextStatus := RequestRejected
+	executeNow := false
+	var executionProvenance map[string]any
 	if decision == "approve" {
-		nextStatus = RequestApproved
+		// A future scheduled_at defers the pointer switch to the worker (G4):
+		// approval is recorded now, execution happens at the due moment.
+		if scheduledAt != nil && scheduledAt.After(time.Now().UTC()) {
+			nextStatus = RequestScheduled
+		} else {
+			nextStatus = RequestApproved
+			executeNow = true
+		}
 	}
 	commandTag, err := tx.Exec(ctx, `
 		UPDATE asset.publication_requests
@@ -608,7 +628,7 @@ func (s Service) decide(ctx context.Context, principal auth.Principal, workspace
 	request := Request{
 		ID: requestID, WorkspaceID: assetWorkspace, AssetID: assetID, AssetVersionID: versionID,
 		Status: nextStatus, SubmittedBy: submittedBy, DecidedBy: strPtr(principal.UserID),
-		Revision: revision + 1,
+		ScheduledAt: scheduledAt, Revision: revision + 1,
 	}
 	if comment != "" {
 		request.DecisionComment = strPtr(comment)
@@ -616,11 +636,12 @@ func (s Service) decide(ctx context.Context, principal auth.Principal, workspace
 	now := time.Now().UTC()
 	request.DecidedAt = &now
 	request.ETag = request.ID
-	if decision == "approve" {
+	if executeNow {
 		// Approval re-reads the policy inside the decision transaction: the
 		// asset may have switched to a direct policy (the request must go
 		// through direct publish instead) and the version's confirmation or
-		// attachment facts may have moved since submission.
+		// attachment facts may have moved since submission. The scheduled
+		// path skips this: the human decision at approval time is final.
 		policy, err := enforcePublishPolicyTx(ctx, tx, principal.OrganizationID, assetID, versionID)
 		if err != nil {
 			return Request{}, err
@@ -628,25 +649,8 @@ func (s Service) decide(ctx context.Context, principal auth.Principal, workspace
 		if policy.Mode != asset.PublishingModeApproval {
 			return Request{}, ErrConflict
 		}
-		// Approval switches the published pointer inside the same transaction.
-		row, err := asset.LoadLifecycleTx(ctx, tx, principal.OrganizationID, assetID)
+		executionProvenance, err = s.executeApprovedTx(ctx, tx, principal, assetID, versionID)
 		if err != nil {
-			return Request{}, err
-		}
-		previous := row.CurrentPublishedVersionID
-		row, err = asset.SetPublishedPointerTx(ctx, tx, row, versionID)
-		if err != nil {
-			if errors.Is(err, asset.ErrInvalidTransition) {
-				return Request{}, ErrVersionSuperseded
-			}
-			return Request{}, err
-		}
-		if err := asset.AppendAssetEventTx(ctx, tx, s.Events, row, principal, eventing.EventAssetPublished, eventing.PayloadVersionV1, eventing.AssetPublishedPayload{
-			AssetID:           row.ID,
-			VersionID:         versionID,
-			PreviousVersionID: deref(previous),
-			WorkspaceID:       row.WorkspaceID,
-		}); err != nil {
 			return Request{}, err
 		}
 	}
@@ -661,9 +665,16 @@ func (s Service) decide(ctx context.Context, principal auth.Principal, workspace
 	if decision == "approve" {
 		// Doc §8.3 publish record: agent-prepared versions carry the six
 		// provenance fields (agent user/application, rule version, input and
-		// output version, processing result).
-		decisionMetadata = asset.MergeAgentProvenance(decisionMetadata,
-			asset.AgentProvenanceTx(ctx, tx, principal.OrganizationID, versionID))
+		// output version, processing result) — captured by the shared pointer
+		// switch when it ran now, loaded fresh for the scheduled deferral.
+		if executionProvenance != nil {
+			for key, value := range executionProvenance {
+				decisionMetadata[key] = value
+			}
+		} else {
+			decisionMetadata = asset.MergeAgentProvenance(decisionMetadata,
+				asset.AgentProvenanceTx(ctx, tx, principal.OrganizationID, versionID))
+		}
 	}
 	store.AppendAuditTx(ctx, tx, store.NewAuditEntry("publication."+decision, principal.OrganizationID, principal.UserID, "publication_request", requestID, decisionMetadata), assetWorkspace)
 	if err := tx.Commit(ctx); err != nil {
@@ -724,7 +735,7 @@ func (s Service) Cancel(ctx context.Context, principal auth.Principal, workspace
 	if err != nil {
 		return Request{}, err
 	}
-	if status != RequestPending {
+	if status != RequestPending && status != RequestScheduled {
 		return Request{}, ErrConflict
 	}
 	if submittedBy != principal.UserID && scope.Role != authz.WorkspaceRoleAdmin {
@@ -734,7 +745,7 @@ func (s Service) Cancel(ctx context.Context, principal auth.Principal, workspace
 		UPDATE asset.publication_requests
 		SET status = 'cancelled', cancelled_by = $3::uuid, cancel_reason = $4,
 		    decided_at = now(), revision = revision + 1
-		WHERE organization_id = $1::uuid AND id = $2::uuid AND status = 'pending'
+		WHERE organization_id = $1::uuid AND id = $2::uuid AND status IN ('pending', 'scheduled')
 	`, principal.OrganizationID, requestID, principal.UserID, cancelReason)
 	if err != nil {
 		return Request{}, err
@@ -935,3 +946,285 @@ func (s Service) ListComments(ctx context.Context, principal auth.Principal, wor
 	}
 	return comments, next, nil
 }
+
+// executeApprovedTx switches the published pointer, emits asset.published
+// and carries the agent provenance into the caller's audit entry. Shared by
+// the immediate approve path and the scheduled-publication worker (G4) — one
+// implementation, no copies.
+type dueScheduledRow struct {
+	id, organizationID, workspaceID, assetID, versionID, submittedBy string
+	scheduledAt time.Time
+	revision    int64
+}
+
+func (s Service) executeApprovedTx(ctx context.Context, tx pgx.Tx, principal auth.Principal, assetID, versionID string) (map[string]any, error) {
+	row, err := asset.LoadLifecycleTx(ctx, tx, principal.OrganizationID, assetID)
+	if err != nil {
+		return nil, err
+	}
+	previous := row.CurrentPublishedVersionID
+	row, err = asset.SetPublishedPointerTx(ctx, tx, row, versionID)
+	if err != nil {
+		if errors.Is(err, asset.ErrInvalidTransition) {
+			return nil, ErrVersionSuperseded
+		}
+		return nil, err
+	}
+	if err := asset.AppendAssetEventTx(ctx, tx, s.Events, row, principal, eventing.EventAssetPublished, eventing.PayloadVersionV1, eventing.AssetPublishedPayload{
+		AssetID:           row.ID,
+		VersionID:         versionID,
+		PreviousVersionID: deref(previous),
+		WorkspaceID:       row.WorkspaceID,
+	}); err != nil {
+		return nil, err
+	}
+	return asset.MergeAgentProvenance(map[string]any{
+		"asset_id": assetID, "asset_version_id": versionID,
+	}, asset.AgentProvenanceTx(ctx, tx, principal.OrganizationID, versionID)), nil
+}
+
+// ScheduleDirect registers a future publish moment for a direct-policy asset
+// (G4). The member/agent publish channel carries scheduled_at; instead of
+// switching the pointer immediately the intent lands as a scheduled row and
+// ExecuteDueScheduled does the switch at the due moment. Approval-policy
+// assets must go through Submit + human approval instead (409 here). The
+// workspace resolves from the asset row itself (the open publish route does
+// not carry a workspace segment).
+func (s Service) ScheduleDirect(ctx context.Context, principal auth.Principal, assetID string, scheduledAt time.Time) (Request, error) {
+	if !s.validID(assetID) {
+		return Request{}, ErrInvalidInput
+	}
+	if !scheduledAt.After(time.Now().UTC().Add(time.Minute)) {
+		return Request{}, ErrInvalidInput
+	}
+	if s.Store == nil || s.Store.Pool == nil || s.Events == nil {
+		return Request{}, ErrForbidden
+	}
+	tx, err := s.Store.Pool.Begin(ctx)
+	if err != nil {
+		return Request{}, err
+	}
+	defer tx.Rollback(ctx)
+	var assetWorkspace, versionID, modelID string
+	err = tx.QueryRow(ctx, `
+		SELECT workspace_id::text, current_working_version_id::text, resource_model_id::text
+		FROM asset.assets
+		WHERE organization_id = $1::uuid AND id = $2::uuid AND deleted_at IS NULL
+		FOR UPDATE
+	`, principal.OrganizationID, assetID).Scan(&assetWorkspace, &versionID, &modelID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Request{}, ErrNotFound
+	}
+	if err != nil {
+		return Request{}, err
+	}
+	if s.Policy == nil {
+		return Request{}, ErrForbidden
+	}
+	if _, err := s.Policy.Require(ctx, principal, assetWorkspace, modelID, authz.ActionAssetPublish); err != nil {
+		if errors.Is(err, authz.ErrWorkspaceForbidden) || errors.Is(err, authz.ErrWorkspaceNotFound) {
+			return Request{}, ErrForbidden
+		}
+		return Request{}, err
+	}
+	// Direct publishing gates re-checked here: the policy must be direct and
+	// the version publishable, exactly like the immediate publish path.
+	policy, err := enforcePublishPolicyTx(ctx, tx, principal.OrganizationID, assetID, versionID)
+	if err != nil {
+		return Request{}, err
+	}
+	if policy.Mode != asset.PublishingModeDirect {
+		return Request{}, ErrConflict
+	}
+	if err := asset.EnsurePublishableVersionTx(ctx, tx, principal.OrganizationID, versionID, policy); err != nil {
+		return Request{}, err
+	}
+	var request Request
+	var decisionComment, cancelReason *string
+	err = tx.QueryRow(ctx, `
+		INSERT INTO asset.publication_requests
+			(organization_id, workspace_id, asset_id, asset_version_id, status,
+			 submitted_by, decided_by, decided_at, scheduled_at)
+		VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, 'scheduled',
+		        $5::uuid, $5::uuid, now(), $6)
+		ON CONFLICT DO NOTHING
+		RETURNING id::text, workspace_id::text, asset_id::text, asset_version_id::text, status,
+		          submitted_by::text, decided_by::text, decision_comment, cancelled_by::text,
+		          cancel_reason, submitted_at, decided_at, revision, scheduled_at, executed_at
+	`, principal.OrganizationID, assetWorkspace, assetID, versionID, principal.UserID, scheduledAt).Scan(
+		&request.ID, &request.WorkspaceID, &request.AssetID, &request.AssetVersionID, &request.Status,
+		&request.SubmittedBy, &request.DecidedBy, &decisionComment, &request.CancelledBy,
+		&cancelReason, &request.SubmittedAt, &request.DecidedAt, &request.Revision, &request.ScheduledAt, &request.ExecutedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// One open intent per asset (pending or scheduled partial index).
+		return Request{}, ErrConflict
+	}
+	if err != nil {
+		return Request{}, fmt.Errorf("insert scheduled publication request: %w", err)
+	}
+	request.DecisionComment = decisionComment
+	request.CancelReason = cancelReason
+	request.ETag = request.ID
+	if err := s.appendEventTx(ctx, tx, principal, request, eventing.EventPublicationSubmitted, map[string]any{
+		"scheduled_at": scheduledAt.UTC().Format(time.RFC3339), "mode": "direct", "auto": true,
+	}); err != nil {
+		return Request{}, err
+	}
+	store.AppendAuditTx(ctx, tx, store.NewAuditEntry("publication.schedule", principal.OrganizationID, principal.UserID, "publication_request", request.ID, map[string]any{
+		"workspace_id":     assetWorkspace,
+		"asset_id":         assetID,
+		"asset_version_id": versionID,
+		"scheduled_at":     scheduledAt.UTC().Format(time.RFC3339),
+		"mode":             "direct",
+	}), assetWorkspace)
+	if err := tx.Commit(ctx); err != nil {
+		return Request{}, err
+	}
+	return request, nil
+}
+
+// ExecuteDueScheduled flips the published pointer of every due scheduled
+// request, one independent transaction per row (a failure never drags the
+// batch). Rows whose execution keeps failing past the bounded window
+// (scheduled_at more than 10 minutes overdue) are cancelled with
+// execution_failed and the submitter is notified — silent drops violate the
+// "humans judge" premise (G4).
+func (s Service) ExecuteDueScheduled(ctx context.Context) (executed, failed int, err error) {
+	if s.Store == nil || s.Store.Pool == nil || s.Events == nil {
+		return 0, 0, errors.New("review service is not initialized")
+	}
+	rows, err := s.Store.Pool.Query(ctx, `
+		SELECT pr.id::text, pr.organization_id::text, pr.workspace_id::text, pr.asset_id::text,
+		       pr.asset_version_id::text, pr.submitted_by::text, pr.scheduled_at, pr.revision
+		FROM asset.publication_requests pr
+		WHERE pr.status = 'scheduled' AND pr.scheduled_at <= now()
+		ORDER BY pr.scheduled_at
+		LIMIT 10
+	`)
+	if err != nil {
+		return 0, 0, fmt.Errorf("scan due scheduled requests: %w", err)
+	}
+	due := make([]dueScheduledRow, 0, 10)
+	for rows.Next() {
+		var item dueScheduledRow
+		if err := rows.Scan(&item.id, &item.organizationID, &item.workspaceID, &item.assetID,
+			&item.versionID, &item.submittedBy, &item.scheduledAt, &item.revision); err != nil {
+			rows.Close()
+			return 0, 0, err
+		}
+		due = append(due, item)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, 0, err
+	}
+	for _, item := range due {
+		// The submitter is the actor of record: the publish intent belongs to
+		// them; the worker only delivers it at the agreed moment.
+		actor := auth.Principal{OrganizationID: item.organizationID, UserID: item.submittedBy, UserType: auth.UserTypeMember}
+		executeErr := s.executeOneScheduled(ctx, actor, item)
+		if executeErr == nil {
+			executed++
+			continue
+		}
+		failed++
+		if time.Since(item.scheduledAt) > 10*time.Minute {
+			if cancelErr := s.failScheduled(ctx, actor, item); cancelErr == nil {
+				failed--
+			}
+		}
+	}
+	return executed, failed, nil
+}
+
+// executeOneScheduled runs one due row in its own transaction: lock, archive
+// guard, pointer switch + asset.published event, approved + executed_at.
+func (s Service) executeOneScheduled(ctx context.Context, actor auth.Principal, item dueScheduledRow) error {
+	tx, err := s.Store.Pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	var status string
+	err = tx.QueryRow(ctx, `
+		SELECT status FROM asset.publication_requests
+		WHERE organization_id = $1::uuid AND id = $2::uuid AND workspace_id = $3::uuid
+		FOR UPDATE
+	`, item.organizationID, item.id, item.workspaceID).Scan(&status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if status != RequestScheduled {
+		return nil
+	}
+	var publicationStatus string
+	if err := tx.QueryRow(ctx, `
+		SELECT publication_status FROM asset.assets
+		WHERE organization_id = $1::uuid AND id = $2::uuid
+	`, item.organizationID, item.assetID).Scan(&publicationStatus); err != nil {
+		return err
+	}
+	if publicationStatus == asset.PublicationArchived {
+		// The asset went away while the intent waited — cancel cleanly.
+		if _, err := tx.Exec(ctx, `
+			UPDATE asset.publication_requests
+			SET status = 'cancelled', cancel_reason = 'asset_archived', revision = revision + 1
+			WHERE organization_id = $1::uuid AND id = $2::uuid AND status = 'scheduled'
+		`, item.organizationID, item.id); err != nil {
+			return err
+		}
+		return tx.Commit(ctx)
+	}
+	provenance, err := s.executeApprovedTx(ctx, tx, actor, item.assetID, item.versionID)
+	if err != nil {
+		return err
+	}
+	provenance["scheduled_execution"] = true
+	if _, err := tx.Exec(ctx, `
+		UPDATE asset.publication_requests
+		SET status = 'approved', executed_at = now(), revision = revision + 1
+		WHERE organization_id = $1::uuid AND id = $2::uuid AND status = 'scheduled'
+	`, item.organizationID, item.id); err != nil {
+		return err
+	}
+	store.AppendAuditTx(ctx, tx, store.NewAuditEntry("publication.scheduled_executed", item.organizationID, actor.UserID, "publication_request", item.id, provenance), item.workspaceID)
+	return tx.Commit(ctx)
+}
+
+// failScheduled cancels a stuck row with execution_failed and notifies the
+// submitter (bounded retry exhausted, G4).
+func (s Service) failScheduled(ctx context.Context, actor auth.Principal, item dueScheduledRow) error {
+	tx, err := s.Store.Pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	commandTag, err := tx.Exec(ctx, `
+		UPDATE asset.publication_requests
+		SET status = 'cancelled', cancel_reason = 'execution_failed', revision = revision + 1
+		WHERE organization_id = $1::uuid AND id = $2::uuid AND status = 'scheduled'
+	`, item.organizationID, item.id)
+	if err != nil {
+		return err
+	}
+	if commandTag.RowsAffected() == 0 {
+		return tx.Commit(ctx)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO content.notifications (organization_id, workspace_id, recipient_user_id, kind, payload)
+		VALUES ($1::uuid, $2::uuid, $3::uuid, 'publication.scheduled_failed', $4::jsonb)
+	`, item.organizationID, item.workspaceID, item.submittedBy, mustJSON(map[string]any{
+		"request_id": item.id, "asset_id": item.assetID,
+		"scheduled_at": item.scheduledAt.UTC().Format(time.RFC3339),
+	})); err != nil {
+		return err
+	}
+	store.AppendAuditTx(ctx, tx, store.NewAuditEntry("publication.scheduled_failed", item.organizationID, actor.UserID, "publication_request", item.id, map[string]any{
+		"workspace_id": item.workspaceID, "asset_id": item.assetID,
+	}), item.workspaceID)
+	return tx.Commit(ctx)
+}
+		

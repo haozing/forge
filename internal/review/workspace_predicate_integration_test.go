@@ -131,7 +131,7 @@ func TestReviewAggregateIsWorkspaceScopedIntegration(t *testing.T) {
 	if _, _, err := service.ListComments(ctx, principal, workspaceA, requestID, "", 20); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("cross-workspace ListComments must return ErrNotFound, got %v", err)
 	}
-	if _, err := service.Submit(ctx, principal, workspaceA, assetID, 1, "itc-key-1", ""); !errors.Is(err, ErrNotFound) {
+	if _, err := service.Submit(ctx, principal, workspaceA, assetID, 1, "itc-key-1", "", nil); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("cross-workspace Submit must return ErrNotFound, got %v", err)
 	}
 

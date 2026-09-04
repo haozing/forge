@@ -180,23 +180,24 @@ func agentApplicationResource(deps Dependencies) http.HandlerFunc {
 			return
 		}
 		var patch struct {
-			Name            *string   `json:"name"`
-			ModelEndpointID *string   `json:"model_endpoint_id"`
-			RuntimeMode     *string   `json:"runtime_mode"`
-			WorkflowKey     *string   `json:"workflow_key"`
-			Capabilities    *[]string `json:"capabilities"`
-			AnswerPosture   *string   `json:"answer_posture"`
+			Name            *string                      `json:"name"`
+			ModelEndpointID *string                      `json:"model_endpoint_id"`
+			RuntimeMode     *string                      `json:"runtime_mode"`
+			WorkflowKey     *string                      `json:"workflow_key"`
+			Capabilities    *[]string                    `json:"capabilities"`
+			AnswerPosture   *string                      `json:"answer_posture"`
+			ToolPolicy      *adminservice.ToolPolicyPatch `json:"tool_policy"`
 		}
 		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 32*1024))
 		decoder.DisallowUnknownFields()
-		if err := decoder.Decode(&patch); err != nil || (patch.Name == nil && patch.ModelEndpointID == nil && patch.RuntimeMode == nil && patch.WorkflowKey == nil && patch.Capabilities == nil && patch.AnswerPosture == nil) {
+		if err := decoder.Decode(&patch); err != nil || (patch.Name == nil && patch.ModelEndpointID == nil && patch.RuntimeMode == nil && patch.WorkflowKey == nil && patch.Capabilities == nil && patch.AnswerPosture == nil && patch.ToolPolicy == nil) {
 			writeError(w, http.StatusUnprocessableEntity, "validation_failed")
 			return
 		}
 		if _, err := deps.AdminService.UpdateAgentApplication(r.Context(), principal, adminservice.UpdateAgentApplicationInput{
 			ApplicationID: item.ID, Name: patch.Name, ModelEndpointID: patch.ModelEndpointID,
 			RuntimeMode: patch.RuntimeMode, WorkflowKey: patch.WorkflowKey,
-			Capabilities: patch.Capabilities, AnswerPosture: patch.AnswerPosture, IdempotencyKey: key,
+			Capabilities: patch.Capabilities, AnswerPosture: patch.AnswerPosture, ToolPolicy: patch.ToolPolicy, IdempotencyKey: key,
 		}); err != nil {
 			writeAgentApplicationError(w, err, "agent_application_update_failed")
 			return

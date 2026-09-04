@@ -50,7 +50,12 @@ type Page struct {
 	Title       string
 	Description string
 	Canonical   string
-	NoIndex     bool
+	// CanonicalImage is the absolute cover URL feeding og:image / twitter
+	// card summary_large_image; empty when the post has no cover.
+	// CanonicalImageAlt is the cover alt (G6), falling back to the title.
+	CanonicalImage    string
+	CanonicalImageAlt string
+	NoIndex           bool
 	// ModifiedISO feeds og/article:modified_time on detail pages.
 	ModifiedISO string
 	// JSONLD carries pre-marshaled structured data (json.Marshal escapes
@@ -138,6 +143,9 @@ type DetailVM struct {
 	UpdatedISO  string
 	Tags        []TagChip
 	CoverURL    string
+	// CoverAlt is the cover's versioned alt text (G6); empty falls back to
+	// the title at render time.
+	CoverAlt string
 	// Comments (二期 §8): enabled by the site mode, listed newest-last,
 	// writable by members (the form posts through the JS-free fallback: the
 	// console owns the rich UX; the page renders the plain form).
@@ -146,6 +154,9 @@ type DetailVM struct {
 	CanComment      bool
 	Moderation      string
 	PostPath        string
+	// Related is the related-posts block (G7): fulltext recall over the
+	// unified query service with same-tag / latest fallbacks.
+	Related []CardVM
 }
 
 // CommentVM is one rendered comment (plain text, escaped by the template).
@@ -390,6 +401,7 @@ func ResolveDetail(slug string, content site.PublicPostContent) DetailVM {
 	}
 	if content.CoverAttachmentID != "" {
 		detail.CoverURL = "/sites/" + slug + "/media/" + content.CoverAttachmentID
+		detail.CoverAlt = content.CoverAlt
 	}
 	return detail
 }

@@ -7,9 +7,11 @@ package httpapi
 import (
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"agentchunzhi/internal/asset"
 	"agentchunzhi/internal/auth"
@@ -90,6 +92,9 @@ func ServiceError(w http.ResponseWriter, err error) {
 	case errors.Is(err, authz.ErrWorkspaceNotFound):
 		writeError(w, http.StatusNotFound, "resource_not_found")
 	default:
+		// Unmapped errors are server faults: the root cause must reach the
+		// log, or every 500 becomes an undebuggable blank.
+		log.Printf("unmapped service error -> 500: %v", err)
 		writeError(w, http.StatusInternalServerError, "internal_error")
 	}
 }
@@ -110,6 +115,9 @@ type SubmitRequest struct {
 	AssetID       string `json:"asset_id"`
 	DraftRevision *int64 `json:"draft_revision"`
 	Comment       string `json:"comment"`
+	// ScheduledAt optionally defers publication to a future moment; the
+	// request still needs human approval, execution happens at due time (G4).
+	ScheduledAt *time.Time `json:"scheduled_at"`
 }
 
 func PublicationRequests(deps Dependencies) http.HandlerFunc {
@@ -156,7 +164,7 @@ func PublicationRequests(deps Dependencies) http.HandlerFunc {
 				writeError(w, http.StatusUnprocessableEntity, "draft_revision_required")
 				return
 			}
-			request, err := deps.ReviewService.Submit(r.Context(), principal, workspaceID, input.AssetID, *input.DraftRevision, key, input.Comment)
+			request, err := deps.ReviewService.Submit(r.Context(), principal, workspaceID, input.AssetID, *input.DraftRevision, key, input.Comment, input.ScheduledAt)
 			if err != nil {
 				ServiceError(w, err)
 				return
@@ -510,7 +518,10 @@ func memberPublishAsset(deps Dependencies) http.HandlerFunc {
 		}
 		// Doc §11.1: publishing carries the same expected draft revision as
 		// commit and submit — the optimistic precondition is not optional.
-		var body CommitBody
+		var body struct {
+			DraftRevision *int64     `json:"draft_revision"`
+			ScheduledAt   *time.Time `json:"scheduled_at"`
+		}
 		if !decodeBody(w, r, &body, 16*1024) {
 			return
 		}
@@ -518,10 +529,25 @@ func memberPublishAsset(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusUnprocessableEntity, "draft_revision_required")
 			return
 		}
+		if body.ScheduledAt != nil && !body.ScheduledAt.After(time.Now().UTC().Add(time.Minute)) {
+			writeError(w, http.StatusUnprocessableEntity, "scheduled_at_invalid")
+			return
+		}
 		assetID := r.PathValue("assetId")
 		target, err := deps.MemberAssetService.Get(r.Context(), principal, assetID)
 		if err != nil {
 			ServiceError(w, err)
+			return
+		}
+		// A future scheduled_at on a direct-policy asset registers a deferred
+		// publish intent instead of switching the pointer now (G4).
+		if body.ScheduledAt != nil {
+			request, err := deps.ReviewService.ScheduleDirect(r.Context(), principal, assetID, *body.ScheduledAt)
+			if err != nil {
+				ServiceError(w, err)
+				return
+			}
+			writeData(w, r, http.StatusAccepted, request)
 			return
 		}
 		result, err := deps.MemberAssetService.Publish(r.Context(), principal, target.WorkspaceID, assetID, strconv.FormatInt(*body.DraftRevision, 10), requireIdempotencyKeyValue(r))

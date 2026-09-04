@@ -395,6 +395,8 @@ type PublicPostContent struct {
 	PublishedAt *time.Time              `json:"published_at"`
 	// CoverAttachmentID is the published version's cover image (二期 §6).
 	CoverAttachmentID string              `json:"cover_attachment_id"`
+	// CoverAlt is the cover's alt text frozen with the version (G6).
+	CoverAlt          string              `json:"cover_alt"`
 	ETag              string              `json:"-"`
 }
 
@@ -532,6 +534,9 @@ type postRow struct {
 	Fields           []byte
 	FieldSchema      []byte
 	CoverAttachmentID string
+	// CoverAlt is the cover's alt text frozen with the published version
+	// (G6); empty falls back to the title at render time.
+	CoverAlt string
 }
 
 // Post serves the detail projection: binding → asset → live published
@@ -589,8 +594,37 @@ func (r *PublicReader) Post(ctx context.Context, visitorAddr string, principal a
 		UpdatedAt:   timePtr(row.AssetUpdatedAt),
 		PublishedAt: publishedAt,
 		CoverAttachmentID: row.CoverAttachmentID,
+		CoverAlt:          row.CoverAlt,
 		ETag:        DetailETag(item.Revision, row.AssetRevision, row.VersionID, row.Binding.UpdatedAt),
 	}, nil
+}
+
+// PathRedirect resolves a display_path that no longer has a live binding to
+// its moved target (one hop; chains are flattened at write time by
+// recordPathRedirectTx). ok=false means no redirect exists and the caller
+// keeps its 404. Site loading errors surface unchanged; the address budget
+// is not re-charged here (the caller already passed AllowPublic).
+func (r *PublicReader) PathRedirect(ctx context.Context, slug, displayPath string) (string, bool, error) {
+	item, err := r.loadSite(ctx, slug)
+	if err != nil {
+		return "", false, err
+	}
+	displayPath = strings.Trim(displayPath, "/")
+	if !ValidDisplayPath(displayPath) {
+		return "", false, nil
+	}
+	var toPath string
+	err = r.Store.Pool.QueryRow(ctx, `
+		SELECT to_path FROM site.path_redirects
+		WHERE organization_id = $1::uuid AND site_id = $2::uuid AND from_path = $3
+	`, item.OrganizationID, item.ID, displayPath).Scan(&toPath)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("load path redirect: %w", err)
+	}
+	return toPath, true, nil
 }
 
 // loadPostRow reads the detail row: binding by display path joined with the
@@ -604,7 +638,7 @@ func (r *PublicReader) loadPostRow(ctx context.Context, item Site, displayPath s
 		       COALESCE(pv.id::text, ''), COALESCE(pv.title, ''), COALESCE(pv.summary, ''),
 		       COALESCE(pv.markdown, ''), COALESCE(pv.fields, '{}'::jsonb),
 		       COALESCE(mv.field_schema, '{}'::jsonb),
-		       COALESCE(cover.id::text, '')
+		       COALESCE(cover.id::text, ''), COALESCE(cav.alt_text, '')
 		FROM site.site_content_bindings b
 		JOIN asset.assets a
 		  ON a.organization_id = b.organization_id AND a.id = b.asset_id
@@ -628,7 +662,7 @@ func (r *PublicReader) loadPostRow(ctx context.Context, item Site, displayPath s
 		&row.Binding.CreatedAt, &row.Binding.UpdatedAt,
 		&row.AssetRevision, &row.AssetUpdatedAt, &row.AssetPublishedAt, &row.ContentKind,
 		&row.VersionID, &row.Title, &row.Summary, &row.Markdown, &row.Fields, &row.FieldSchema,
-		&row.CoverAttachmentID,
+		&row.CoverAttachmentID, &row.CoverAlt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return postRow{}, ErrSiteNotFound

@@ -184,37 +184,53 @@ func CancelPendingRequestsTx(ctx context.Context, tx pgx.Tx, events *eventing.Ev
 		    cancel_reason = $4,
 		    revision = revision + 1,
 		    decided_at = now()
-		WHERE organization_id = $1::uuid AND asset_id = $2::uuid AND status = 'pending'
+		WHERE organization_id = $1::uuid AND asset_id = $2::uuid
+		  AND status IN ('pending', 'scheduled')
 		RETURNING id::text, workspace_id::text, asset_id::text, asset_version_id::text,
 		          submitted_by::text, revision, cancel_reason
 	`, row.OrganizationID, row.ID, actor.UserID, reason)
 	if err != nil {
 		return 0, fmt.Errorf("cancel pending publication requests: %w", err)
 	}
-	defer requests.Close()
-	var cancelled int64
+	// Drain the RETURNING set before issuing any side-effect statement on the
+	// same connection: pgx refuses concurrent use of one tx conn ("conn
+	// busy"). The pending-only era never entered this loop; scheduled
+	// requests (G4) made it reachable, surfacing the latent defect.
+	type cancelledRequest struct {
+		id, workspaceID, assetID, versionID, submittedBy, cancelReason string
+		revision                                                       int64
+	}
+	cancelledRows := make([]cancelledRequest, 0, 2)
 	for requests.Next() {
-		var requestID, workspaceID, assetID, versionID, submittedBy, cancelReason string
-		var revision int64
-		if err := requests.Scan(&requestID, &workspaceID, &assetID, &versionID, &submittedBy, &revision, &cancelReason); err != nil {
+		var item cancelledRequest
+		if err := requests.Scan(&item.id, &item.workspaceID, &item.assetID, &item.versionID, &item.submittedBy, &item.revision, &item.cancelReason); err != nil {
+			requests.Close()
 			return 0, fmt.Errorf("scan cancelled publication request: %w", err)
 		}
+		cancelledRows = append(cancelledRows, item)
+	}
+	if err := requests.Err(); err != nil {
+		requests.Close()
+		return 0, fmt.Errorf("cancel pending publication requests: %w", err)
+	}
+	requests.Close()
+	for _, item := range cancelledRows {
 		if events != nil {
 			raw, err := eventing.EncodePayload(eventing.PublicationRequestPayload{
-				RequestID:      requestID,
-				AssetID:        assetID,
-				AssetVersionID: versionID,
-				WorkspaceID:    workspaceID,
-				CancelReason:   cancelReason,
+				RequestID:      item.id,
+				AssetID:        item.assetID,
+				AssetVersionID: item.versionID,
+				WorkspaceID:    item.workspaceID,
+				CancelReason:   item.cancelReason,
 			})
 			if err == nil {
 				_, err = events.AppendTx(ctx, tx, eventing.Event{
 					OrganizationID:   row.OrganizationID,
-					WorkspaceID:      workspaceID,
+					WorkspaceID:      item.workspaceID,
 					EventType:        eventing.EventPublicationCancelled,
 					AggregateType:    "publication_request",
-					AggregateID:      requestID,
-					AggregateVersion: revision,
+					AggregateID:      item.id,
+					AggregateVersion: item.revision,
 					PayloadVersion:   eventing.PayloadVersionV1,
 					Actor:            eventing.ActorFromPrincipal(actor),
 					Payload:          raw,
@@ -228,23 +244,19 @@ func CancelPendingRequestsTx(ctx context.Context, tx pgx.Tx, events *eventing.Ev
 			INSERT INTO content.notifications (organization_id, workspace_id, recipient_user_id, kind, payload)
 			SELECT $1::uuid, $2::uuid, $3::uuid, 'publication.cancelled', $4::jsonb
 			WHERE $3::uuid IS DISTINCT FROM $5::uuid
-		`, row.OrganizationID, workspaceID, submittedBy, []byte(fmt.Sprintf(
-			`{"request_id":%q,"asset_id":%q,"status":"cancelled","reason":%q}`, requestID, assetID, cancelReason,
+		`, row.OrganizationID, item.workspaceID, item.submittedBy, []byte(fmt.Sprintf(
+			`{"request_id":%q,"asset_id":%q,"status":"cancelled","reason":%q}`, item.id, item.assetID, item.cancelReason,
 		)), actor.UserID); err != nil {
 			return 0, fmt.Errorf("record auto-cancel notification: %w", err)
 		}
-		store.AppendAuditTx(ctx, tx, store.NewAuditEntry("publication.cancel", row.OrganizationID, actor.UserID, "publication_request", requestID, map[string]any{
-			"workspace_id": workspaceID,
-			"asset_id":     assetID,
+		store.AppendAuditTx(ctx, tx, store.NewAuditEntry("publication.cancel", row.OrganizationID, actor.UserID, "publication_request", item.id, map[string]any{
+			"workspace_id": item.workspaceID,
+			"asset_id":     item.assetID,
 			"auto":         true,
-			"reason":       cancelReason,
-		}), workspaceID)
-		cancelled++
+			"reason":       item.cancelReason,
+		}), item.workspaceID)
 	}
-	if err := requests.Err(); err != nil {
-		return 0, fmt.Errorf("cancel pending publication requests: %w", err)
-	}
-	return cancelled, nil
+	return int64(len(cancelledRows)), nil
 }
 
 // AppendAssetEventTx appends a domain fact with the asset revision as
