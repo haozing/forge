@@ -47,9 +47,10 @@ type BuiltinHandlers struct {
 	PublishChecklist   JSONHandler
 	ListStaleAssets    JSONHandler
 	SuggestCoverAlt    JSONHandler
+	SuggestNoteImage   JSONHandler
 	// G8 content patterns (apply stays a member command — the note-tree
 	// write path authorizes through workspace membership).
-	SaveContentPattern JSONHandler
+	SaveContentPattern  JSONHandler
 	ListContentPatterns JSONHandler
 }
 
@@ -136,6 +137,7 @@ func builtinSpecs(handlers BuiltinHandlers) []builtinSpec {
 		{name: "publish_checklist", description: "Run a pre-publish quality report (title/summary/cover/cover alt/tags/binding/body/open intents; optional external link liveness). Advisory only — warnings never block publishing", risk: ReadOnly, capabilities: []string{"asset.read"}, handler: handlers.PublishChecklist, parameters: map[string]*schema.ParameterInfo{"asset_id": id("Asset ID"), "check_links": {Type: schema.Boolean, Desc: "Probe up to 10 external links with HEAD (SSRF-guarded)"}}},
 		{name: "list_stale_assets", description: "List published assets not updated for N days (default 180), oldest first, capped at 20", risk: ReadOnly, capabilities: []string{"asset.read"}, handler: handlers.ListStaleAssets, parameters: map[string]*schema.ParameterInfo{"days": {Type: schema.Integer, Desc: "Staleness threshold in days (1-3650)"}}},
 		{name: "suggest_cover_alt", description: "Set the cover image's alt text on the draft (dictated text wins; otherwise drafted from the article's title and summary). Freezes into the version at commit", risk: LowWrite, capabilities: []string{"asset.write"}, handler: handlers.SuggestCoverAlt, parameters: map[string]*schema.ParameterInfo{"asset_id": id("Asset ID"), "alt_text": {Type: schema.String, Desc: "Optional dictated alt text (<=500 chars); omit to generate"}}},
+		{name: "suggest_note_image", description: "Build an insert-image suggestion card for the current conversation: validates a clean image attachment and resolves its alt/caption. Read-only — the image enters the note only after the user confirms the card", risk: ReadOnly, capabilities: []string{"attachment.read"}, handler: handlers.SuggestNoteImage, parameters: map[string]*schema.ParameterInfo{"attachment_id": id("Clean image attachment ID"), "alt": {Type: schema.String, Desc: "Optional alt text (<=500 chars); falls back to the vision default"}, "caption": {Type: schema.String, Desc: "Optional caption (<=500 chars)"}}},
 		{name: "save_content_pattern", description: "Save a reusable content skeleton: snapshot an asset's note block tree (from_asset_id) or store explicit blocks, under a 2-32 char org-level name (upsert by name)", risk: LowWrite, capabilities: []string{"content.patterns"}, handler: handlers.SaveContentPattern, parameters: map[string]*schema.ParameterInfo{"name": id("Pattern name (2-32 chars)"), "description": {Type: schema.String}, "from_asset_id": {Type: schema.String, Desc: "Asset whose note tree to snapshot"}, "blocks": {Type: schema.Array, Desc: "Explicit [{kind,content}] blocks (<=200)", ElemInfo: &schema.ParameterInfo{Type: schema.Object}}}},
 		{name: "list_content_patterns", description: "List the organization's saved content skeletons (name, description, block count, source asset)", risk: ReadOnly, capabilities: []string{"content.patterns"}, handler: handlers.ListContentPatterns, parameters: map[string]*schema.ParameterInfo{"limit": {Type: schema.Integer}}},
 	}

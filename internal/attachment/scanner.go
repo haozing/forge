@@ -150,6 +150,9 @@ func (p ScanProcessor) Fail(ctx context.Context, organizationID, attachmentID st
 // CleanupExpired soft-deletes expired attachments that are not referenced by
 // any draft or sealed version and removes their objects. Attachments bound to
 // a draft or version survive regardless of their expiry stamp.
+//
+// The second pass reclaims older orphans: uploads that never got linked, no
+// image block references them, and seven days have passed — expired or not.
 func (p ScanProcessor) CleanupExpired(ctx context.Context) (int, error) {
 	if p.Store == nil || p.Store.Pool == nil {
 		return 0, errors.New("database store is not initialized")
@@ -157,10 +160,17 @@ func (p ScanProcessor) CleanupExpired(ctx context.Context) (int, error) {
 	rows, err := p.Store.Pool.Query(ctx, `
 		SELECT at.organization_id::text, at.id::text, at.object_key
 		FROM asset.attachments at
-		WHERE at.expires_at IS NOT NULL AND at.expires_at <= now()
+		WHERE (
+		      (at.expires_at IS NOT NULL AND at.expires_at <= now())
+		   OR (at.created_at < now() - interval '7 days')
+		)
 		  AND at.deleted_at IS NULL
 		  AND NOT EXISTS (SELECT 1 FROM asset.asset_draft_attachments lda WHERE lda.attachment_id = at.id)
 		  AND NOT EXISTS (SELECT 1 FROM asset.asset_version_attachments lva WHERE lva.attachment_id = at.id)
+		  AND NOT EXISTS (
+			SELECT 1 FROM content.block_revisions br
+			WHERE br.props ->> 'attachment_id' = at.id::text
+		  )
 	`)
 	if err != nil {
 		return 0, fmt.Errorf("list expired attachments: %w", err)

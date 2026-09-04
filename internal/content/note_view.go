@@ -93,6 +93,9 @@ func (s Service) NoteView(ctx context.Context, principal auth.Principal, convers
 		return NoteView{}, err
 	}
 	if found {
+		if err := noteblocks.ResolveImageAlts(ctx, s.Store.Pool, principal.OrganizationID, tree); err != nil {
+			return NoteView{}, err
+		}
 		view.DraftMarkdown = noteblocks.RenderMarkdown(tree)
 	}
 	view.Dirty = revision != committed
@@ -101,12 +104,13 @@ func (s Service) NoteView(ctx context.Context, principal auth.Principal, convers
 
 // NoteBlockEntry is one block of the live tree as served to the editor.
 type NoteBlockEntry struct {
-	BlockID      string  `json:"block_id"`
-	RevisionID   string  `json:"block_revision_id"`
-	Position     float64 `json:"position"`
-	Kind         string  `json:"kind"`
-	Content      string  `json:"content"`
-	EditableKind bool    `json:"editable"`
+	BlockID      string          `json:"block_id"`
+	RevisionID   string          `json:"block_revision_id"`
+	Position     float64         `json:"position"`
+	Kind         string          `json:"kind"`
+	Content      string          `json:"content"`
+	Props        json.RawMessage `json:"props,omitempty"`
+	EditableKind bool            `json:"editable"`
 }
 
 // NoteBlocks serves the live tree for editing.
@@ -122,7 +126,7 @@ func (s Service) NoteBlocks(ctx context.Context, principal auth.Principal, conve
 		return nil, 0, err
 	}
 	rows, err := s.Store.Pool.Query(ctx, `
-		SELECT b.id::text, br.id::text, bp.position, b.block_type, br.content
+		SELECT b.id::text, br.id::text, bp.position, b.block_type, br.content, br.props::text
 		FROM content.block_placements bp
 		JOIN content.block_revisions br ON br.organization_id = bp.organization_id AND br.id = bp.block_revision_id
 		JOIN content.blocks b ON b.organization_id = br.organization_id AND b.id = br.block_id
@@ -136,8 +140,12 @@ func (s Service) NoteBlocks(ctx context.Context, principal auth.Principal, conve
 	entries := []NoteBlockEntry{}
 	for rows.Next() {
 		var entry NoteBlockEntry
-		if err := rows.Scan(&entry.BlockID, &entry.RevisionID, &entry.Position, &entry.Kind, &entry.Content); err != nil {
+		var props string
+		if err := rows.Scan(&entry.BlockID, &entry.RevisionID, &entry.Position, &entry.Kind, &entry.Content, &props); err != nil {
 			return nil, 0, fmt.Errorf("scan note block: %w", err)
+		}
+		if props != "" && props != "{}" {
+			entry.Props = json.RawMessage(props)
 		}
 		entry.EditableKind = editableNoteKind(entry.Kind)
 		entries = append(entries, entry)
@@ -148,14 +156,91 @@ func (s Service) NoteBlocks(ctx context.Context, principal auth.Principal, conve
 	return entries, revision, nil
 }
 
+// NoteBlockProps is the wire form of the closed props vocabulary a client
+// may set on note blocks: image blocks carry the attachment reference plus
+// display words, headings may carry a level. Excerpt provenance is
+// server-generated and never passes through this type. Anything outside the
+// vocabulary rejects the whole block.
+type NoteBlockProps struct {
+	AttachmentID string `json:"attachment_id,omitempty"`
+	Alt          string `json:"alt,omitempty"`
+	Caption      string `json:"caption,omitempty"`
+	Level        int    `json:"level,omitempty"`
+}
+
+// maxBlockPropsRunes caps the display words of an image block, matching the
+// cover alt_text limit.
+const maxBlockPropsRunes = 500
+
+// propsJSONForKind validates client props against the closed vocabulary of
+// the kind and returns the jsonb text to store. Image blocks must reference
+// a clean, unexpired image attachment of the conversation's workspace; their
+// content stays empty. The check runs inside the caller's transaction.
+func propsJSONForKind(ctx context.Context, tx pgx.Tx, organizationID, conversationID, kind string, props NoteBlockProps) (string, error) {
+	switch kind {
+	case "image":
+		if props.Level != 0 || len([]rune(props.Alt)) > maxBlockPropsRunes || len([]rune(props.Caption)) > maxBlockPropsRunes {
+			return "", ErrInvalidInput
+		}
+		if !validID(props.AttachmentID) {
+			return "", ErrInvalidInput
+		}
+		var ok bool
+		err := tx.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM asset.attachments a
+				WHERE a.organization_id = $1::uuid AND a.id = $2::uuid
+				  AND a.workspace_id = (SELECT c.workspace_id FROM content.conversations c
+				                        WHERE c.organization_id = $1::uuid AND c.id = $3::uuid)
+				  AND a.deleted_at IS NULL AND a.status = 'clean'
+				  AND a.media_type LIKE 'image/%'
+				  AND (a.expires_at IS NULL OR a.expires_at > now())
+			)
+		`, organizationID, props.AttachmentID, conversationID).Scan(&ok)
+		if err != nil {
+			return "", fmt.Errorf("verify image attachment: %w", err)
+		}
+		if !ok {
+			return "", ErrInvalidInput
+		}
+		encoded, err := json.Marshal(map[string]string{
+			"attachment_id": props.AttachmentID,
+			"alt":           props.Alt,
+			"caption":       props.Caption,
+		})
+		if err != nil {
+			return "", err
+		}
+		return string(encoded), nil
+	case "heading":
+		if props.AttachmentID != "" || props.Alt != "" || props.Caption != "" || props.Level < 0 || props.Level > 6 {
+			return "", ErrInvalidInput
+		}
+		if props.Level == 0 {
+			return "", nil
+		}
+		encoded, err := json.Marshal(map[string]int{"level": props.Level})
+		if err != nil {
+			return "", err
+		}
+		return string(encoded), nil
+	default:
+		if props.AttachmentID != "" || props.Alt != "" || props.Caption != "" || props.Level != 0 {
+			return "", ErrInvalidInput
+		}
+		return "", nil
+	}
+}
+
 // AddNoteBlock appends a block to the live tree. It is the single write
 // entry into the note besides block editing: either a manual block
-// (kind+content), or a saved excerpt of one conversation message
-// (fromBlockRevisionID; content is copied verbatim from the message — the
-// note copy becomes independently editable while the transcript stays
-// immutable — with provenance recorded in block props).
-func (s Service) AddNoteBlock(ctx context.Context, principal auth.Principal, idempotencyKey, conversationID, kind, content, fromBlockRevisionID string) (NoteBlockEntry, error) {
-	props := ""
+// (kind+content, image blocks carry props instead of content), or a saved
+// excerpt of one conversation message (fromBlockRevisionID; content is
+// copied verbatim from the message — the note copy becomes independently
+// editable while the transcript stays immutable — with provenance recorded
+// in block props).
+func (s Service) AddNoteBlock(ctx context.Context, principal auth.Principal, idempotencyKey, conversationID, kind, content string, props NoteBlockProps, fromBlockRevisionID string) (NoteBlockEntry, error) {
+	propsJSON := ""
 	if fromBlockRevisionID != "" {
 		if principal.UserType != "member" || !validID(principal.OrganizationID) || !validID(principal.UserID) ||
 			!validID(conversationID) || !validID(fromBlockRevisionID) || !validIdempotencyKey(idempotencyKey) {
@@ -172,8 +257,9 @@ func (s Service) AddNoteBlock(ctx context.Context, principal auth.Principal, ide
 		default:
 			return NoteBlockEntry{}, ErrInvalidInput
 		}
-		if strings.TrimSpace(content) != "" {
-			// The excerpt body must come from the message itself.
+		// The excerpt body must come from the message itself; client props
+		// stay reserved for manual blocks.
+		if strings.TrimSpace(content) != "" || props != (NoteBlockProps{}) {
 			return NoteBlockEntry{}, ErrInvalidInput
 		}
 	} else if err := s.noteBlockGuard(principal, idempotencyKey, conversationID, kind, content); err != nil {
@@ -186,11 +272,12 @@ func (s Service) AddNoteBlock(ctx context.Context, principal auth.Principal, ide
 	defer tx.Rollback(ctx)
 	state, err := reserveIdempotency(ctx, tx, principal, "conversation.note.block.add", idempotencyKey,
 		hashRequest(struct {
-			ConversationID       string
-			Kind                 string
-			Content              string
-			FromBlockRevisionID  string
-		}{conversationID, kind, content, fromBlockRevisionID}))
+			ConversationID      string
+			Kind                string
+			Content             string
+			Props               NoteBlockProps
+			FromBlockRevisionID string
+		}{conversationID, kind, content, props, fromBlockRevisionID}))
 	if err != nil {
 		return NoteBlockEntry{}, err
 	}
@@ -220,13 +307,19 @@ func (s Service) AddNoteBlock(ctx context.Context, principal auth.Principal, ide
 		}
 		content = messageContent
 		encoded, _ := json.Marshal(map[string]string{"source_block_revision_id": fromBlockRevisionID, "source_role": sourceRole})
-		props = string(encoded)
+		propsJSON = string(encoded)
 	}
 	containerID, noteAssetID, revision, err := lockNoteContainer(ctx, tx, principal, conversationID)
 	if err != nil {
 		return NoteBlockEntry{}, err
 	}
-	entry, err := insertManualBlock(ctx, tx, principal.OrganizationID, containerID, noteAssetID, revision, kind, content, props, principal.UserID)
+	if fromBlockRevisionID == "" {
+		propsJSON, err = propsJSONForKind(ctx, tx, principal.OrganizationID, conversationID, kind, props)
+		if err != nil {
+			return NoteBlockEntry{}, err
+		}
+	}
+	entry, err := insertManualBlock(ctx, tx, principal.OrganizationID, containerID, noteAssetID, revision, kind, content, propsJSON, principal.UserID)
 	if err != nil {
 		return NoteBlockEntry{}, err
 	}
@@ -239,12 +332,14 @@ func (s Service) AddNoteBlock(ctx context.Context, principal auth.Principal, ide
 	return entry, nil
 }
 
-// UpdateNoteBlock replaces a manual block's content with a new revision.
-// Message blocks are conversation records: their text is immutable, only
-// status can change through the chat surface.
-func (s Service) UpdateNoteBlock(ctx context.Context, principal auth.Principal, idempotencyKey, conversationID, blockID, content string) (NoteBlockEntry, error) {
+// UpdateNoteBlock replaces a manual block's content (and, for image and
+// heading blocks, its props) with a new revision. Message blocks are
+// conversation records: their text is immutable, only status can change
+// through the chat surface. Existing props carry forward unless the request
+// sets new ones — excerpt provenance survives edits.
+func (s Service) UpdateNoteBlock(ctx context.Context, principal auth.Principal, idempotencyKey, conversationID, blockID, content string, props NoteBlockProps) (NoteBlockEntry, error) {
 	if principal.UserType != "member" || !validID(principal.OrganizationID) || !validID(principal.UserID) ||
-		!validID(conversationID) || !validID(blockID) || !validIdempotencyKey(idempotencyKey) || strings.TrimSpace(content) == "" {
+		!validID(conversationID) || !validID(blockID) || !validIdempotencyKey(idempotencyKey) {
 		return NoteBlockEntry{}, ErrInvalidInput
 	}
 	tx, err := s.Store.Pool.Begin(ctx)
@@ -257,7 +352,8 @@ func (s Service) UpdateNoteBlock(ctx context.Context, principal auth.Principal, 
 			ConversationID string
 			BlockID        string
 			Content        string
-		}{conversationID, blockID, content}))
+			Props          NoteBlockProps
+		}{conversationID, blockID, content, props}))
 	if err != nil {
 		return NoteBlockEntry{}, err
 	}
@@ -272,10 +368,10 @@ func (s Service) UpdateNoteBlock(ctx context.Context, principal auth.Principal, 
 	if err != nil {
 		return NoteBlockEntry{}, err
 	}
-	var blockType string
+	var blockType, oldProps string
 	var mbID *string
 	err = tx.QueryRow(ctx, `
-		SELECT b.block_type, mb.block_revision_id::text
+		SELECT b.block_type, COALESCE(br.props::text, ''), mb.block_revision_id::text
 		FROM content.blocks b
 		JOIN content.block_revisions br ON br.organization_id = $1::uuid AND br.block_id = b.id
 		JOIN content.block_placements bp ON bp.organization_id = $1::uuid
@@ -283,7 +379,7 @@ func (s Service) UpdateNoteBlock(ctx context.Context, principal auth.Principal, 
 		LEFT JOIN content.message_blocks mb ON mb.organization_id = $1::uuid AND mb.block_revision_id = br.id
 		WHERE b.organization_id = $1::uuid AND b.id = $3::uuid
 		ORDER BY bp.position LIMIT 1
-	`, principal.OrganizationID, containerID, blockID).Scan(&blockType, &mbID)
+	`, principal.OrganizationID, containerID, blockID).Scan(&blockType, &oldProps, &mbID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return NoteBlockEntry{}, ErrNotFound
 	}
@@ -296,6 +392,27 @@ func (s Service) UpdateNoteBlock(ctx context.Context, principal auth.Principal, 
 	if !editableNoteKind(blockType) {
 		return NoteBlockEntry{}, ErrInvalidInput
 	}
+	if blockType == "image" {
+		// Image blocks carry no body text; a new revision re-specifies the
+		// reference and display words in full.
+		if strings.TrimSpace(content) != "" {
+			return NoteBlockEntry{}, ErrInvalidInput
+		}
+	} else if strings.TrimSpace(content) == "" {
+		return NoteBlockEntry{}, ErrInvalidInput
+	}
+	propsJSON := oldProps
+	if blockType == "image" {
+		propsJSON, err = propsJSONForKind(ctx, tx, principal.OrganizationID, conversationID, blockType, props)
+		if err != nil {
+			return NoteBlockEntry{}, err
+		}
+	} else if props != (NoteBlockProps{}) {
+		propsJSON, err = propsJSONForKind(ctx, tx, principal.OrganizationID, conversationID, blockType, props)
+		if err != nil {
+			return NoteBlockEntry{}, err
+		}
+	}
 	checksum := hashBytes(content)
 	var nextRevision int64
 	if err := tx.QueryRow(ctx, `
@@ -307,10 +424,10 @@ func (s Service) UpdateNoteBlock(ctx context.Context, principal auth.Principal, 
 	var revisionID string
 	if err := tx.QueryRow(ctx, `
 		INSERT INTO content.block_revisions
-			(organization_id, block_id, revision_no, content, content_format, created_by, content_checksum)
-		VALUES ($1::uuid, $2::uuid, $3, $4, 'markdown', $5::uuid, $6)
+			(organization_id, block_id, revision_no, content, content_format, props, created_by, content_checksum)
+		VALUES ($1::uuid, $2::uuid, $3, $4, 'markdown', COALESCE(NULLIF($5, '')::jsonb, '{}'::jsonb), $6::uuid, $7)
 		RETURNING id::text
-	`, principal.OrganizationID, blockID, nextRevision, content, principal.UserID, checksum).Scan(&revisionID); err != nil {
+	`, principal.OrganizationID, blockID, nextRevision, content, propsJSON, principal.UserID, checksum).Scan(&revisionID); err != nil {
 		return NoteBlockEntry{}, fmt.Errorf("create block revision: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
@@ -421,7 +538,16 @@ func (s Service) noteBlockGuard(principal auth.Principal, idempotencyKey, conver
 		!validID(conversationID) || !validIdempotencyKey(idempotencyKey) {
 		return ErrInvalidInput
 	}
-	if !editableNoteKind(kind) || strings.TrimSpace(content) == "" {
+	if !editableNoteKind(kind) {
+		return ErrInvalidInput
+	}
+	// Image blocks carry no body text — the words live in props, the picture
+	// in the attachment store.
+	if kind == "image" {
+		if strings.TrimSpace(content) != "" {
+			return ErrInvalidInput
+		}
+	} else if strings.TrimSpace(content) == "" {
 		return ErrInvalidInput
 	}
 	if s.Store == nil || s.Store.Pool == nil {
@@ -522,21 +648,25 @@ func touchNoteTree(ctx context.Context, tx pgx.Tx, organizationID, containerID, 
 	} else if tag.RowsAffected() == 0 {
 		return NoteBlockEntry{}, errors.New("note draft row missing for epoch advance")
 	}
-	var content string
+	var content, props string
 	var position float64
 	if err := tx.QueryRow(ctx, `
-		SELECT br.content, bp.position
+		SELECT br.content, COALESCE(br.props::text, ''), bp.position
 		FROM content.block_revisions br
 		JOIN content.block_placements bp ON bp.organization_id = br.organization_id AND bp.block_revision_id = br.id
 		WHERE br.organization_id = $1::uuid AND br.id = $2::uuid AND bp.container_id = $3::uuid
-	`, organizationID, revisionID, containerID).Scan(&content, &position); err != nil {
+	`, organizationID, revisionID, containerID).Scan(&content, &props, &position); err != nil {
 		return NoteBlockEntry{}, fmt.Errorf("load block content: %w", err)
 	}
 	_ = revision
-	return NoteBlockEntry{
+	entry := NoteBlockEntry{
 		BlockID: blockID, RevisionID: revisionID, Position: position,
 		Kind: kind, Content: content, EditableKind: true,
-	}, nil
+	}
+	if props != "" && props != "{}" {
+		entry.Props = json.RawMessage(props)
+	}
+	return entry, nil
 }
 
 func derefString(value *string) string {
@@ -553,7 +683,7 @@ func jsonMarshalValue(value any) []byte {
 
 func editableNoteKind(kind string) bool {
 	switch kind {
-	case "paragraph", "heading", "quote", "code", "list", "callout":
+	case "paragraph", "heading", "quote", "code", "list", "callout", "image":
 		return true
 	}
 	return false

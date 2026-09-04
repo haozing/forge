@@ -906,12 +906,12 @@ paths:
             application/octet-stream:
               schema: { type: string, format: binary }
         '404': { $ref: '#/components/responses/Error' }
-  /api/attachments/{attachmentId}/presigned-download:
+  /api/attachments/{attachmentId}/resolved-download:
     post:
       tags: [attachments]
-      operationId: presignAttachmentDownload
-      summary: Issue a short-lived download URL
-      description: 换取 10 分钟有效的下载地址（指向 /api/attachments/{attachmentId}/download）
+      operationId: resolveAttachmentDownload
+      summary: Resolve the same-origin download URL
+      description: 换取 10 分钟有效的同源下载地址（指向 /api/attachments/{attachmentId}/download；对象存储 key 永不出域，代理是隐私取舍而非直签）
       parameters:
         - name: attachmentId
           in: path
@@ -4373,7 +4373,7 @@ paths:
     post:
       tags: [conversations]
       operationId: addNoteBlock
-      description: 向笔记文档追加一个块。两种入口：手动块（kind+content）；或存入笔记——从会话某条消息收录摘录（from_block_revision_id，正文取自该消息，kind 仅 quote/paragraph、缺省 quote，溯源记入块 props）。会话消息永不自动进笔记。
+      description: 向笔记文档追加一个块。两种入口：手动块（kind+content，image 块用 props 携带引用）；或存入笔记——从会话某条消息收录摘录（from_block_revision_id，正文取自该消息，kind 仅 quote/paragraph、缺省 quote，溯源记入块 props）。会话消息永不自动进笔记。
       parameters:
         - $ref: '#/components/parameters/ConversationId'
         - $ref: '#/components/parameters/IdempotencyKey'
@@ -4384,8 +4384,9 @@ paths:
             schema:
               type: object
               properties:
-                kind: { type: string, enum: [paragraph, heading, quote, code, list, callout], description: 手动块必填；收录摘录时仅 quote/paragraph（缺省 quote） }
-                content: { type: string, description: 手动块必填；收录摘录时必须省略（正文取自消息） }
+                kind: { type: string, enum: [paragraph, heading, quote, code, list, callout, image], description: 手动块必填；收录摘录时仅 quote/paragraph（缺省 quote） }
+                content: { type: string, description: 手动块必填；image 块必须省略（正文为空，图片以 props.attachment_id 引用） }
+                props: { $ref: '#/components/schemas/NoteBlockProps' }
                 from_block_revision_id: { type: string, format: uuid, description: 收录摘录：要存入笔记的消息 block_revision_id（须属于本会话） }
       responses:
         '201':
@@ -4402,7 +4403,7 @@ paths:
     patch:
       tags: [conversations]
       operationId: updateNoteBlock
-      description: 修改手动块内容（产生新块修订）；消息块为会话原始记录，不可改
+      description: 修改手动块（产生新块修订；image 块传 props、content 省略，heading 可传 props.level，其余块仅 content 且既有 props 保留）；消息块为会话原始记录，不可改
       parameters:
         - $ref: '#/components/parameters/ConversationId'
         - name: blockId
@@ -4416,9 +4417,9 @@ paths:
           application/json:
             schema:
               type: object
-              required: [content]
               properties:
                 content: { type: string }
+                props: { $ref: '#/components/schemas/NoteBlockProps' }
       responses:
         '200':
           description: 已更新
@@ -5767,9 +5768,25 @@ components:
         block_id: { type: string, format: uuid }
         block_revision_id: { type: string, format: uuid }
         position: { type: number }
-        kind: { type: string, description: paragraph/heading/quote/code/list/callout（笔记树只含手动块与收录的消息摘录；会话消息不在树中） }
-        content: { type: string }
+        kind: { type: string, description: paragraph/heading/quote/code/list/callout/image（笔记树只含手动块与收录的消息摘录；会话消息不在树中） }
+        content: { type: string, description: image 块恒为空字符串 }
+        props:
+          type: object
+          description: 封闭词表（仅 image/heading 携带）：图片引用与标题级别
+          properties:
+            attachment_id: { type: string, format: uuid }
+            alt: { type: string }
+            caption: { type: string }
+            level: { type: integer, minimum: 1, maximum: 6 }
         editable: { type: boolean }
+    NoteBlockProps:
+      type: object
+      description: image 块必填 attachment_id（须为本工作区 clean、未过期的图片附件），alt/caption 各 ≤500 字；heading 可选 level（1-6，缺省 3）；其余 kind 不接受任何 props
+      properties:
+        attachment_id: { type: string, format: uuid }
+        alt: { type: string, maxLength: 500 }
+        caption: { type: string, maxLength: 500 }
+        level: { type: integer, minimum: 1, maximum: 6 }
     Derivation:
       type: object
       properties:

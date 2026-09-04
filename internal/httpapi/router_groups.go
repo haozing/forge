@@ -304,7 +304,7 @@ func registerAttachmentRoutes(deps Dependencies, mux *http.ServeMux) {
 	mux.HandleFunc("/api/attachments/{attachmentId}", attachmentResource(deps))
 	mux.HandleFunc("/api/attachments/{attachmentId}/link", linkAttachment(deps))
 	mux.HandleFunc("/api/attachments/{attachmentId}/download", memberDownloadAttachment(deps))
-	mux.HandleFunc("/api/attachments/{attachmentId}/presigned-download", presignedAttachmentDownload(deps))
+	mux.HandleFunc("/api/attachments/{attachmentId}/resolved-download", resolvedAttachmentDownload(deps))
 }
 
 // registerConversationRoutes holds the note/conversation surface: collections,

@@ -39,11 +39,12 @@ const (
 
 // Canonical segment source types (retrieval.chunks.source_type).
 const (
-	SourceTypeTitle    = "title"
-	SourceTypeSummary  = "summary"
-	SourceTypeMarkdown = "markdown"
-	SourceTypeField    = "field"
-	SourceTypeTag      = "tag"
+	SourceTypeTitle      = "title"
+	SourceTypeSummary    = "summary"
+	SourceTypeMarkdown   = "markdown"
+	SourceTypeField      = "field"
+	SourceTypeTag        = "tag"
+	SourceTypeAttachment = "attachment"
 )
 
 // Fixed failure codes surfaced through retrieval.projection_runs.failure_code.

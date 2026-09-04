@@ -108,7 +108,7 @@ func TestSaveMessageExcerptToNote(t *testing.T) {
 		t.Fatalf("append answer: %v", err)
 	}
 
-	saved, err := service.AddNoteBlock(ctx, principal, sepKey("save"), conversationID, "", "", answer.BlockRevisionID)
+	saved, err := service.AddNoteBlock(ctx, principal, sepKey("save"), conversationID, "", "", NoteBlockProps{}, answer.BlockRevisionID)
 	if err != nil {
 		t.Fatalf("save excerpt: %v", err)
 	}
@@ -133,22 +133,22 @@ func TestSaveMessageExcerptToNote(t *testing.T) {
 
 	// The excerpt is note content: independently editable; the message it
 	// came from stays immutable.
-	if _, err := service.UpdateNoteBlock(ctx, principal, sepKey("edit"), conversationID, saved.BlockID, "改写后的结论"); err != nil {
+	if _, err := service.UpdateNoteBlock(ctx, principal, sepKey("edit"), conversationID, saved.BlockID, "改写后的结论", NoteBlockProps{}); err != nil {
 		t.Fatalf("excerpt must be editable: %v", err)
 	}
-	if _, err := service.UpdateNoteBlock(ctx, principal, sepKey("editmsg"), conversationID, answer.BlockID, "改写消息"); err == nil {
+	if _, err := service.UpdateNoteBlock(ctx, principal, sepKey("editmsg"), conversationID, answer.BlockID, "改写消息", NoteBlockProps{}); err == nil {
 		t.Fatal("message blocks must stay immutable")
 	}
 
 	// Validation: foreign revision 404s; excerpt body must not be client-set;
 	// kind is restricted to quote/paragraph.
-	if _, err := service.AddNoteBlock(ctx, principal, sepKey("f404"), conversationID, "", "", "00000000-0000-4000-8000-000000000000"); err == nil {
+	if _, err := service.AddNoteBlock(ctx, principal, sepKey("f404"), conversationID, "", "", NoteBlockProps{}, "00000000-0000-4000-8000-000000000000"); err == nil {
 		t.Fatal("foreign revision must not be savable")
 	}
-	if _, err := service.AddNoteBlock(ctx, principal, sepKey("c422"), conversationID, "", "自带正文", answer.BlockRevisionID); err == nil {
+	if _, err := service.AddNoteBlock(ctx, principal, sepKey("c422"), conversationID, "", "自带正文", NoteBlockProps{}, answer.BlockRevisionID); err == nil {
 		t.Fatal("client-set excerpt body must be rejected")
 	}
-	if _, err := service.AddNoteBlock(ctx, principal, sepKey("k422"), conversationID, "heading", "", answer.BlockRevisionID); err == nil {
+	if _, err := service.AddNoteBlock(ctx, principal, sepKey("k422"), conversationID, "heading", "", NoteBlockProps{}, answer.BlockRevisionID); err == nil {
 		t.Fatal("heading excerpt kind must be rejected")
 	}
 }
@@ -161,10 +161,10 @@ func TestManualBlocksRenderClean(t *testing.T) {
 	ctx := context.Background()
 	principal, conversationID, _ := patternFixture(t, database)
 
-	if _, err := service.AddNoteBlock(ctx, principal, sepKey("h"), conversationID, "heading", "结论", ""); err != nil {
+	if _, err := service.AddNoteBlock(ctx, principal, sepKey("h"), conversationID, "heading", "结论", NoteBlockProps{}, ""); err != nil {
 		t.Fatalf("add heading: %v", err)
 	}
-	if _, err := service.AddNoteBlock(ctx, principal, sepKey("p"), conversationID, "paragraph", "成文一段。", ""); err != nil {
+	if _, err := service.AddNoteBlock(ctx, principal, sepKey("p"), conversationID, "paragraph", "成文一段。", NoteBlockProps{}, ""); err != nil {
 		t.Fatalf("add paragraph: %v", err)
 	}
 	view, err := service.NoteView(ctx, principal, conversationID)

@@ -114,7 +114,7 @@ func (s *Service) RenderPreview(ctx context.Context, principal auth.Principal, w
 		if err != nil {
 			return nil, err
 		}
-		vm := ResolveDetail(row.Slug, content)
+		vm := ResolveDetail(row.Slug, content, s.authorizedBodyImages(ctx, facts, content.Markdown))
 		vm.Site = chrome(facts, config, "detail")
 		vm.Title = content.Title + " · " + row.Name + "（预览）"
 		vm.NoIndex = true

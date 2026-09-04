@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -72,9 +73,9 @@ func main() {
 		Source: agentruntime.PostgresConfigSource{Store: db}, Cipher: modelCipher,
 		Secrets: agentruntime.EnvironmentSecretResolver{},
 		Factory: agentruntime.OpenAIModelFactory{
-			AllowedHosts: cfg.AgentModelAllowedHosts,
+			AllowedHosts:       cfg.AgentModelAllowedHosts,
 			AllowPrivateEgress: cfg.AgentModelAllowPrivateEgress,
-			Limiter:      agentruntime.NewModelRequestLimiter(cfg.AgentModelMaxConcurrentRequests),
+			Limiter:            agentruntime.NewModelRequestLimiter(cfg.AgentModelMaxConcurrentRequests),
 		},
 		MaxEntries: cfg.AgentModelMaxCacheEntries,
 	}
@@ -232,10 +233,16 @@ func main() {
 		Transfers:   asset.TransferProcessor{Store: db, Events: events, Objects: objects, ObjectPrefix: cfg.OSSPrefix},
 		Deletions:   deletion.Processor{Store: db},
 		Automation:  automation.Service{Store: db},
-		Operations:  automation.OperationProcessor{Store: db, Events: events,  Workflows: workflows.Executor{Registry: workflowRegistry}, Preparation: preparation, ReAct: reactProcessor},
+		Operations:  automation.OperationProcessor{Store: db, Events: events, Workflows: workflows.Executor{Registry: workflowRegistry}, Preparation: preparation, ReAct: reactProcessor},
 		Attachments: attachment.ScanProcessor{Store: db, Objects: objects},
-		WorkerID:    fmt.Sprintf("background-%d", os.Getpid()),
-		Limit:       20,
+		Vision: attachment.VisionProcessor{
+			Store: db, Objects: objects,
+			Resolver:     visionModelResolver{Registry: modelRegistry, Endpoint: cfg.ImageVisionEndpoint},
+			EndpointName: cfg.ImageVisionEndpoint,
+			Timeout:      2 * time.Minute,
+		},
+		WorkerID: fmt.Sprintf("background-%d", os.Getpid()),
+		Limit:    20,
 	})
 	riverClient, err := river.NewClient(riverpgxv5.New(db.Pool), &river.Config{
 		Queues: map[string]river.QueueConfig{
@@ -308,4 +315,23 @@ func randomSuffix() string {
 		return fmt.Sprintf("%d", time.Now().UnixNano())
 	}
 	return hex.EncodeToString(raw)
+}
+
+// visionModelResolver adapts the agent model registry to the attachment
+// vision pass: the organization's active endpoint named by
+// IMAGE_VISION_ENDPOINT answers image-understanding requests.
+type visionModelResolver struct {
+	Registry *agentruntime.ModelRegistry
+	Endpoint string
+}
+
+func (r visionModelResolver) ResolveVisionModel(ctx context.Context, organizationID string) (attachment.VisionModel, error) {
+	if r.Registry == nil || strings.TrimSpace(r.Endpoint) == "" {
+		return nil, errors.New("image vision endpoint is not configured")
+	}
+	resolved, err := r.Registry.ResolveOrganizationEndpoint(ctx, organizationID, r.Endpoint)
+	if err != nil {
+		return nil, err
+	}
+	return resolved.Model, nil
 }

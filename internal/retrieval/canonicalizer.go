@@ -32,6 +32,14 @@ type TagInput struct {
 	DisplayName string
 }
 
+// AttachmentInput is one attachment text of the version's materialized
+// images: the vision extractor's description plus OCR.
+type AttachmentInput struct {
+	ID   string
+	Alt  string
+	Text string
+}
+
 // CanonicalizeInput carries every immutable input of one asset version.
 type CanonicalizeInput struct {
 	Title       string
@@ -40,6 +48,7 @@ type CanonicalizeInput struct {
 	Fields      json.RawMessage
 	FieldSchema json.RawMessage
 	Tags        []TagInput
+	Attachments []AttachmentInput
 }
 
 // FieldDefinition is one entry of field_schema.fields.
@@ -122,6 +131,18 @@ func Canonicalize(input CanonicalizeInput) []CanonicalSegment {
 			map[string]any{"type": SourceTypeTag, "tag_id": tag.ID, "key": tag.Key},
 			tag.DisplayName,
 			tag.DisplayName+"\n"+tag.Key)
+	}
+
+	// Attachment texts (vision OCR + description) are retrievable asset
+	// metadata; the repository orders them by attachment ID already.
+	for _, attachment := range input.Attachments {
+		label := attachment.Alt
+		if label == "" {
+			label = "图片"
+		}
+		appendSegment(SourceTypeAttachment,
+			map[string]any{"type": SourceTypeAttachment, "attachment_id": attachment.ID},
+			label, attachment.Text)
 	}
 	return segments
 }

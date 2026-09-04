@@ -256,14 +256,24 @@ type BackgroundJobsWorker struct {
 	// Attachments, when set, expires unreferenced attachments from the
 	// background loop (see attachment.ScanProcessor.CleanupExpired).
 	Attachments AttachmentCleanupProcessor
-	WorkerID    string
-	Limit       int
+	// Vision, when set, runs one pending image extraction per pass (see
+	// attachment.VisionProcessor.ProcessNext). A nil resolver inside keeps
+	// the pass disabled without surfacing errors.
+	Vision   VisionExtractionProcessor
+	WorkerID string
+	Limit    int
 }
 
 // AttachmentCleanupProcessor is the narrow surface of the attachment scanner
 // the background loop needs.
 type AttachmentCleanupProcessor interface {
 	CleanupExpired(ctx context.Context) (int, error)
+}
+
+// VisionExtractionProcessor is the narrow surface of the image
+// understanding pass the background loop needs.
+type VisionExtractionProcessor interface {
+	ProcessNext(ctx context.Context) error
 }
 
 func (w *BackgroundJobsWorker) Work(ctx context.Context, _ *river.Job[eventing.ProcessBackgroundJobsArgs]) error {
@@ -282,6 +292,13 @@ func (w *BackgroundJobsWorker) Work(ctx context.Context, _ *river.Job[eventing.P
 				return err
 			} else if expired > 0 {
 				processed = true
+			}
+		}
+		if w.Vision != nil {
+			if err := w.Vision.ProcessNext(ctx); err == nil {
+				processed = true
+			} else if !errors.Is(err, attachment.ErrNoPendingExtraction) {
+				return err
 			}
 		}
 		if err := w.Transfers.ProcessNextImport(ctx); err == nil {

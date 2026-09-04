@@ -60,11 +60,11 @@ func (s Service) NoteView(ctx context.Context, principal auth.Principal, id stri
 func (s Service) NoteBlocks(ctx context.Context, principal auth.Principal, id string) ([]contentservice.NoteBlockEntry, int64, error) {
 	return s.contentService().NoteBlocks(ctx, principal, id)
 }
-func (s Service) AddNoteBlock(ctx context.Context, principal auth.Principal, key, id, kind, blockContent, fromBlockRevisionID string) (contentservice.NoteBlockEntry, error) {
-	return s.contentService().AddNoteBlock(ctx, principal, key, id, kind, blockContent, fromBlockRevisionID)
+func (s Service) AddNoteBlock(ctx context.Context, principal auth.Principal, key, id, kind, blockContent string, props contentservice.NoteBlockProps, fromBlockRevisionID string) (contentservice.NoteBlockEntry, error) {
+	return s.contentService().AddNoteBlock(ctx, principal, key, id, kind, blockContent, props, fromBlockRevisionID)
 }
-func (s Service) UpdateNoteBlock(ctx context.Context, principal auth.Principal, key, id, blockID, blockContent string) (contentservice.NoteBlockEntry, error) {
-	return s.contentService().UpdateNoteBlock(ctx, principal, key, id, blockID, blockContent)
+func (s Service) UpdateNoteBlock(ctx context.Context, principal auth.Principal, key, id, blockID, blockContent string, props contentservice.NoteBlockProps) (contentservice.NoteBlockEntry, error) {
+	return s.contentService().UpdateNoteBlock(ctx, principal, key, id, blockID, blockContent, props)
 }
 func (s Service) DeleteNoteBlock(ctx context.Context, principal auth.Principal, key, id, blockID string) (string, error) {
 	return s.contentService().DeleteNoteBlock(ctx, principal, key, id, blockID)
@@ -113,10 +113,10 @@ type Summary struct {
 // review wins over everything, a rejection wins over the published state,
 // and a published card whose note moved on becomes pending_update.
 const (
-	CardOrganizing   = "organizing"   // 整理中：从未送审
-	CardReviewing    = "reviewing"    // 审核中：有送审在途
-	CardRejected     = "rejected"     // 未通过：最近一次送审被驳回
-	CardPublished    = "published"    // 已入库：笔记与知识库文档一致
+	CardOrganizing    = "organizing"     // 整理中：从未送审
+	CardReviewing     = "reviewing"      // 审核中：有送审在途
+	CardRejected      = "rejected"       // 未通过：最近一次送审被驳回
+	CardPublished     = "published"      // 已入库：笔记与知识库文档一致
 	CardPendingUpdate = "pending_update" // 待入库：已入库后笔记有新变化
 )
 
@@ -342,7 +342,8 @@ func (s Service) SourceConversation(ctx context.Context, principal auth.Principa
 	return conversationID, nil
 }
 
-func validID(value string) bool {	value = strings.TrimSpace(value)
+func validID(value string) bool {
+	value = strings.TrimSpace(value)
 	if len(value) != 36 {
 		return false
 	}

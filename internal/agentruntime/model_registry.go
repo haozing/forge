@@ -89,6 +89,23 @@ func (r *ModelRegistry) ResolveEndpoint(ctx context.Context, endpointID string, 
 	return r.resolve(ctx, config)
 }
 
+// ResolveOrganizationEndpoint resolves the organization's active endpoint
+// by name at its current revision.
+func (r *ModelRegistry) ResolveOrganizationEndpoint(ctx context.Context, organizationID, name string) (ResolvedModel, error) {
+	if r == nil || r.Source == nil || strings.TrimSpace(organizationID) == "" || strings.TrimSpace(name) == "" {
+		return ResolvedModel{}, errors.New("model registry is not initialized")
+	}
+	named, ok := r.Source.(OrganizationEndpointSource)
+	if !ok {
+		return ResolvedModel{}, errors.New("model config source does not support endpoint names")
+	}
+	config, err := named.ForOrganizationEndpoint(ctx, organizationID, name)
+	if err != nil {
+		return ResolvedModel{}, err
+	}
+	return r.resolve(ctx, config)
+}
+
 func (r *ModelRegistry) ResolveStructuredEndpoint(ctx context.Context, endpointID string, revision int64, responseSchema json.RawMessage) (ResolvedModel, error) {
 	if r == nil || r.Source == nil || r.Cipher == nil || r.Factory == nil || strings.TrimSpace(endpointID) == "" || revision <= 0 {
 		return ResolvedModel{}, errors.New("model registry is not initialized")
@@ -271,6 +288,26 @@ func (s PostgresConfigSource) ForEndpoint(ctx context.Context, endpointID string
 	return scanRuntimeConfig(s.Store.Pool.QueryRow(ctx, runtimeConfigSelect+`
 		WHERE e.id = $1::uuid AND r.revision = $2 AND r.revoked_at IS NULL
 	`, endpointID, revision))
+}
+
+// ForOrganizationEndpoint resolves an organization's active endpoint by
+// name at its current revision — the deployment-level way to designate a
+// shared capability endpoint (image understanding) without a new
+// management plane.
+func (s PostgresConfigSource) ForOrganizationEndpoint(ctx context.Context, organizationID, name string) (modelendpoint.RuntimeConfig, error) {
+	if s.Store == nil || s.Store.Pool == nil {
+		return modelendpoint.RuntimeConfig{}, errors.New("model config source is not initialized")
+	}
+	return scanRuntimeConfig(s.Store.Pool.QueryRow(ctx, runtimeConfigSelect+`
+		WHERE e.organization_id = $1::uuid AND e.name = $2 AND e.status = 'active'
+		  AND r.revision = e.current_revision AND r.revoked_at IS NULL
+	`, organizationID, name))
+}
+
+// OrganizationEndpointSource is implemented by config sources that can
+// resolve an endpoint by organization + name.
+type OrganizationEndpointSource interface {
+	ForOrganizationEndpoint(ctx context.Context, organizationID, name string) (modelendpoint.RuntimeConfig, error)
 }
 
 const runtimeConfigSelect = `

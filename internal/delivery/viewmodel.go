@@ -23,16 +23,16 @@ type NavItem struct {
 
 // Chrome is the per-site page furniture every template receives.
 type Chrome struct {
-	Slug         string
-	Name         string
-	Template     string
-	ScopePublic  bool
-	Nav          []NavItem
-	HomeHref     string
-	PostsHref    string
-	TagsHref     string
-	SearchHref   string
-	RSSHref      string
+	Slug        string
+	Name        string
+	Template    string
+	ScopePublic bool
+	Nav         []NavItem
+	HomeHref    string
+	PostsHref   string
+	TagsHref    string
+	SearchHref  string
+	RSSHref     string
 	// Style carries the resolved style document.
 	Style site.StyleConfig
 	// StyleCSSVars is the generated CSS custom-properties block plus the
@@ -168,8 +168,8 @@ type CommentVM struct {
 
 // ArchiveYearVM groups the archive listing (二期 §7.2).
 type ArchiveYearVM struct {
-	Year    string
-	Months  []ArchiveMonthVM
+	Year   string
+	Months []ArchiveMonthVM
 }
 
 // ArchiveMonthVM lists one month's entries.
@@ -384,9 +384,11 @@ func ResolveList(slug, heading, basePath string, page site.PublicPostPage, style
 }
 
 // ResolveDetail projects the detail DTO into the detail VM with the
-// sanitized markdown body and the extracted TOC.
-func ResolveDetail(slug string, content site.PublicPostContent) DetailVM {
-	markdown := RenderMarkdown(content.Markdown)
+// sanitized markdown body and the extracted TOC. Only image references in
+// the authorized set leave the database as same-origin media; every other
+// image is stripped whole.
+func ResolveDetail(slug string, content site.PublicPostContent, authorizedImages map[string]bool) DetailVM {
+	markdown := RenderSiteMarkdown(content.Markdown, slug, authorizedImages)
 	detail := DetailVM{
 		Page:        Page{Kind: "detail", Title: content.Title, Description: content.Summary},
 		AssetID:     content.AssetID,

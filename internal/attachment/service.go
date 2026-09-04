@@ -46,15 +46,16 @@ type Service struct {
 // Attachment is the metadata projection of asset.attachments. ObjectKey is
 // deliberately not part of the API surface.
 type Attachment struct {
-	ID          string    `json:"id"`
-	WorkspaceID string    `json:"workspace_id"`
-	Filename    string    `json:"filename"`
-	MediaType   string    `json:"media_type"`
-	ByteSize    int64     `json:"size"`
-	SHA256      string    `json:"checksum"`
-	Status      string    `json:"status"`
-	CreatedBy   string    `json:"created_by"`
-	CreatedAt   time.Time `json:"created_at"`
+	ID           string    `json:"id"`
+	WorkspaceID  string    `json:"workspace_id"`
+	Filename     string    `json:"filename"`
+	MediaType    string    `json:"media_type"`
+	ByteSize     int64     `json:"size"`
+	SHA256       string    `json:"checksum"`
+	Status       string    `json:"status"`
+	CreatedBy    string    `json:"created_by"`
+	CreatedAt    time.Time `json:"created_at"`
+	Deduplicated bool      `json:"deduplicated,omitempty"`
 }
 
 type Download struct {
@@ -140,6 +141,45 @@ func (s Service) Upload(ctx context.Context, principal auth.Principal, workspace
 		return Attachment{}, fmt.Errorf("rewind attachment for OSS: %w", err)
 	}
 	sha256Hex := hex.EncodeToString(hash.Sum(nil))
+
+	// Content-addressed dedup: a clean, alive attachment with the same hash
+	// in the SAME workspace is returned as-is (references ride the
+	// draft/version relation tables); its expiry clock restarts so the
+	// returned handle behaves like a fresh upload. Workspace scoping is not
+	// an optimization choice: the content model's workspace isolation
+	// (draft links, note image blocks) rejects foreign-workspace handles.
+	var existingID, existingCreated string
+	err = s.Store.Pool.QueryRow(ctx, `
+		UPDATE asset.attachments
+		SET expires_at = now() + interval '24 hours', updated_at = now()
+		WHERE id = (
+			SELECT id FROM asset.attachments
+			WHERE organization_id = $1::uuid AND workspace_id = $2::uuid AND sha256 = $3
+			  AND deleted_at IS NULL AND status = 'clean'
+			  AND (expires_at IS NULL OR expires_at > now())
+			ORDER BY created_at
+			LIMIT 1
+		)
+		RETURNING id::text, created_at::text
+	`, principal.OrganizationID, workspaceID, sha256Hex).Scan(&existingID, &existingCreated)
+	if err == nil {
+		created := parseTime(existingCreated)
+		return Attachment{
+			ID:           existingID,
+			WorkspaceID:  workspaceID,
+			Filename:     cleanName,
+			MediaType:    cleanType,
+			ByteSize:     size,
+			SHA256:       sha256Hex,
+			Status:       "clean",
+			CreatedBy:    principal.UserID,
+			CreatedAt:    created,
+			Deduplicated: true,
+		}, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return Attachment{}, fmt.Errorf("dedup attachment upload: %w", err)
+	}
 	objectID := uuid.NewString()
 	objectKey := buildObjectKey(s.ObjectPrefix, principal.OrganizationID, objectID)
 

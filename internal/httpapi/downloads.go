@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-func presignedAttachmentDownload(deps Dependencies) http.HandlerFunc {
+func resolvedAttachmentDownload(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")

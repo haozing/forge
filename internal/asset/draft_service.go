@@ -259,9 +259,9 @@ type RelationMaterial struct {
 	// the historical behavior of suggestion-driven commits. Member-driven
 	// relations (asset duplicate) pass 'manual'; the DB CHECK then forces
 	// confidence to NULL.
-	Source      string
-	Confidence  float64
-	Citation    []byte
+	Source       string
+	Confidence   float64
+	Citation     []byte
 	SuggestionID string
 }
 
@@ -285,14 +285,14 @@ type VersionMaterial struct {
 	// TagSource is the fallback provenance for version tag relations when the
 	// draft carries none of its own (import and webhook channels materialize
 	// the first version before their draft exists). Empty means "manual".
-	TagSource        string
-	AttachmentIDs    []string           // must reference clean, unexpired attachments
+	TagSource     string
+	AttachmentIDs []string // must reference clean, unexpired attachments
 	// CoverAttachmentID marks one of AttachmentIDs as the version cover
 	// (二期 §6); it flows into asset_version_attachments.role.
 	CoverAttachmentID string
 	// CoverAlt is the cover's alt text (G6): freezes into the version link
 	// alongside the role, so accessibility text is versioned with its image.
-	CoverAlt string
+	CoverAlt         string
 	Relations        []RelationMaterial // materialize as asset_relations rows (source='ai')
 	SourceRawInputID string
 	// Blocks is the reference-style frozen tree snapshot (noteblocks.SnapshotJSON)
@@ -739,6 +739,30 @@ func freezeNoteTx(ctx context.Context, tx pgx.Tx, events *eventing.EventStore, p
 	if err != nil {
 		return CommitResult{}, err
 	}
+	// Image blocks resolve their final alt against the attachment defaults
+	// before rendering, and every reference re-verifies clean at the sealed
+	// boundary: a rejected, deleted, non-image or expired attachment fails
+	// the whole commit (zero-compat: no grace paths).
+	if err := noteblocks.ResolveImageAlts(ctx, tx, row.OrganizationID, tree); err != nil {
+		return CommitResult{}, err
+	}
+	imageIDs := noteblocks.ImageAttachmentIDs(tree)
+	if len(imageIDs) > 0 {
+		var ok int
+		if err := tx.QueryRow(ctx, `
+			SELECT count(*) FROM asset.attachments
+			WHERE organization_id = $1::uuid AND id = ANY($2::uuid[])
+			  AND workspace_id = $3::uuid
+			  AND status = 'clean' AND deleted_at IS NULL
+			  AND media_type LIKE 'image/%'
+			  AND (expires_at IS NULL OR expires_at > now())
+		`, row.OrganizationID, imageIDs, row.WorkspaceID).Scan(&ok); err != nil {
+			return CommitResult{}, fmt.Errorf("verify note image attachments: %w", err)
+		}
+		if ok != len(imageIDs) {
+			return CommitResult{}, ErrAttachmentNotClean
+		}
+	}
 	markdown := noteblocks.RenderMarkdown(tree)
 	snapshot, err := noteblocks.SnapshotJSON(tree)
 	if err != nil {
@@ -764,6 +788,7 @@ func freezeNoteTx(ctx context.Context, tx pgx.Tx, events *eventing.EventStore, p
 		Markdown:               markdown,
 		Fields:                 fields,
 		Blocks:                 snapshot,
+		AttachmentIDs:          imageIDs,
 		CreatedBy:              principal.UserID,
 	}
 	if material.ResourceModelVersionID == "" {
@@ -852,21 +877,21 @@ func commitDraftTx(ctx context.Context, tx pgx.Tx, events *eventing.EventStore, 
 		return CommitResult{}, err
 	}
 	material := VersionMaterial{
-		OrganizationID:  row.OrganizationID,
-		WorkspaceID:     row.WorkspaceID,
-		AssetID:         row.ID,
-		ResourceModelID: row.ResourceModelID,
-		Origin:          draft.Origin,
-		Title:           draft.Title,
-		Summary:         draft.Summary,
-		Markdown:        draft.Markdown,
-		Fields:          draft.Fields,
-		TagIDs:          tagIDs,
-		AttachmentIDs:   attachmentIDs,
+		OrganizationID:    row.OrganizationID,
+		WorkspaceID:       row.WorkspaceID,
+		AssetID:           row.ID,
+		ResourceModelID:   row.ResourceModelID,
+		Origin:            draft.Origin,
+		Title:             draft.Title,
+		Summary:           draft.Summary,
+		Markdown:          draft.Markdown,
+		Fields:            draft.Fields,
+		TagIDs:            tagIDs,
+		AttachmentIDs:     attachmentIDs,
 		CoverAttachmentID: coverID,
-		CoverAlt:        coverAlt,
-		Relations:       relations,
-		CreatedBy:       principal.UserID,
+		CoverAlt:          coverAlt,
+		Relations:         relations,
+		CreatedBy:         principal.UserID,
 	}
 	// A commit that lands any accepted AI suggestion seals as ai_assisted
 	// (doc §10: 用户 commit 产生 origin=ai_assisted 未发布版本); a suggestion-free

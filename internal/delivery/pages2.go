@@ -25,7 +25,7 @@ func (s *Service) About(ctx context.Context, addr string, principal auth.Princip
 		if err != nil {
 			return renderOutput{}, err
 		}
-		vm := ResolveDetail(slug, content)
+		vm := ResolveDetail(slug, content, s.authorizedBodyImages(ctx, facts, content.Markdown))
 		vm.Kind = "about"
 		vm.Site = chrome(facts, config, "about")
 		vm.Title = content.Title + " · " + facts.Site.Name
@@ -111,19 +111,62 @@ func groupArchive(slug string, items []site.PublicPost, summaryRunes int) []Arch
 
 // MediaObject is one authorized public cover image.
 type MediaObject struct {
-	ObjectKey  string
-	MediaType  string
-	ByteSize   int64
-	ETag       string
+	ObjectKey string
+	MediaType string
+	ByteSize  int64
+	ETag      string
 }
 
-// Media authorizes and opens one public cover image: the attachment must be
-// a clean image, the cover of the current published version of an asset
-// bound to this active site, AND visible to the requesting visitor — the
-// visibility decision itself runs through the shared authorizer
-// (audit B-07: no second visibility judgment lives here). Missing/foreign/
-// below-tier targets all collapse into the same not-found error
-// (anti-probing parity).
+// authorizedBodyImages resolves which frozen image references of one page
+// body may leave the database as same-origin media: only clean image
+// attachments materialized on the current published version of an asset
+// bound to this active site qualify — cover parity extended to body
+// illustrations. The returned set feeds the render-time rewrite; every
+// other image reference is stripped whole.
+func (s *Service) authorizedBodyImages(ctx context.Context, facts site.SiteFacts, source string) map[string]bool {
+	allowed := map[string]bool{}
+	ids := MediaRefIDs(source)
+	if len(ids) == 0 || s.Store == nil || s.Store.Pool == nil {
+		return allowed
+	}
+	rows, err := s.Store.Pool.Query(ctx, `
+		SELECT DISTINCT cav.attachment_id::text
+		FROM asset.asset_version_attachments cav
+		JOIN asset.asset_versions v
+		  ON v.organization_id = cav.organization_id AND v.id = cav.asset_version_id
+		JOIN asset.assets a
+		  ON a.organization_id = v.organization_id AND a.id = v.asset_id
+		 AND a.current_published_version_id = v.id
+		JOIN asset.attachments att
+		  ON att.organization_id = cav.organization_id AND att.id = cav.attachment_id
+		JOIN site.site_content_bindings b
+		  ON b.organization_id = a.organization_id AND b.asset_id = a.id
+		WHERE cav.organization_id = $1::uuid AND b.site_id = $2::uuid
+		  AND cav.attachment_id = ANY($3::uuid[])
+		  AND att.deleted_at IS NULL AND att.status = 'clean'
+		  AND att.media_type LIKE 'image/%'
+	`, facts.Site.OrganizationID, facts.Site.ID, ids)
+	if err != nil {
+		return allowed
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return allowed
+		}
+		allowed[id] = true
+	}
+	return allowed
+}
+
+// Media authorizes and opens one public image: the attachment must be a
+// clean image materialized (cover or body illustration) on the current
+// published version of an asset bound to this active site, AND visible to
+// the requesting visitor — the visibility decision itself runs through the
+// shared authorizer (audit B-07: no second visibility judgment lives here).
+// Missing/foreign/below-tier targets all collapse into the same not-found
+// error (anti-probing parity).
 func (s *Service) Media(ctx context.Context, addr string, principal auth.Principal, slug, attachmentID string) (MediaObject, error) {
 	if s.Store == nil || s.Store.Pool == nil || s.Reader == nil {
 		return MediaObject{}, errMediaNotFound
@@ -138,12 +181,12 @@ func (s *Service) Media(ctx context.Context, addr string, principal auth.Princip
 	var media MediaObject
 	var assetID, versionID string
 	err = s.Store.Pool.QueryRow(ctx, `
-		SELECT cover.object_key, cover.media_type, cover.byte_size,
-		       COALESCE(cover.sha256::text, ''), a.id::text, v.id::text
-		FROM asset.attachments cover
+		SELECT media.object_key, media.media_type, media.byte_size,
+		       COALESCE(media.sha256::text, ''), a.id::text, v.id::text
+		FROM asset.attachments media
 		JOIN asset.asset_version_attachments cav
-		  ON cav.organization_id = cover.organization_id AND cav.attachment_id = cover.id
-		  AND cav.role = 'cover'
+		  ON cav.organization_id = media.organization_id AND cav.attachment_id = media.id
+		 AND cav.role IN ('cover', 'body')
 		JOIN asset.asset_versions v
 		  ON v.organization_id = cav.organization_id AND v.id = cav.asset_version_id
 		JOIN asset.assets a
@@ -151,11 +194,11 @@ func (s *Service) Media(ctx context.Context, addr string, principal auth.Princip
 		  AND a.current_published_version_id = v.id
 		JOIN site.site_content_bindings b
 		  ON b.organization_id = a.organization_id AND b.asset_id = a.id
-		WHERE cover.organization_id = $1::uuid
-		  AND cover.id = $2::uuid
-		  AND cover.deleted_at IS NULL
-		  AND cover.status = 'clean'
-		  AND cover.media_type LIKE 'image/%'
+		WHERE media.organization_id = $1::uuid
+		  AND media.id = $2::uuid
+		  AND media.deleted_at IS NULL
+		  AND media.status = 'clean'
+		  AND media.media_type LIKE 'image/%'
 		  AND b.site_id = $3::uuid
 		LIMIT 1
 	`, facts.Site.OrganizationID, attachmentID, facts.Site.ID).Scan(

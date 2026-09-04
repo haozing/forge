@@ -22,6 +22,7 @@ import (
 	"agentchunzhi/internal/site"
 
 	"github.com/cloudwego/eino/schema"
+	"github.com/jackc/pgx/v5"
 )
 
 // displayPathSuggestInstruction is the system prompt of the structured call.
@@ -320,9 +321,9 @@ var linkPattern = regexp.MustCompile(`https?://[^\s)"'<>\[\]]+`)
 // linkCheckerClient reuses the model-egress SSRF posture: private, loopback
 // and link-local targets never resolve (same rule as safeDialContext).
 var linkCheckerClient = &http.Client{
-	Timeout: 2 * time.Second,
+	Timeout:       2 * time.Second,
 	CheckRedirect: func(req *http.Request, via []*http.Request) error { return http.ErrUseLastResponse },
-	Transport: &http.Transport{DialContext: safeDialContext(net.DefaultResolver, false)},
+	Transport:     &http.Transport{DialContext: safeDialContext(net.DefaultResolver, false)},
 }
 
 // checkLinks probes up to 10 external links (HEAD, no redirects, 2s each);
@@ -497,4 +498,47 @@ func (f DomainToolFactory) suggestCoverAlt(ctx context.Context, scope ReActToolS
 		return nil, err
 	}
 	return map[string]any{"ok": true, "asset_id": assetID, "alt_text": alt, "source": map[bool]string{true: "dictated", false: "generated"}[dictated != ""]}, nil
+}
+
+// suggestNoteImage builds one insert-image suggestion card for the
+// conversation. The tool is read-only: it validates the attachment and
+// resolves display words, but the image enters a note only through the
+// member's own note-block write (AI has no direct note channel — the card
+// is the gate, not a formality).
+func (f DomainToolFactory) suggestNoteImage(ctx context.Context, scope ReActToolScope, attachmentID, alt, caption string) (any, error) {
+	if f.Store == nil || f.Store.Pool == nil {
+		return nil, errors.New("note image tool is not initialized")
+	}
+	alt = strings.TrimSpace(alt)
+	caption = strings.TrimSpace(caption)
+	if len([]rune(alt)) > 500 || len([]rune(caption)) > 500 {
+		return nil, errors.New("alt/caption exceed 500 characters")
+	}
+	var filename, mediaType, defaultAlt string
+	err := f.Store.Pool.QueryRow(ctx, `
+		SELECT original_filename, media_type, default_alt_text
+		FROM asset.attachments
+		WHERE organization_id = $1::uuid AND id = $2::uuid
+		  AND deleted_at IS NULL AND status = 'clean'
+		  AND media_type LIKE 'image/%'
+		  AND (expires_at IS NULL OR expires_at > now())
+	`, scope.OrganizationID, attachmentID).Scan(&filename, &mediaType, &defaultAlt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, errors.New("attachment was not found, is not a clean image, or has expired")
+	}
+	if err != nil {
+		return nil, fmt.Errorf("load attachment for image card: %w", err)
+	}
+	if alt == "" {
+		alt = strings.TrimSpace(defaultAlt)
+	}
+	return map[string]any{
+		"card":          "note_image_suggestion",
+		"attachment_id": attachmentID,
+		"filename":      filename,
+		"media_type":    mediaType,
+		"alt":           alt,
+		"caption":       caption,
+		"instruction":   "将此卡片呈现给用户并等待确认；用户确认后由前端调用 POST /api/conversations/{id}/note/blocks（kind=image, props.attachment_id）写入笔记。AI 不直接写笔记。",
+	}, nil
 }

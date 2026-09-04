@@ -56,13 +56,14 @@ type Config struct {
 	EmbeddingManifestKey            string
 	EmbeddingModelVersion           string
 	RerankerModel                   string
+	ImageVisionEndpoint             string
 	RetrievalEmbeddingAllowlist     []string
 	RetrievalSessionTTL             time.Duration
 	RetrievalQueryTimeout           time.Duration
 	AgentModelSecretEncryptionKey   string
 	AgentCheckpointEncryptionKey    string
 	AgentModelAllowedHosts          []string
-	AgentModelAllowPrivateEgress     bool
+	AgentModelAllowPrivateEgress    bool
 	AgentModelDefaultTimeout        int
 	AgentModelMaxCacheEntries       int
 	AgentModelMaxConcurrentRequests int
@@ -113,6 +114,7 @@ func Load() Config {
 		RerankerEndpoint:                strings.TrimSpace(os.Getenv("RETRIEVAL_RERANKER_ENDPOINT")),
 		RerankerToken:                   os.Getenv("RETRIEVAL_RERANKER_TOKEN"),
 		RerankerModel:                   strings.TrimSpace(os.Getenv("RETRIEVAL_RERANKER_MODEL")),
+		ImageVisionEndpoint:             strings.TrimSpace(os.Getenv("IMAGE_VISION_ENDPOINT")),
 		RerankerModelVersion:            strings.TrimSpace(os.Getenv("RETRIEVAL_RERANKER_MODEL_VERSION")),
 		RerankerProtocol:                strings.TrimSpace(envOrDefault("RETRIEVAL_RERANKER_PROTOCOL", "generic")),
 		SearchCursorSecret:              os.Getenv("SEARCH_CURSOR_SECRET"),

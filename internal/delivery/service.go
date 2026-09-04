@@ -246,7 +246,7 @@ func (s *Service) pipeline(ctx context.Context, addr string, principal auth.Prin
 		}
 		page := &Response{
 			Body: body, ContentType: contentHTML,
-			ETag: representationETag(revision(facts), band, routePath, body),
+			ETag:         representationETag(revision(facts), band, routePath, body),
 			CacheControl: cacheControl, NoIndex: output.noIndex, Status: 200,
 		}
 		s.storeEntry(key, revision(facts), band, routePath, page)
@@ -409,7 +409,7 @@ func (s *Service) Post(ctx context.Context, addr string, principal auth.Principa
 			}
 			return renderOutput{}, err
 		}
-		vm := ResolveDetail(slug, content)
+		vm := ResolveDetail(slug, content, s.authorizedBodyImages(ctx, facts, content.Markdown))
 		vm.Site = chrome(facts, config, "detail")
 		vm.Title = content.Title + " · " + facts.Site.Name
 		vm.Description = content.Summary

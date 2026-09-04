@@ -27,6 +27,7 @@ type BuildContext struct {
 	Fields           []byte
 	FieldSchema      []byte
 	Tags             []TagInput
+	Attachments      []AttachmentInput
 	SemanticEnabled  bool
 	ProfileStatus    string
 	CanonicalizerVer string
@@ -164,6 +165,35 @@ func (r RunRepository) LoadBuildContext(ctx context.Context, runID string) (Buil
 		build.Tags = append(build.Tags, tag)
 	}
 	if err := tagRows.Err(); err != nil {
+		return build, err
+	}
+
+	// Attachment texts join the retrievable corpus: the vision extractor's
+	// OCR + description of every clean, successfully extracted image
+	// materialized on this version.
+	attachmentRows, err := r.Store.Pool.Query(ctx, `
+		SELECT att.id::text, att.default_alt_text, atx.text_content
+		FROM asset.asset_version_attachments lva
+		JOIN asset.attachments att
+		  ON att.organization_id = lva.organization_id AND att.id = lva.attachment_id
+		JOIN asset.attachment_texts atx ON atx.attachment_id = att.id
+		WHERE lva.organization_id = $1::uuid AND lva.asset_version_id = $2::uuid
+		  AND att.deleted_at IS NULL AND att.status = 'clean'
+		  AND att.extraction_status = 'succeeded'
+		ORDER BY att.id
+	`, build.Run.OrganizationID, build.Run.AssetVersionID)
+	if err != nil {
+		return build, fmt.Errorf("load retrieval build attachments: %w", err)
+	}
+	defer attachmentRows.Close()
+	for attachmentRows.Next() {
+		var attachment AttachmentInput
+		if err := attachmentRows.Scan(&attachment.ID, &attachment.Alt, &attachment.Text); err != nil {
+			return build, err
+		}
+		build.Attachments = append(build.Attachments, attachment)
+	}
+	if err := attachmentRows.Err(); err != nil {
 		return build, err
 	}
 	return build, nil

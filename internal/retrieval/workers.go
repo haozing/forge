@@ -89,7 +89,6 @@ type FinalizeProjectionRunArgs struct {
 	RunID string `json:"run_id" river:"unique"`
 }
 
-
 func (FinalizeProjectionRunArgs) Kind() string { return JobKindFinalizeProjectionRun }
 
 func (FinalizeProjectionRunArgs) InsertOpts() river.InsertOpts {
@@ -218,6 +217,7 @@ func RunBuildProjection(ctx context.Context, engine Engine, queue QueueInserter,
 		segments := Canonicalize(CanonicalizeInput{
 			Title: build.Title, Summary: build.Summary, Markdown: build.Markdown,
 			Fields: build.Fields, FieldSchema: build.FieldSchema, Tags: build.Tags,
+			Attachments: build.Attachments,
 		})
 		checksum := CanonicalChecksum(segments)
 		chunks := ChunkSegments(segments, engineTokenizer(engine))

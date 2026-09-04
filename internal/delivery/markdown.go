@@ -41,12 +41,18 @@ var markdownEngine = goldmark.New(
 // attributes, event handlers, scripts, iframes and forms never survive.
 var markdownPolicy = buildMarkdownPolicy()
 
+// siteMediaSrcPattern is the only image source the public whitelist accepts:
+// the same-origin media route this renderer itself produces. External image
+// URLs never survive.
+var siteMediaSrcPattern = regexp.MustCompile(`^/sites/[^/?#]+/media/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(\?variant=(thumb|card|full))?$`)
+
 func buildMarkdownPolicy() *bluemonday.Policy {
 	policy := bluemonday.NewPolicy()
 	policy.AllowStandardURLs()
 	policy.AllowAttrs("href", "title").OnElements("a")
 	policy.AllowAttrs("id").OnElements("h1", "h2", "h3", "h4", "h5", "h6")
-	policy.AllowAttrs("src", "alt", "width", "height").OnElements("img")
+	policy.AllowAttrs("src").Matching(siteMediaSrcPattern).OnElements("img")
+	policy.AllowAttrs("alt", "width", "height").OnElements("img")
 	policy.AllowAttrs("type").Matching(regexp.MustCompile(`^checkbox$`)).OnElements("input")
 	policy.AllowAttrs("disabled", "checked").OnElements("input")
 	policy.AllowAttrs("start").OnElements("ol")
@@ -59,13 +65,59 @@ func buildMarkdownPolicy() *bluemonday.Policy {
 	return policy
 }
 
+// mediaRefPattern matches the frozen image reference the note freeze writes:
+// chunzhi-media://{attachment_id}.
+var mediaRefPattern = regexp.MustCompile(`chunzhi-media://([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})`)
+
+// MediaRefIDs extracts the distinct attachment references of one markdown
+// body in first-appearance order.
+func MediaRefIDs(source string) []string {
+	seen := map[string]bool{}
+	ids := []string{}
+	for _, match := range mediaRefPattern.FindAllStringSubmatch(source, -1) {
+		if seen[match[1]] {
+			continue
+		}
+		seen[match[1]] = true
+		ids = append(ids, match[1])
+	}
+	return ids
+}
+
 // RenderMarkdown renders one markdown source into sanitized HTML with the
-// extracted heading outline (auto heading IDs feed both anchors and the TOC).
+// extracted heading outline. Outside a site render context no image
+// reference is authorized, so images never survive here.
 func RenderMarkdown(source string) MarkdownResult {
+	return RenderSiteMarkdown(source, "", nil)
+}
+
+// RenderSiteMarkdown renders one public page body. Image references pointing
+// at chunzhi-media://{id} are rewritten to the same-origin media route (full
+// variant for body images) when the attachment is authorized for this site;
+// every other image source — external or unauthorized — is stripped whole,
+// alt included. Text links stay untouched.
+func RenderSiteMarkdown(source, slug string, authorized map[string]bool) MarkdownResult {
 	if strings.TrimSpace(source) == "" {
 		return MarkdownResult{HTML: "", Headings: []Heading{}}
 	}
 	document := markdownEngine.Parser().Parse(text.NewReader([]byte(source)))
+	ast.Walk(document, func(node ast.Node, entering bool) (ast.WalkStatus, error) {
+		if !entering {
+			return ast.WalkContinue, nil
+		}
+		image, ok := node.(*ast.Image)
+		if !ok {
+			return ast.WalkContinue, nil
+		}
+		if match := mediaRefPattern.FindStringSubmatch(string(image.Destination)); match != nil && authorized[match[1]] {
+			image.Destination = []byte("/sites/" + slug + "/media/" + match[1] + "?variant=full")
+			return ast.WalkContinue, nil
+		}
+		if parent := image.Parent(); parent != nil {
+			parent.RemoveChild(parent, image)
+		}
+		return ast.WalkSkipChildren, nil
+	})
 	var builder strings.Builder
 	if err := markdownEngine.Renderer().Render(&builder, []byte(source), document); err != nil {
 		return MarkdownResult{HTML: "", Headings: []Heading{}}

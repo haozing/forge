@@ -277,6 +277,12 @@ func (f DomainToolFactory) Build(ctx context.Context, scope ReActToolScope, rawP
 			}
 			return f.suggestCoverAlt(ctx, scope, principal.UserID, stringValue(arguments["asset_id"]), stringValue(arguments["alt_text"]))
 		},
+		SuggestNoteImage: func(ctx context.Context, arguments map[string]any) (any, error) {
+			if _, err := allowed(ctx, "attachment.read"); err != nil {
+				return nil, err
+			}
+			return f.suggestNoteImage(ctx, scope, stringValue(arguments["attachment_id"]), stringValue(arguments["alt"]), stringValue(arguments["caption"]))
+		},
 	}
 	if f.Contents != nil {
 		handlers.SaveContentPattern = func(ctx context.Context, arguments map[string]any) (any, error) {

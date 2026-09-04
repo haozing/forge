@@ -172,7 +172,7 @@ var routerTruth = map[string][]string{
 	"/api/attachments/{attachmentId}":                                         {"get", "patch", "delete"},
 	"/api/attachments/{attachmentId}/download":                                {"get"},
 	"/api/attachments/{attachmentId}/link":                                    {"post"},
-	"/api/attachments/{attachmentId}/presigned-download":                      {"post"},
+	"/api/attachments/{attachmentId}/resolved-download":                       {"post"},
 	"/api/deletion-jobs/{jobId}":                                              {"get"},
 	"/api/export-jobs/{jobId}":                                                {"get"},
 	"/api/export-jobs/{jobId}/download":                                       {"get"},
