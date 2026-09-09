@@ -114,17 +114,17 @@ func (s InvitationService) Accept(ctx context.Context, input AcceptInput) (Accep
 		return AcceptResult{}, err
 	}
 	defer tx.Rollback(ctx)
-	var invitationID, organizationID, email, organizationRole, status string
+	var invitationID, organizationID, email, organizationRole string
 	err = tx.QueryRow(ctx, `
 		UPDATE organization.member_invitations
-		SET accepted_at = now(), revision = revision + 1, updated_at = now()
+		SET status = 'accepted', accepted_at = now(), revision = revision + 1, updated_at = now()
 		WHERE id = (
 			SELECT id FROM organization.member_invitations
 			WHERE token_hash = $1 AND status = 'pending' AND expires_at > now()
 			FOR UPDATE
 		)
-		RETURNING id::text, organization_id::text, email, organization_role, status
-	`, hashToken(input.Token)).Scan(&invitationID, &organizationID, &email, &organizationRole, &status)
+		RETURNING id::text, organization_id::text, email, organization_role
+	`, hashToken(input.Token)).Scan(&invitationID, &organizationID, &email, &organizationRole)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return AcceptResult{}, ErrInvitationInvalid
 	}
