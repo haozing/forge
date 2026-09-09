@@ -42,9 +42,6 @@ func TestBatchResultIsolatesFailures(t *testing.T) {
 }
 
 func TestSentinelErrorsAreDistinct(t *testing.T) {
-	if errors.Is(ErrSelfApproval, ErrConflict) {
-		t.Fatal("self approval is a distinct invariant, not a generic conflict")
-	}
 	if errors.Is(ErrVersionSuperseded, ErrConflict) {
 		t.Fatal("superseded request is a distinct invariant")
 	}

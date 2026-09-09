@@ -64,8 +64,6 @@ func ServiceError(w http.ResponseWriter, err error) {
 	case errors.Is(err, asset.ErrAssetArchived), errors.Is(err, asset.ErrConflict),
 		errors.Is(err, review.ErrConflict), errors.Is(err, review.ErrVersionSuperseded):
 		writeError(w, http.StatusConflict, "state_conflict")
-	case errors.Is(err, review.ErrSelfApproval):
-		writeError(w, http.StatusConflict, "self_approval_not_allowed")
 	case errors.Is(err, asset.ErrApprovalRequired), errors.Is(err, asset.ErrForbidden),
 		errors.Is(err, review.ErrForbidden):
 		writeError(w, http.StatusForbidden, "action_not_allowed")

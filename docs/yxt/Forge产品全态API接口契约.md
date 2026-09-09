@@ -531,7 +531,7 @@ Agent 应用：`{id,name,provider,status,capabilities,answer_posture,description
 
 会话摘要（"我的灵感"卡片，列表仅返回当前成员自己发起的会话）：`{conversation_id,workspace_id,title,source,visibility,status,card_status,card_status_detail,has_new_changes,container_id,note_asset_id,note_first_line,parent_conversation_id,origin_derivation_id,last_message_preview,message_count,updated_at}`。会话状态：`active|archived|completed`；`card_status` 五态徽标（2026-09-04 对齐产品方案 §5.1）：`organizing`（整理中，从未送审）/`reviewing`（审核中，有 pending 送审）/`rejected`（未通过，`card_status_detail` 为驳回意见）/`published`（已入库且笔记无新变化）/`pending_update`（待入库，已入库后笔记有变化）；`has_new_changes` 为审核中"送审后又有改动"角标。列表支持 `?status=card_status` 筛选（非法值 422 `invalid_status`）与 `?q=`（标题/笔记首行/消息）。
 
-**笔记入库一律经管理员审核（无跳过路径，2026-09-04 起）**：builtin_note 为 approval 策略——直接 `POST /api/assets/{id}/publish` 返回 403 `action_not_allowed`；入库链路为 commit-draft → asset-versions confirm → `POST /api/workspaces/{ws}/publication-requests`（空笔记 422 拒绝）；批准（不可自批，409 `self_approval_not_allowed`）即上架并将资产可见性提升为 `organization`（知识库全员共享）；送审期间可继续编辑，批准上架的是送审时定格的版本；更新入库重复送审自动作废旧待审（cancel_reason=new_version）。
+**笔记入库一律经管理员审核（无跳过路径，2026-09-04 起）**：builtin_note 为 approval 策略——直接 `POST /api/assets/{id}/publish` 返回 403 `action_not_allowed`；入库链路为 commit-draft → asset-versions confirm → `POST /api/workspaces/{ws}/publication-requests`（空笔记 422 拒绝）；批准（2026-09-09 起允许自批，提交者本人若有审批权限可直接批准）即上架并将资产可见性提升为 `organization`（知识库全员共享）；送审期间可继续编辑，批准上架的是送审时定格的版本；更新入库重复送审自动作废旧待审（cancel_reason=new_version）。
 
 **删除分叉**：`DELETE /api/conversations/{id}`（有派生子需 `?cascade_children=true`）——从未入库的笔记资产随卡归档；**已入库的文档保留**（响应含 `kept_document_asset_ids`），在途送审自动撤回（user_cancelled）；"来自灵感卡"回链 `GET /api/assets/{assetId}/source-conversation`（仅作者可解析，返回 `{conversation_id}`；卡删除后 404 `source_conversation_not_found`）。
 

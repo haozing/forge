@@ -28,7 +28,6 @@ var (
 	ErrForbidden         = errors.New("publication action forbidden")
 	ErrNotFound          = errors.New("publication request not found")
 	ErrConflict          = errors.New("publication request conflict")
-	ErrSelfApproval      = errors.New("submitter cannot approve own request")
 	ErrVersionSuperseded = errors.New("request version is no longer the working version")
 )
 
@@ -555,8 +554,10 @@ func (s Service) Get(ctx context.Context, principal auth.Principal, workspaceID,
 }
 
 // decide performs approve or reject with every invariant inside one
-// transaction: pending state, no self-approval, working pointer still matches,
-// policy re-check, pointer switch on approval and full audit/event fan-out.
+// transaction: pending state, working pointer still matches, policy re-check,
+// pointer switch on approval and full audit/event fan-out. Self-approval by a
+// permitted member approver (admin/reviewer) is allowed since 2026-09-09;
+// agents remain barred from deciding.
 func (s Service) decide(ctx context.Context, principal auth.Principal, workspaceID, requestID, decision, comment string) (Request, error) {
 	action := authz.ActionPublicationApprove
 	if decision == "reject" {
@@ -598,9 +599,6 @@ func (s Service) decide(ctx context.Context, principal auth.Principal, workspace
 	}
 	if status != RequestPending {
 		return Request{}, ErrConflict
-	}
-	if decision == "approve" && submittedBy == principal.UserID {
-		return Request{}, ErrSelfApproval
 	}
 	// The submitted version is frozen and decides on its own: edits made to
 	// the note while the request was pending do not affect the review (the
@@ -823,8 +821,6 @@ func batchErrorCode(err error) string {
 		return "attachments_not_clean"
 	case errors.Is(err, asset.ErrRequiredFieldMissing):
 		return "required_field_missing"
-	case errors.Is(err, ErrSelfApproval):
-		return "self_approval_not_allowed"
 	case errors.Is(err, ErrVersionSuperseded):
 		return "request_version_superseded"
 	case errors.Is(err, ErrForbidden):
