@@ -133,7 +133,7 @@ func TestAgentApplicationModelEndpointBindingIntegration(t *testing.T) {
 	}
 
 	foreignOrganizationID := uuid.NewString()
-	if _, err := db.Pool.Exec(ctx, `INSERT INTO organization.organizations (id, name) VALUES ($1::uuid, $2)`, foreignOrganizationID, marker+"-foreign"); err != nil {
+	if _, err := db.Pool.Exec(ctx, `INSERT INTO organization.organizations (id, name, slug) VALUES ($1::uuid, $2, $3)`, foreignOrganizationID, marker+"-foreign", marker+"-foreign"); err != nil {
 		t.Fatalf("create foreign organization: %v", err)
 	}
 	var foreignEndpointID string
@@ -148,6 +148,148 @@ func TestAgentApplicationModelEndpointBindingIntegration(t *testing.T) {
 	var pgErr *pgconn.PgError
 	if !errors.As(err, &pgErr) || pgErr.Code != "23503" {
 		t.Fatalf("expected cross-organization endpoint foreign key violation, got %v", err)
+	}
+}
+
+func TestAgentApplicationKnowledgeScopeIntegration(t *testing.T) {
+	databaseURL := os.Getenv("AGENTCHUNZHI_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("AGENTCHUNZHI_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	db, err := store.Open(ctx, databaseURL)
+	if err != nil {
+		t.Fatalf("open integration database: %v", err)
+	}
+	t.Cleanup(db.Close)
+
+	var organizationID, memberID string
+	if err := db.Pool.QueryRow(ctx, `
+		SELECT o.id::text, u.id::text
+		FROM organization.organizations o
+		JOIN identity.users u ON u.organization_id = o.id
+		WHERE o.status = 'active' AND u.user_type = 'member' AND u.status = 'active'
+		ORDER BY o.created_at, u.created_at
+		LIMIT 1
+	`).Scan(&organizationID, &memberID); err != nil {
+		t.Fatalf("load integration principal: %v", err)
+	}
+	type knowledgeBase struct{ id, defaultModel string }
+	var knowledgeBases []knowledgeBase
+	rows, err := db.Pool.Query(ctx, `
+		SELECT w.id::text, w.default_resource_model_id::text
+		FROM content.workspaces w
+		WHERE w.organization_id = $1::uuid AND w.default_resource_model_id IS NOT NULL
+		ORDER BY w.created_at
+		LIMIT 2
+	`, organizationID)
+	if err != nil {
+		t.Fatalf("list knowledge bases: %v", err)
+	}
+	for rows.Next() {
+		var kb knowledgeBase
+		if err := rows.Scan(&kb.id, &kb.defaultModel); err != nil {
+			t.Fatalf("scan knowledge base: %v", err)
+		}
+		knowledgeBases = append(knowledgeBases, kb)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate knowledge bases: %v", err)
+	}
+	if len(knowledgeBases) == 0 {
+		t.Skip("integration organization has no workspace with a default resource model")
+	}
+
+	principal := auth.Principal{OrganizationID: organizationID, UserID: memberID, UserType: "member"}
+	service := Service{Store: db}
+	marker := "kb-scope-" + uuid.NewString()
+	var createdApplication, createdUser string
+	t.Cleanup(func() {
+		cleanupApplicationIntegrationRow(t, db, `DELETE FROM content.workspace_agent_applications WHERE organization_id = $1::uuid AND agent_application_id = $2::uuid`, organizationID, createdApplication)
+		cleanupApplicationIntegrationRow(t, db, `DELETE FROM content.agent_access_policies WHERE organization_id = $1::uuid AND agent_user_id = $2::uuid`, organizationID, createdUser)
+		cleanupApplicationIntegrationRow(t, db, `DELETE FROM system.idempotency_keys WHERE organization_id = $1::uuid AND idempotency_key LIKE $2`, organizationID, marker+"%")
+		if createdApplication != "" {
+			cleanupApplicationIntegrationRow(t, db, `DELETE FROM integration.agent_applications WHERE id = $1::uuid`, createdApplication)
+		}
+		if createdUser != "" {
+			cleanupApplicationIntegrationRow(t, db, `DELETE FROM identity.api_keys WHERE user_id = $1::uuid`, createdUser)
+			cleanupApplicationIntegrationRow(t, db, `DELETE FROM identity.users WHERE id = $1::uuid`, createdUser)
+		}
+	})
+
+	endpointID := seedApplicationEndpoint(t, ctx, db, organizationID, memberID, marker+"-endpoint", modelendpoint.Capabilities{Generate: true, Streaming: true})
+	registered, err := service.RegisterAgent(ctx, principal, RegisterAgentInput{
+		DisplayName: "kb scope user", ApiKeyName: "kb scope key", ApplicationName: "kb scope app",
+		ModelEndpointID: endpointID, RuntimeMode: "rag", Capabilities: []string{"query.read"},
+		IdempotencyKey: marker + "-register",
+	})
+	if err != nil {
+		t.Fatalf("register application: %v", err)
+	}
+	createdApplication, createdUser = registered.AgentApplicationID, registered.AgentUserID
+
+	// Admin-service registration carries no knowledge grant: scopes start empty.
+	summary, err := service.GetAgentApplication(ctx, principal, createdApplication)
+	if err != nil {
+		t.Fatalf("load application: %v", err)
+	}
+	if len(summary.KnowledgeScopes) != 0 {
+		t.Fatalf("expected empty knowledge scopes before first move, got %+v", summary.KnowledgeScopes)
+	}
+
+	moveTo := knowledgeBases[0].id
+	if _, err := service.UpdateAgentApplication(ctx, principal, UpdateAgentApplicationInput{
+		ApplicationID: createdApplication, KnowledgeBaseWorkspaceID: &moveTo, IdempotencyKey: marker + "-move-1",
+	}); err != nil {
+		t.Fatalf("move application to first knowledge base: %v", err)
+	}
+	summary, err = service.GetAgentApplication(ctx, principal, createdApplication)
+	if err != nil {
+		t.Fatalf("reload application: %v", err)
+	}
+	if len(summary.KnowledgeScopes) != 1 {
+		t.Fatalf("expected exactly one knowledge scope, got %+v", summary.KnowledgeScopes)
+	}
+	scope := summary.KnowledgeScopes[0]
+	if scope.WorkspaceID != moveTo || scope.ResourceModelID != knowledgeBases[0].defaultModel || scope.WorkspaceName == "" || scope.DataScope == "" {
+		t.Fatalf("knowledge scope does not match target workspace: %+v (want ws=%s model=%s)", scope, moveTo, knowledgeBases[0].defaultModel)
+	}
+	var enabledCount int
+	if err := db.Pool.QueryRow(ctx, `
+		SELECT count(*) FROM content.workspace_agent_applications
+		WHERE organization_id = $1::uuid AND agent_application_id = $2::uuid AND enabled = true AND workspace_id = $3::uuid
+	`, organizationID, createdApplication, moveTo).Scan(&enabledCount); err != nil || enabledCount != 1 {
+		t.Fatalf("target knowledge base enablement missing: count=%d err=%v", enabledCount, err)
+	}
+
+	if len(knowledgeBases) > 1 {
+		second := knowledgeBases[1].id
+		if _, err := service.UpdateAgentApplication(ctx, principal, UpdateAgentApplicationInput{
+			ApplicationID: createdApplication, KnowledgeBaseWorkspaceID: &second, IdempotencyKey: marker + "-move-2",
+		}); err != nil {
+			t.Fatalf("move application to second knowledge base: %v", err)
+		}
+		summary, err = service.GetAgentApplication(ctx, principal, createdApplication)
+		if err != nil {
+			t.Fatalf("reload application after second move: %v", err)
+		}
+		if len(summary.KnowledgeScopes) != 1 || summary.KnowledgeScopes[0].WorkspaceID != second {
+			t.Fatalf("second move did not replace the scope: %+v", summary.KnowledgeScopes)
+		}
+		if err := db.Pool.QueryRow(ctx, `
+			SELECT count(*) FROM content.workspace_agent_applications
+			WHERE organization_id = $1::uuid AND agent_application_id = $2::uuid AND enabled = true
+		`, organizationID, createdApplication).Scan(&enabledCount); err != nil || enabledCount != 1 {
+			t.Fatalf("expected exactly one enabled knowledge base after move: count=%d err=%v", enabledCount, err)
+		}
+	}
+
+	bogus := uuid.NewString()
+	if _, err := service.UpdateAgentApplication(ctx, principal, UpdateAgentApplicationInput{
+		ApplicationID: createdApplication, KnowledgeBaseWorkspaceID: &bogus, IdempotencyKey: marker + "-move-bogus",
+	}); !errors.Is(err, ErrApplicationUpdateInvalidInput) {
+		t.Fatalf("expected unknown knowledge base to fail validation, got %v", err)
 	}
 }
 

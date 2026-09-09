@@ -3624,6 +3624,10 @@ paths:
                       type: array
                       items: { type: string }
                     approve_low_write: { type: boolean }
+                knowledge_base_workspace_id:
+                  type: string
+                  format: uuid
+                  description: 移动智能体到目标知识库（工作区）——同事务内停用旧启用关系、启用目标工作区，并把绑定身份的检索授权替换为目标工作区默认资源模型。需目标工作区 workspace.manage；目标工作区未设置默认资源模型时 422 knowledge_base_not_ready
       responses:
         '200':
           description: 已更新
@@ -6815,8 +6819,26 @@ components:
         status: { type: string, enum: [active, disabled] }
         agent_user_id: { type: string, format: uuid }
         display_name: { type: string }
+        knowledge_scopes:
+          type: array
+          description: 绑定智能体身份的检索授权(即"所属知识库")。当前产品语义为单知识库——创建时自动授权所在工作区的默认资源模型,通常恰有一项;数组形态保留多对多的事实
+          items:
+            $ref: '#/components/schemas/AgentKnowledgeScope'
         created_at: { type: string, format: date-time }
         expires_at: { type: string, format: date-time, nullable: true }
+    AgentKnowledgeScope:
+      type: object
+      properties:
+        workspace_id:
+          type: string
+          format: uuid
+          description: 知识库(工作区)id;组织级授权时为空串
+        workspace_name: { type: string }
+        resource_model_id: { type: string, format: uuid }
+        resource_model_name: { type: string }
+        data_scope:
+          type: string
+          enum: [public, organization, workspace]
     AgentSession:
       type: object
       properties:

@@ -19,6 +19,8 @@ func writeAgentApplicationError(w http.ResponseWriter, err error, fallback strin
 	case errors.Is(err, adminservice.ErrInvalidInput),
 		errors.Is(err, adminservice.ErrApplicationListInvalidInput), errors.Is(err, adminservice.ErrApplicationStatusInvalidInput), errors.Is(err, adminservice.ErrApplicationUpdateInvalidInput):
 		writeError(w, http.StatusUnprocessableEntity, "validation_failed")
+	case errors.Is(err, adminservice.ErrKnowledgeBaseNotReady):
+		writeError(w, http.StatusUnprocessableEntity, "knowledge_base_not_ready")
 	case errors.Is(err, adminservice.ErrApplicationNotFound):
 		writeError(w, http.StatusNotFound, "agent_application_not_found")
 	case errors.Is(err, adminservice.ErrConflict):
@@ -94,7 +96,7 @@ func workspaceAgentApplications(deps Dependencies) http.HandlerFunc {
 			DisplayName: input.DisplayName, ApiKeyName: input.ApiKeyName, ApplicationName: input.ApplicationName,
 			ModelEndpointID: input.ModelEndpointID, RuntimeMode: input.RuntimeMode, WorkflowKey: input.WorkflowKey,
 			Capabilities: input.Capabilities, AnswerPosture: input.AnswerPosture,
-			ExpiresAt:    expiresAt, IdempotencyKey: key,
+			ExpiresAt: expiresAt, IdempotencyKey: key,
 		})
 		if err != nil {
 			writeAgentApplicationError(w, err, "agent_application_create_failed")
@@ -180,24 +182,35 @@ func agentApplicationResource(deps Dependencies) http.HandlerFunc {
 			return
 		}
 		var patch struct {
-			Name            *string                      `json:"name"`
-			ModelEndpointID *string                      `json:"model_endpoint_id"`
-			RuntimeMode     *string                      `json:"runtime_mode"`
-			WorkflowKey     *string                      `json:"workflow_key"`
-			Capabilities    *[]string                    `json:"capabilities"`
-			AnswerPosture   *string                      `json:"answer_posture"`
-			ToolPolicy      *adminservice.ToolPolicyPatch `json:"tool_policy"`
+			Name                     *string                       `json:"name"`
+			ModelEndpointID          *string                       `json:"model_endpoint_id"`
+			RuntimeMode              *string                       `json:"runtime_mode"`
+			WorkflowKey              *string                       `json:"workflow_key"`
+			Capabilities             *[]string                     `json:"capabilities"`
+			AnswerPosture            *string                       `json:"answer_posture"`
+			ToolPolicy               *adminservice.ToolPolicyPatch `json:"tool_policy"`
+			KnowledgeBaseWorkspaceID *string                       `json:"knowledge_base_workspace_id"`
 		}
 		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 32*1024))
 		decoder.DisallowUnknownFields()
-		if err := decoder.Decode(&patch); err != nil || (patch.Name == nil && patch.ModelEndpointID == nil && patch.RuntimeMode == nil && patch.WorkflowKey == nil && patch.Capabilities == nil && patch.AnswerPosture == nil && patch.ToolPolicy == nil) {
+		if err := decoder.Decode(&patch); err != nil || (patch.Name == nil && patch.ModelEndpointID == nil && patch.RuntimeMode == nil && patch.WorkflowKey == nil && patch.Capabilities == nil && patch.AnswerPosture == nil && patch.ToolPolicy == nil && patch.KnowledgeBaseWorkspaceID == nil) {
 			writeError(w, http.StatusUnprocessableEntity, "validation_failed")
 			return
+		}
+		// Moving the application into another knowledge base touches that
+		// workspace's surfaces, so the mover needs the same right as creating
+		// an application there (workspace.manage).
+		if patch.KnowledgeBaseWorkspaceID != nil {
+			if _, err := deps.WorkspacePolicy.Require(r.Context(), principal, *patch.KnowledgeBaseWorkspaceID, "", "workspace.manage"); err != nil {
+				writeError(w, http.StatusForbidden, "workspace_access_denied")
+				return
+			}
 		}
 		if _, err := deps.AdminService.UpdateAgentApplication(r.Context(), principal, adminservice.UpdateAgentApplicationInput{
 			ApplicationID: item.ID, Name: patch.Name, ModelEndpointID: patch.ModelEndpointID,
 			RuntimeMode: patch.RuntimeMode, WorkflowKey: patch.WorkflowKey,
-			Capabilities: patch.Capabilities, AnswerPosture: patch.AnswerPosture, ToolPolicy: patch.ToolPolicy, IdempotencyKey: key,
+			Capabilities: patch.Capabilities, AnswerPosture: patch.AnswerPosture, ToolPolicy: patch.ToolPolicy,
+			KnowledgeBaseWorkspaceID: patch.KnowledgeBaseWorkspaceID, IdempotencyKey: key,
 		}); err != nil {
 			writeAgentApplicationError(w, err, "agent_application_update_failed")
 			return

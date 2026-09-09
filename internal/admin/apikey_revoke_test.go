@@ -65,10 +65,10 @@ func TestRevokeAllAndRotateStayIsolatedIntegration(t *testing.T) {
 	var organizationID, memberID, agentUserID string
 	if err := db.Pool.QueryRow(ctx, `
 		WITH org AS (
-			INSERT INTO organization.organizations (name, status) VALUES ('ITC-RevokeOrg', 'active') RETURNING id
+			INSERT INTO organization.organizations (name, slug, status) VALUES ('ITC-RevokeOrg', 'itc-revoke-' || md5(random()::text), 'active') RETURNING id
 		), member AS (
-			INSERT INTO identity.users (organization_id, user_type, display_name, status)
-			SELECT id, 'member', 'ITC-RevokeAdmin', 'active' FROM org RETURNING id
+			INSERT INTO identity.users (organization_id, user_type, email, password_hash, display_name, status)
+			SELECT id, 'member', 'itc-revoke-' || gen_random_uuid()::text || '@itc.invalid', 'x', 'ITC-RevokeAdmin', 'active' FROM org RETURNING id
 		), agent AS (
 			INSERT INTO identity.users (organization_id, user_type, display_name, status)
 			SELECT id, 'agent', 'ITC-RevokeAgent', 'active' FROM org RETURNING id
@@ -86,10 +86,10 @@ func TestRevokeAllAndRotateStayIsolatedIntegration(t *testing.T) {
 	}()
 	principal := auth.Principal{UserType: "member", UserID: memberID, OrganizationID: organizationID}
 	if _, err := db.Pool.Exec(ctx, `
-		INSERT INTO identity.api_keys (user_id, name, key_prefix, key_hash, capabilities)
-		VALUES ($1::uuid, 'itc-one', 'ak_ITCONE0000', 'hash-one', '[]'::jsonb),
-		       ($1::uuid, 'itc-two', 'ak_ITCTWO0000', 'hash-two', '[]'::jsonb)
-	`, agentUserID); err != nil {
+		INSERT INTO identity.api_keys (organization_id, user_id, name, key_prefix, key_hash, capabilities)
+		VALUES ($2::uuid, $1::uuid, 'itc-one', 'ak_ITCONE0000', 'hash-one', '[]'::jsonb),
+		       ($2::uuid, $1::uuid, 'itc-two', 'ak_ITCTWO0000', 'hash-two', '[]'::jsonb)
+	`, agentUserID, organizationID); err != nil {
 		t.Fatalf("seed api keys: %v", err)
 	}
 	svc := Service{Store: db}

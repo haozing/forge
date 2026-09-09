@@ -211,6 +211,8 @@ Agent 应用：`{id,name,provider,status,capabilities,answer_posture,description
 
 工作区注册应用时系统自动写入一条 workspace 级 agent 授权（该工作区默认资源模型，actions=`read,query.execute`），保证注册后开箱即可问答；管理员可随后收窄。
 
+**知识库绑定（2026-09-09 起，方向 A）**：列表/详情响应新增 `knowledge_scopes`（数组，通常恰一项）=该应用绑定身份的检索授权，项为 `{workspace_id,workspace_name,resource_model_id,resource_model_name,data_scope}`——即前端所展示的"所属知识库"，无需再按工作区反查拼接。`PATCH /api/agent-applications/{applicationId}` 新增可选字段 `knowledge_base_workspace_id`（**单知识库移动**语义）：同事务内停用旧启用关系、启用目标工作区，并把绑定身份的检索授权替换为目标工作区默认资源模型（actions 固定 `read,query.execute`）；需目标工作区 `workspace.manage`；目标工作区未设默认资源模型时 422 `knowledge_base_not_ready`。当前不支持一个应用绑定多个知识库（底层表为多对多，将来可放开）。
+
 ## 5. 动态资源模型
 
 ### 5.1 模型接口

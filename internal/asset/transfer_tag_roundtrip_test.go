@@ -180,7 +180,7 @@ func TestTransferTagRoundTripIntegration(t *testing.T) {
 			UPDATE model.resource_models m SET current_version_id = v.id
 			FROM model_version v WHERE m.id = v.resource_model_id
 		), ws_id AS (
-			SELECT id FROM ws
+			SELECT id, organization_id FROM ws
 		), tag_release AS (
 			INSERT INTO asset.tags (organization_id, workspace_id, normalized_key, display_name, slug, created_by)
 			SELECT organization_id, (SELECT id FROM ws_id), 'release', 'release', 'release', (SELECT id FROM member) FROM ws_id RETURNING id
@@ -205,14 +205,14 @@ func TestTransferTagRoundTripIntegration(t *testing.T) {
 				 version_no, title, markdown, content_checksum, created_by, sealed_at)
 			SELECT a.organization_id, a.workspace_id, a.id, (SELECT id FROM model), (SELECT id FROM model_version),
 			       1, 'Roundtrip A', 'body a', 'tagrt-checksum-a', (SELECT id FROM member), now()
-			FROM asset_a a RETURNING id, asset_id
+			FROM asset_a a RETURNING id, asset_id, organization_id, workspace_id
 		), version_b AS (
 			INSERT INTO asset.asset_versions
 				(organization_id, workspace_id, asset_id, resource_model_id, resource_model_version_id,
 				 version_no, title, markdown, content_checksum, created_by, sealed_at)
 			SELECT a.organization_id, a.workspace_id, a.id, (SELECT id FROM model), (SELECT id FROM model_version),
 			       1, 'Roundtrip B', 'body b', 'tagrt-checksum-b', (SELECT id FROM member), now()
-			FROM asset_b a RETURNING id, asset_id
+			FROM asset_b a RETURNING id, asset_id, organization_id, workspace_id
 		), draft_a AS (
 			INSERT INTO asset.asset_drafts (organization_id, workspace_id, asset_id, base_version_id, title)
 			SELECT a.organization_id, a.workspace_id, a.id, (SELECT id FROM version_a), 'Roundtrip A' FROM asset_a a RETURNING id

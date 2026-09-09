@@ -11,13 +11,18 @@ import (
 	"strings"
 	"time"
 
-	"agentchunzhi/internal/auth"
 	runtimetools "agentchunzhi/internal/agentruntime/tools"
+	"agentchunzhi/internal/auth"
 
 	"github.com/jackc/pgx/v5"
 )
 
 var ErrApplicationUpdateInvalidInput = errors.New("invalid agent application update input")
+
+// ErrKnowledgeBaseNotReady means the target knowledge base (workspace) has no
+// active default resource model, so an agent moved there would have nothing
+// to retrieve from.
+var ErrKnowledgeBaseNotReady = errors.New("knowledge base workspace has no default resource model")
 
 // ToolPolicyPatch is the admin-facing subset of tool_policy the update
 // endpoint may change. allow_high_write stays SQL-only by design: it widens
@@ -39,16 +44,25 @@ type UpdateAgentApplicationInput struct {
 	Capabilities    *[]string
 	AnswerPosture   *string
 	ToolPolicy      *ToolPolicyPatch
-	IdempotencyKey  string
+	// KnowledgeBaseWorkspaceID moves the application to another knowledge
+	// base (workspace): disable old enablement rows, enable the target one
+	// and replace the agent identity's retrieval grant with the target
+	// workspace's default resource model, all in the update transaction.
+	KnowledgeBaseWorkspaceID *string
+	IdempotencyKey           string
 }
 
 type UpdateAgentApplicationResult struct {
-	ApplicationID   string    `json:"application_id"`
-	ModelEndpointID string    `json:"model_endpoint_id"`
-	RuntimeMode     string    `json:"runtime_mode"`
-	WorkflowKey     string    `json:"workflow_key,omitempty"`
-	AnswerPosture   string    `json:"answer_posture"`
-	UpdatedAt       time.Time `json:"updated_at"`
+	ApplicationID   string `json:"application_id"`
+	ModelEndpointID string `json:"model_endpoint_id"`
+	RuntimeMode     string `json:"runtime_mode"`
+	WorkflowKey     string `json:"workflow_key,omitempty"`
+	AnswerPosture   string `json:"answer_posture"`
+	// Knowledge base move outcome; empty when the patch did not move the
+	// application.
+	KnowledgeBaseWorkspaceID         string    `json:"knowledge_base_workspace_id,omitempty"`
+	PreviousKnowledgeBaseWorkspaceID string    `json:"previous_knowledge_base_workspace_id,omitempty"`
+	UpdatedAt                        time.Time `json:"updated_at"`
 }
 
 func (s Service) UpdateAgentApplication(ctx context.Context, principal auth.Principal, input UpdateAgentApplicationInput) (UpdateAgentApplicationResult, error) {
@@ -84,15 +98,16 @@ func (s Service) UpdateAgentApplication(ctx context.Context, principal auth.Prin
 	}
 
 	var currentName, currentEndpointID, currentRuntimeMode, currentWorkflowKey, currentAnswerPosture string
+	var currentAgentUserID string
 	var currentCapabilitiesJSON []byte
 	var currentToolPolicyJSON []byte
 	err = tx.QueryRow(ctx, `
-		SELECT name, model_endpoint_id::text, runtime_mode, COALESCE(workflow_key, ''), capabilities, answer_posture, COALESCE(tool_policy, '{}'::jsonb)
+		SELECT name, bound_agent_user_id::text, model_endpoint_id::text, runtime_mode, COALESCE(workflow_key, ''), capabilities, answer_posture, COALESCE(tool_policy, '{}'::jsonb)
 		FROM integration.agent_applications
 		WHERE id = $1::uuid AND organization_id = $2::uuid
 		FOR UPDATE
 	`, input.ApplicationID, principal.OrganizationID).Scan(
-		&currentName, &currentEndpointID, &currentRuntimeMode, &currentWorkflowKey, &currentCapabilitiesJSON, &currentAnswerPosture, &currentToolPolicyJSON,
+		&currentName, &currentAgentUserID, &currentEndpointID, &currentRuntimeMode, &currentWorkflowKey, &currentCapabilitiesJSON, &currentAnswerPosture, &currentToolPolicyJSON,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return UpdateAgentApplicationResult{}, ErrApplicationNotFound
@@ -218,6 +233,80 @@ func (s Service) UpdateAgentApplication(ctx context.Context, principal auth.Prin
 	if err != nil {
 		return UpdateAgentApplicationResult{}, fmt.Errorf("update agent application: %w", err)
 	}
+
+	// Knowledge base move (direction A): the enablement row decides which
+	// workspace's surfaces the application serves, the access policy decides
+	// what its bound identity may retrieve. Both must flip together or the
+	// agent would chat in one knowledge base while reading another's content.
+	if input.KnowledgeBaseWorkspaceID != nil {
+		targetWorkspace := strings.TrimSpace(*input.KnowledgeBaseWorkspaceID)
+		if !validUUID(targetWorkspace) {
+			return UpdateAgentApplicationResult{}, ErrApplicationUpdateInvalidInput
+		}
+		var defaultModelID string
+		err = tx.QueryRow(ctx, `
+			SELECT COALESCE(default_resource_model_id::text, '')
+			FROM content.workspaces
+			WHERE organization_id = $1::uuid AND id = $2::uuid
+		`, principal.OrganizationID, targetWorkspace).Scan(&defaultModelID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return UpdateAgentApplicationResult{}, ErrApplicationUpdateInvalidInput
+		}
+		if err != nil {
+			return UpdateAgentApplicationResult{}, fmt.Errorf("load knowledge base workspace: %w", err)
+		}
+		if defaultModelID == "" {
+			return UpdateAgentApplicationResult{}, ErrKnowledgeBaseNotReady
+		}
+		var previousKnowledgeWorkspace string
+		_ = tx.QueryRow(ctx, `
+			SELECT COALESCE(workspace_id::text, '')
+			FROM content.workspace_agent_applications
+			WHERE organization_id = $1::uuid AND agent_application_id = $2::uuid AND enabled = true
+			ORDER BY created_at
+			LIMIT 1
+		`, principal.OrganizationID, input.ApplicationID).Scan(&previousKnowledgeWorkspace)
+		if _, err = tx.Exec(ctx, `
+			UPDATE content.workspace_agent_applications
+			SET enabled = false
+			WHERE organization_id = $1::uuid AND agent_application_id = $2::uuid AND workspace_id <> $3::uuid
+		`, principal.OrganizationID, input.ApplicationID, targetWorkspace); err != nil {
+			return UpdateAgentApplicationResult{}, fmt.Errorf("disable previous knowledge base enablement: %w", err)
+		}
+		if _, err = tx.Exec(ctx, `
+			INSERT INTO content.workspace_agent_applications (organization_id, workspace_id, agent_application_id, created_by)
+			VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid)
+			ON CONFLICT (workspace_id, agent_application_id) DO UPDATE SET enabled = true
+		`, principal.OrganizationID, targetWorkspace, input.ApplicationID, principal.UserID); err != nil {
+			return UpdateAgentApplicationResult{}, fmt.Errorf("enable target knowledge base: %w", err)
+		}
+		if _, err = tx.Exec(ctx, `
+			DELETE FROM content.agent_access_policies
+			WHERE organization_id = $1::uuid AND agent_user_id = $2::uuid
+		`, principal.OrganizationID, currentAgentUserID); err != nil {
+			return UpdateAgentApplicationResult{}, fmt.Errorf("clear agent knowledge grants: %w", err)
+		}
+		if _, err = tx.Exec(ctx, `
+			INSERT INTO content.agent_access_policies
+				(organization_id, workspace_id, agent_user_id, resource_model_id, actions, created_by)
+			SELECT w.organization_id, w.id, $2::uuid, w.default_resource_model_id, ARRAY['read', 'query.execute']::text[], $4::uuid
+			FROM content.workspaces w
+			WHERE w.organization_id = $1::uuid AND w.id = $3::uuid
+			  AND w.default_resource_model_id IS NOT NULL
+		`, principal.OrganizationID, currentAgentUserID, targetWorkspace, principal.UserID); err != nil {
+			return UpdateAgentApplicationResult{}, fmt.Errorf("grant target knowledge base scope: %w", err)
+		}
+		if _, err = tx.Exec(ctx, `
+			INSERT INTO "authorization".policy_revisions (organization_id, revision, updated_at)
+			VALUES ($1::uuid, 2, now())
+			ON CONFLICT (organization_id) DO UPDATE
+			SET revision = "authorization".policy_revisions.revision + 1, updated_at = now()
+		`, principal.OrganizationID); err != nil {
+			return UpdateAgentApplicationResult{}, fmt.Errorf("bump policy revision after knowledge base move: %w", err)
+		}
+		result.KnowledgeBaseWorkspaceID = targetWorkspace
+		result.PreviousKnowledgeBaseWorkspaceID = previousKnowledgeWorkspace
+	}
 	metadata, _ := json.Marshal(map[string]any{
 		"application_id":             result.ApplicationID,
 		"previous_model_endpoint_id": currentEndpointID,
@@ -226,6 +315,8 @@ func (s Service) UpdateAgentApplication(ctx context.Context, principal auth.Prin
 		"runtime_mode":               result.RuntimeMode,
 		"previous_tool_policy":       json.RawMessage(currentToolPolicyJSON),
 		"tool_policy":                json.RawMessage(toolPolicyJSON),
+		"previous_knowledge_base":    result.PreviousKnowledgeBaseWorkspaceID,
+		"knowledge_base":             result.KnowledgeBaseWorkspaceID,
 	})
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO audit.audit_log
@@ -252,7 +343,7 @@ func (s Service) UpdateAgentApplication(ctx context.Context, principal auth.Prin
 }
 
 func hasApplicationPatch(input UpdateAgentApplicationInput) bool {
-	return input.Name != nil || input.ModelEndpointID != nil || input.RuntimeMode != nil || input.WorkflowKey != nil || input.Capabilities != nil || input.AnswerPosture != nil || input.ToolPolicy != nil
+	return input.Name != nil || input.ModelEndpointID != nil || input.RuntimeMode != nil || input.WorkflowKey != nil || input.Capabilities != nil || input.AnswerPosture != nil || input.ToolPolicy != nil || input.KnowledgeBaseWorkspaceID != nil
 }
 
 func applicationUpdateRequestHash(input UpdateAgentApplicationInput) (string, error) {

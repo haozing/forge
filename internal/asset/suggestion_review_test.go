@@ -241,11 +241,11 @@ func TestSuggestionReviewFlowIntegration(t *testing.T) {
 	var runID, fieldSuggestionID, summarySuggestionID, relationSuggestionID, resultID string
 	err = db.Pool.QueryRow(ctx, `
 		WITH org AS (
-			INSERT INTO organization.organizations (name, status)
-			VALUES ('ITC-SuggReview-' || gen_random_uuid()::text, 'active') RETURNING id
+			INSERT INTO organization.organizations (name, slug, status)
+			VALUES ('ITC-SuggReview-' || gen_random_uuid()::text, 'itc-sugg-' || gen_random_uuid()::text, 'active') RETURNING id
 		), member AS (
-			INSERT INTO identity.users (organization_id, user_type, display_name, status)
-			SELECT id, 'member', 'ITC SuggReview Editor', 'active' FROM org RETURNING id, organization_id
+			INSERT INTO identity.users (organization_id, user_type, email, password_hash, display_name, status)
+			SELECT id, 'member', 'itc-sugg-' || gen_random_uuid()::text || '@itc.invalid', 'x', 'ITC SuggReview Editor', 'active' FROM org RETURNING id, organization_id
 		), ws AS (
 			INSERT INTO content.workspaces (organization_id, slug, name, created_by)
 			SELECT organization_id, 'ws-sugg-' || gen_random_uuid()::text, 'ITC SuggReview WS', id FROM member RETURNING id, organization_id
@@ -266,24 +266,24 @@ func TestSuggestionReviewFlowIntegration(t *testing.T) {
 			FROM model_version v WHERE m.id = v.resource_model_id
 		), asset_src AS (
 			INSERT INTO asset.assets (organization_id, workspace_id, resource_model_id, created_by)
-			SELECT organization_id, id, (SELECT id FROM model), id FROM member RETURNING id
+			SELECT organization_id, (SELECT id FROM ws), (SELECT id FROM model), id FROM member RETURNING id, organization_id, workspace_id, resource_model_id
 		), asset_tgt AS (
 			INSERT INTO asset.assets (organization_id, workspace_id, resource_model_id, created_by)
-			SELECT organization_id, (SELECT id FROM ws), (SELECT id FROM model), id FROM member RETURNING id
+			SELECT organization_id, (SELECT id FROM ws), (SELECT id FROM model), id FROM member RETURNING id, organization_id, workspace_id, resource_model_id
 		), version_src AS (
 			INSERT INTO asset.asset_versions
 				(organization_id, workspace_id, asset_id, resource_model_id, resource_model_version_id,
 				 version_no, title, content_checksum, created_by, sealed_at)
 			SELECT a.organization_id, a.workspace_id, a.id, a.resource_model_id, (SELECT id FROM model_version),
 			       1, 'ITC source', 'itc-sugg-src', (SELECT id FROM member), now()
-			FROM asset_src a RETURNING id, asset_id
+			FROM asset_src a RETURNING id, asset_id, organization_id, workspace_id
 		), version_tgt AS (
 			INSERT INTO asset.asset_versions
 				(organization_id, workspace_id, asset_id, resource_model_id, resource_model_version_id,
 				 version_no, title, content_checksum, created_by, sealed_at)
 			SELECT a.organization_id, a.workspace_id, a.id, a.resource_model_id, (SELECT id FROM model_version),
 			       1, 'ITC target', 'itc-sugg-tgt', (SELECT id FROM member), now()
-			FROM asset_tgt a RETURNING id, asset_id
+			FROM asset_tgt a RETURNING id, asset_id, organization_id, workspace_id
 		), draft_src AS (
 			INSERT INTO asset.asset_drafts (organization_id, workspace_id, asset_id, base_version_id, title)
 			SELECT a.organization_id, a.workspace_id, a.id, (SELECT id FROM version_src), 'ITC source'

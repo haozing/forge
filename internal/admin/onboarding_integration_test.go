@@ -28,10 +28,10 @@ func TestGetAgentOnboardingPackageIntegration(t *testing.T) {
 	var organizationID, memberID, agentUserID, modelID string
 	if err := db.Pool.QueryRow(ctx, `
 		WITH org AS (
-			INSERT INTO organization.organizations (name, status) VALUES ('ITC-OnboardOrg', 'active') RETURNING id
+			INSERT INTO organization.organizations (name, slug, status) VALUES ('ITC-OnboardOrg', 'itc-onboard-' || md5(random()::text), 'active') RETURNING id
 		), member AS (
-			INSERT INTO identity.users (organization_id, user_type, display_name, status)
-			SELECT id, 'member', 'ITC-OnboardAdmin', 'active' FROM org RETURNING id
+			INSERT INTO identity.users (organization_id, user_type, email, password_hash, display_name, status)
+			SELECT id, 'member', 'itc-onboard-' || gen_random_uuid()::text || '@itc.invalid', 'x', 'ITC-OnboardAdmin', 'active' FROM org RETURNING id
 		), agent AS (
 			INSERT INTO identity.users (organization_id, user_type, display_name, status)
 			SELECT id, 'agent', 'ITC-OnboardAgent', 'active' FROM org RETURNING id
@@ -52,9 +52,9 @@ func TestGetAgentOnboardingPackageIntegration(t *testing.T) {
 		db.Pool.Exec(ctx, `DELETE FROM organization.organizations WHERE id = $1`, organizationID)
 	}()
 	if _, err := db.Pool.Exec(ctx, `
-		INSERT INTO identity.api_keys (user_id, name, key_prefix, key_hash, capabilities)
-		VALUES ($1::uuid, 'itc-onboard-key', 'ak_ITCONB0000', 'hash-onboard', '["query.read","reference.read"]'::jsonb)
-	`, agentUserID); err != nil {
+		INSERT INTO identity.api_keys (organization_id, user_id, name, key_prefix, key_hash, capabilities)
+		VALUES ($2::uuid, $1::uuid, 'itc-onboard-key', 'ak_ITCONB0000', 'hash-onboard', '["query.read","reference.read"]'::jsonb)
+	`, agentUserID, organizationID); err != nil {
 		t.Fatalf("seed api key: %v", err)
 	}
 	if _, err := db.Pool.Exec(ctx, `
