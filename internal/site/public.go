@@ -333,11 +333,14 @@ func (r *PublicReader) SectionSlugs(ctx context.Context, visitorAddr string, pri
 // PublicPost is one whitelisted list projection. No workspace, model,
 // member, audit, draft or confidence internals travel on the public face.
 type PublicPost struct {
-	AssetID     string                  `json:"asset_id"`
-	DisplayPath string                  `json:"display_path"`
-	Title       string                  `json:"title"`
-	Summary     string                  `json:"summary"`
-	ContentKind string                  `json:"content_kind"`
+	AssetID     string `json:"asset_id"`
+	DisplayPath string `json:"display_path"`
+	Title       string `json:"title"`
+	Summary     string `json:"summary"`
+	ContentKind string `json:"content_kind"`
+	// Fields carries the site whitelist's card_fields for the bound model
+	// (empty when no whitelist is configured — fail-closed).
+	Fields      []PublicFieldValue      `json:"fields,omitempty"`
 	Tags        []agentquery.TagSummary `json:"tags"`
 	UpdatedAt   *time.Time              `json:"updated_at"`
 	PublishedAt *time.Time              `json:"published_at"`
@@ -356,10 +359,13 @@ type PublicPostPage struct {
 
 // PublicSection is one rendered homepage/section slice.
 type PublicSection struct {
-	Type        string       `json:"type"`
-	Title       string       `json:"title,omitempty"`
-	SectionSlug string       `json:"section_slug,omitempty"`
-	Items       []PublicPost `json:"items"`
+	Type        string `json:"type"`
+	Title       string `json:"title,omitempty"`
+	SectionSlug string `json:"section_slug,omitempty"`
+	// ModelKey is the resource-model narrowing of this slice (P1-B); empty
+	// means the section spans every model.
+	ModelKey string       `json:"model_key,omitempty"`
+	Items    []PublicPost `json:"items"`
 }
 
 // PublicSiteInfo is the whitelisted site header of the public face.
@@ -382,17 +388,19 @@ type PublicHomeView struct {
 // verbatim (sanitization is the React renderer's job), fields are projected
 // through the model schema whitelist.
 type PublicPostContent struct {
-	AssetID     string                     `json:"id"`
-	DisplayPath string                     `json:"display_path"`
-	Section     string                     `json:"section"`
-	Title       string                     `json:"title"`
-	Summary     string                     `json:"summary"`
-	Markdown    string                     `json:"markdown"`
-	Fields      map[string]json.RawMessage `json:"fields"`
-	Tags        []agentquery.TagSummary    `json:"tags"`
-	ContentKind string                     `json:"content_kind"`
-	UpdatedAt   *time.Time                 `json:"updated_at"`
-	PublishedAt *time.Time                 `json:"published_at"`
+	AssetID     string `json:"id"`
+	DisplayPath string `json:"display_path"`
+	Section     string `json:"section"`
+	Title       string `json:"title"`
+	Summary     string `json:"summary"`
+	Markdown    string `json:"markdown"`
+	// Fields carries only the site whitelist's detail_fields, in whitelist
+	// order (fail-closed: empty whitelist = no fields).
+	Fields      []PublicFieldValue      `json:"fields"`
+	Tags        []agentquery.TagSummary `json:"tags"`
+	ContentKind string                  `json:"content_kind"`
+	UpdatedAt   *time.Time              `json:"updated_at"`
+	PublishedAt *time.Time              `json:"published_at"`
 	// CoverAttachmentID is the published version's cover image (二期 §6).
 	CoverAttachmentID string `json:"cover_attachment_id"`
 	// CoverAlt is the cover's alt text frozen with the version (G6).
@@ -527,6 +535,7 @@ type postRow struct {
 	AssetUpdatedAt    time.Time
 	AssetPublishedAt  *time.Time
 	ContentKind       string
+	ModelID           string
 	VersionID         string
 	Title             string
 	Summary           string
@@ -580,6 +589,9 @@ func (r *PublicReader) Post(ctx context.Context, visitorAddr string, principal a
 	if err := json.Unmarshal(row.Fields, &fields); err != nil || fields == nil {
 		fields = map[string]json.RawMessage{}
 	}
+	schemaTypes := ParseFieldSchema(row.FieldSchema)
+	projected := ProjectFields(fields, schemaTypes)
+	whitelisted := WhitelistFields(projected, schemaTypes, WhitelistFor(item.ModelViews, row.ModelID), false)
 	publishedAt := ResolveDisplayPublishedAt(row.Binding.DisplayPublishedAt, row.AssetPublishedAt)
 	return PublicPostContent{
 		AssetID:           row.Binding.AssetID,
@@ -588,7 +600,7 @@ func (r *PublicReader) Post(ctx context.Context, visitorAddr string, principal a
 		Title:             row.Title,
 		Summary:           row.Summary,
 		Markdown:          row.Markdown,
-		Fields:            ProjectFields(fields, ParseFieldSchema(row.FieldSchema)),
+		Fields:            whitelisted,
 		Tags:              summary,
 		ContentKind:       row.ContentKind,
 		UpdatedAt:         timePtr(row.AssetUpdatedAt),
@@ -635,6 +647,7 @@ func (r *PublicReader) loadPostRow(ctx context.Context, item Site, displayPath s
 	err := r.Store.Pool.QueryRow(ctx, `
 		SELECT `+bindingColumns+`,
 		       a.revision, a.updated_at, a.published_at, rm.content_kind,
+		       a.resource_model_id::text,
 		       COALESCE(pv.id::text, ''), COALESCE(pv.title, ''), COALESCE(pv.summary, ''),
 		       COALESCE(pv.markdown, ''), COALESCE(pv.fields, '{}'::jsonb),
 		       COALESCE(mv.field_schema, '{}'::jsonb),
@@ -661,6 +674,7 @@ func (r *PublicReader) loadPostRow(ctx context.Context, item Site, displayPath s
 		&row.Binding.OnNavigation, &row.Binding.DisplayConfig, &row.Binding.DisplayPublishedAt,
 		&row.Binding.CreatedAt, &row.Binding.UpdatedAt,
 		&row.AssetRevision, &row.AssetUpdatedAt, &row.AssetPublishedAt, &row.ContentKind,
+		&row.ModelID,
 		&row.VersionID, &row.Title, &row.Summary, &row.Markdown, &row.Fields, &row.FieldSchema,
 		&row.CoverAttachmentID, &row.CoverAlt,
 	)
@@ -713,17 +727,18 @@ func (r *PublicReader) HomeWithConfig(ctx context.Context, visitorAddr string, p
 			Items:       []PublicPost{},
 		}
 		var err error
+		rendered.ModelKey = section.ModelKey
 		switch section.Type {
 		case HomepageSectionLatest:
-			rendered.Items, err = r.latestPosts(ctx, item, visitor, section.Limit)
+			rendered.Items, err = r.latestPosts(ctx, item, visitor, section.ModelKey, section.Limit)
 		case HomepageSectionFeatured:
-			rows, loadErr := r.boundVersionRows(ctx, item, "", true, section.Limit)
+			rows, loadErr := r.boundVersionRows(ctx, item, "", section.ModelKey, true, section.Limit)
 			if loadErr != nil {
 				return PublicHomeView{}, loadErr
 			}
 			rendered.Items, err = r.projectBoundRows(ctx, item, visitor, rows)
 		case HomepageSectionColumn:
-			rows, loadErr := r.boundVersionRows(ctx, item, section.SectionSlug, false, section.Limit)
+			rows, loadErr := r.boundVersionRows(ctx, item, section.SectionSlug, section.ModelKey, false, section.Limit)
 			if loadErr != nil {
 				return PublicHomeView{}, loadErr
 			}
@@ -744,7 +759,7 @@ func (r *PublicReader) HomeWithConfig(ctx context.Context, visitorAddr string, p
 // Section serves one section page: the binding catalog slice of the section
 // slug, every row re-checked against the current published pointer and the
 // visitor band (plan §3.3), ordered by binding sort order.
-func (r *PublicReader) Section(ctx context.Context, visitorAddr string, principal auth.Principal, slug, sectionSlug string, limit int) (PublicPostPage, error) {
+func (r *PublicReader) Section(ctx context.Context, visitorAddr string, principal auth.Principal, slug, sectionSlug, modelKey string, limit int) (PublicPostPage, error) {
 	if err := r.allow(ctx, visitorAddr); err != nil {
 		return PublicPostPage{}, err
 	}
@@ -757,7 +772,7 @@ func (r *PublicReader) Section(ctx context.Context, visitorAddr string, principa
 		return PublicPostPage{}, ErrSiteNotFound
 	}
 	visitor := r.visitor(ctx, item, principal)
-	rows, err := r.boundVersionRows(ctx, item, sectionSlug, false, limit)
+	rows, err := r.boundVersionRows(ctx, item, sectionSlug, modelKey, false, limit)
 	if err != nil {
 		return PublicPostPage{}, err
 	}
@@ -768,10 +783,48 @@ func (r *PublicReader) Section(ctx context.Context, visitorAddr string, principa
 	return PublicPostPage{Items: items, ETag: ListETag(item.Revision, items)}, nil
 }
 
+// modelIDByKey resolves one resource-model key to its id inside the site's
+// organization/workspace. Builtin models are organization-level
+// (workspace_id NULL), so both scopes are accepted. An unknown key returns
+// empty (callers treat it as "no narrowing" or "no content").
+func (r *PublicReader) modelIDByKey(ctx context.Context, item Site, modelKey string) (string, error) {
+	if strings.TrimSpace(modelKey) == "" {
+		return "", nil
+	}
+	var id string
+	err := r.Store.Pool.QueryRow(ctx, `
+		SELECT id::text FROM model.resource_models
+		WHERE organization_id = $1::uuid AND model_key = $2 AND status = 'active'
+		  AND (workspace_id = $3::uuid OR workspace_id IS NULL)
+		ORDER BY workspace_id NULLS LAST
+		LIMIT 1
+	`, item.OrganizationID, modelKey, item.WorkspaceID).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("resolve resource model key: %w", err)
+	}
+	return id, nil
+}
+
 // latestPosts runs the structured "latest" face for one homepage section and
-// merges it through the binding whitelist.
-func (r *PublicReader) latestPosts(ctx context.Context, item Site, visitor agentquery.VisitorIdentity, limit int) ([]PublicPost, error) {
+// merges it through the binding whitelist. A non-empty modelKey narrows the
+// query to that resource model (P1-B content collections).
+func (r *PublicReader) latestPosts(ctx context.Context, item Site, visitor agentquery.VisitorIdentity, modelKey string, limit int) ([]PublicPost, error) {
+	modelID, err := r.modelIDByKey(ctx, item, modelKey)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(modelKey) != "" && modelID == "" {
+		// Unknown model key: the section is empty rather than silently
+		// falling back to every model (a wrong key must not leak content).
+		return []PublicPost{}, nil
+	}
 	req := agentquery.Request{Mode: agentquery.ModeStructured, TopK: normalizePublicLimit(limit)}
+	if modelID != "" {
+		req.ResourceModelIDs = []string{modelID}
+	}
 	response, err := r.Query.PublicSiteQuery(ctx, siteRef(item), visitor, req)
 	if err != nil {
 		return nil, err
@@ -937,6 +990,9 @@ type boundVersionRow struct {
 	Title             string
 	Summary           string
 	ContentKind       string
+	ModelID           string
+	Fields            []byte
+	FieldSchema       []byte
 	AssetUpdatedAt    time.Time
 	AssetPublishedAt  *time.Time
 	CoverAttachmentID string
@@ -945,7 +1001,11 @@ type boundVersionRow struct {
 // boundVersionRows enumerates a binding catalog slice with the live version
 // main data. Either the homepage flag or the section slug filters the slice;
 // both empty returns the whole catalog (capped).
-func (r *PublicReader) boundVersionRows(ctx context.Context, item Site, sectionSlug string, homepageOnly bool, limit int) ([]boundVersionRow, error) {
+// boundVersionRows enumerates a binding catalog slice. sectionSlug and
+// modelKey both narrow the slice (either can be empty); homepageOnly selects
+// the homepage-flagged rows. P1-B: modelKey lets one resource model own a
+// dedicated homepage/list slot.
+func (r *PublicReader) boundVersionRows(ctx context.Context, item Site, sectionSlug, modelKey string, homepageOnly bool, limit int) ([]boundVersionRow, error) {
 	if limit <= 0 || limit > publicMaxBindings {
 		limit = publicMaxBindings
 	}
@@ -959,9 +1019,15 @@ func (r *PublicReader) boundVersionRows(ctx context.Context, item Site, sectionS
 		clause = " AND b.section_slug = $3"
 		args = append(args, sectionSlug)
 	}
+	if strings.TrimSpace(modelKey) != "" {
+		args = append(args, modelKey)
+		clause += fmt.Sprintf(" AND rm.model_key = $%d", len(args))
+	}
 	rows, err := r.Store.Pool.Query(ctx, `
-		SELECT `+bindingColumns+`, rm.content_kind, a.updated_at, a.published_at,
+		SELECT `+bindingColumns+`, rm.content_kind, a.resource_model_id::text,
+		       a.updated_at, a.published_at,
 		       COALESCE(pv.id::text, ''), COALESCE(pv.title, ''), COALESCE(pv.summary, ''),
+		       COALESCE(pv.fields, '{}'::jsonb), COALESCE(mv.field_schema, '{}'::jsonb),
 		       COALESCE(cover.id::text, '')
 		FROM site.site_content_bindings b
 		JOIN asset.assets a
@@ -970,6 +1036,8 @@ func (r *PublicReader) boundVersionRows(ctx context.Context, item Site, sectionS
 		  ON rm.organization_id = a.organization_id AND rm.id = a.resource_model_id
 		LEFT JOIN asset.asset_versions pv
 		  ON pv.organization_id = a.organization_id AND pv.id = a.current_published_version_id
+		LEFT JOIN model.resource_model_versions mv
+		  ON mv.organization_id = pv.organization_id AND mv.id = pv.resource_model_version_id
 		LEFT JOIN asset.asset_version_attachments cav
 		  ON cav.organization_id = pv.organization_id AND cav.asset_version_id = pv.id
 		  AND cav.role = 'cover'
@@ -991,8 +1059,9 @@ func (r *PublicReader) boundVersionRows(ctx context.Context, item Site, sectionS
 			&row.Binding.ContentType, &row.Binding.SectionSlug, &row.Binding.SortOrder, &row.Binding.OnHomepage,
 			&row.Binding.OnNavigation, &row.Binding.DisplayConfig, &row.Binding.DisplayPublishedAt,
 			&row.Binding.CreatedAt, &row.Binding.UpdatedAt,
-			&row.ContentKind, &row.AssetUpdatedAt, &row.AssetPublishedAt,
-			&row.VersionID, &row.Title, &row.Summary, &row.CoverAttachmentID); err != nil {
+			&row.ContentKind, &row.ModelID, &row.AssetUpdatedAt, &row.AssetPublishedAt,
+			&row.VersionID, &row.Title, &row.Summary, &row.Fields, &row.FieldSchema,
+			&row.CoverAttachmentID); err != nil {
 			return nil, fmt.Errorf("scan bound version row: %w", err)
 		}
 		out = append(out, row)
@@ -1030,12 +1099,22 @@ func (r *PublicReader) projectBoundRows(ctx context.Context, item Site, visitor 
 		if summary == nil {
 			summary = []agentquery.TagSummary{}
 		}
+		var cardFields []PublicFieldValue
+		if len(row.Fields) > 0 {
+			var raw map[string]json.RawMessage
+			if err := json.Unmarshal(row.Fields, &raw); err == nil && raw != nil {
+				schemaTypes := ParseFieldSchema(row.FieldSchema)
+				cardFields = WhitelistFields(ProjectFields(raw, schemaTypes), schemaTypes,
+					WhitelistFor(item.ModelViews, row.ModelID), true)
+			}
+		}
 		items = append(items, PublicPost{
 			AssetID:           row.Binding.AssetID,
 			DisplayPath:       row.Binding.DisplayPath,
 			Title:             row.Title,
 			Summary:           SafeSummary(row.Summary, publicSummaryRunes),
 			ContentKind:       row.ContentKind,
+			Fields:            cardFields,
 			Tags:              summary,
 			UpdatedAt:         timePtr(row.AssetUpdatedAt),
 			PublishedAt:       ResolveDisplayPublishedAt(row.Binding.DisplayPublishedAt, row.AssetPublishedAt),
@@ -1194,10 +1273,13 @@ const (
 )
 
 // PublicSectionConfig is one parsed homepage section declaration.
+// ModelKey optionally narrows the section to one resource model (P1-B content
+// collections: each model can own its own homepage slot).
 type PublicSectionConfig struct {
 	Type        string
 	Title       string
 	SectionSlug string
+	ModelKey    string
 	Limit       int
 }
 
@@ -1214,6 +1296,7 @@ func ParseHomepageConfig(raw json.RawMessage) []PublicSectionConfig {
 			Type        string `json:"type"`
 			Title       string `json:"title"`
 			SectionSlug string `json:"section_slug"`
+			ModelKey    string `json:"model_key"`
 			Limit       int    `json:"limit"`
 		} `json:"sections"`
 	}
@@ -1229,6 +1312,7 @@ func ParseHomepageConfig(raw json.RawMessage) []PublicSectionConfig {
 			Type:        strings.TrimSpace(section.Type),
 			Title:       section.Title,
 			SectionSlug: strings.TrimSpace(section.SectionSlug),
+			ModelKey:    strings.TrimSpace(section.ModelKey),
 			Limit:       section.Limit,
 		})
 	}

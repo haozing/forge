@@ -6038,7 +6038,6 @@ components:
           type: array
           items: { type: string, format: uuid }
         model_context: { type: object }
-        response_mode: { type: string, enum: [answer, answer_with_sources, draft_note] }
     ChatResult:
       type: object
       properties:
@@ -6192,9 +6191,10 @@ components:
         domain: { type: string }
         template: { type: string, enum: [blog, pro] }
         default_content_scope: { type: string, enum: [public, organization, workspace] }
-        homepage_config: { type: object }
+        homepage_config: { type: object, description: '首页栏目：{sections:[{type:latest|featured|column, title, section_slug?, model_key?, limit?}]}；model_key 按资源模型收窄栏目（P1-B）' }
         navigation_config: { type: object }
         style_config: { type: object }
+        model_views: { type: object, description: '按资源模型的字段展示白名单：model_id → card_fields / detail_fields；空 = 不公开任何结构化字段' }
         custom_css: { type: string }
         comments_mode: { type: string, enum: [off, moderated, open] }
         published_release_id: { type: string, format: uuid, nullable: true }
@@ -6213,7 +6213,7 @@ components:
         style_config: { type: object, description: L1 样式参数空间（写入时完整校验） }
         template: { type: string, enum: [blog, pro] }
         default_content_scope: { type: string, enum: [public, organization, workspace] }
-        homepage_config: { type: object }
+        homepage_config: { type: object, description: '首页栏目：{sections:[{type:latest|featured|column, title, section_slug?, model_key?, limit?}]}；model_key 按资源模型收窄栏目（P1-B）' }
         navigation_config: { type: object }
     SitePatch:
       type: object
@@ -6222,9 +6222,10 @@ components:
         domain: { type: string }
         template: { type: string, enum: [blog, pro] }
         default_content_scope: { type: string, enum: [public, organization, workspace] }
-        homepage_config: { type: object }
+        homepage_config: { type: object, description: '首页栏目：{sections:[{type:latest|featured|column, title, section_slug?, model_key?, limit?}]}；model_key 按资源模型收窄栏目（P1-B）' }
         navigation_config: { type: object }
         style_config: { type: object, description: patch 语义，深合并到工作样式 }
+        model_views: { type: object, description: '字段展示白名单，整体替换语义：键为资源模型 uuid，值为 card_fields / detail_fields 数组；字段须存在于模型当前 field_schema 且为可呈现标量类型' }
         custom_css: { type: string, description: L2 自定义 CSS（服务端白名单清洗） }
         comments_mode: { type: string, enum: [off, moderated, open] }
         status: { type: string, enum: [active, disabled] }
@@ -6287,6 +6288,7 @@ components:
         type: { type: string, enum: [latest, featured, column] }
         title: { type: string }
         section_slug: { type: string }
+        model_key: { type: string, description: '该栏目收窄到的资源模型 key；空 = 不限模型（P1-B 内容集合）' }
         items:
           type: array
           items: { $ref: '#/components/schemas/PublicPost' }
@@ -6347,87 +6349,6 @@ components:
               key: { type: string }
               display_name: { type: string }
               count: { type: integer }
-  responses:
-    Error:
-      description: v2 错误信封
-      content:
-        application/json:
-          schema: { $ref: '#/components/schemas/Error' }
-  parameters:
-    WorkspaceId:
-      name: workspaceId
-      in: path
-      required: true
-      schema: { type: string, format: uuid }
-    PublicSiteSlug:
-      name: slug
-      in: path
-      required: true
-      schema: { type: string }
-    SiteId:
-      name: siteId
-      in: path
-      required: true
-      schema: { type: string, format: uuid }
-    AssetId:
-      name: assetId
-      in: path
-      required: true
-      schema: { type: string, format: uuid }
-    ConversationId:
-      name: conversationId
-      in: path
-      required: true
-      schema: { type: string, format: uuid }
-    DerivationId:
-      name: derivationId
-      in: path
-      required: true
-      schema: { type: string, format: uuid }
-    MediaId:
-      name: mediaId
-      in: path
-      required: true
-      schema: { type: string, format: uuid }
-    UserId:
-      name: userId
-      in: path
-      required: true
-      schema: { type: string, format: uuid }
-    InvitationId:
-      name: invitationId
-      in: path
-      required: true
-      schema: { type: string, format: uuid }
-    MembershipId:
-      name: membershipId
-      in: path
-      required: true
-      schema: { type: string, format: uuid }
-    TagId:
-      name: tagId
-      in: path
-      required: true
-      schema: { type: string, format: uuid }
-    Cursor:
-      name: cursor
-      in: query
-      schema: { type: string, nullable: true }
-    Limit:
-      name: limit
-      in: query
-      schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
-    IdempotencyKey:
-      name: Idempotency-Key
-      in: header
-      required: true
-      schema: { type: string, minLength: 1, maxLength: 200 }
-    IfMatch:
-      name: If-Match
-      in: header
-      required: true
-      schema: { type: string }
-  schemas:
     QueryRequest:
       type: object
       properties:
@@ -7325,3 +7246,84 @@ components:
             enable_streaming: { type: boolean }
             structured_output_mode: { type: string }
             thinking_mode: { type: string }
+
+  responses:
+    Error:
+      description: v2 错误信封
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+  parameters:
+    WorkspaceId:
+      name: workspaceId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    PublicSiteSlug:
+      name: slug
+      in: path
+      required: true
+      schema: { type: string }
+    SiteId:
+      name: siteId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    AssetId:
+      name: assetId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    ConversationId:
+      name: conversationId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    DerivationId:
+      name: derivationId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    MediaId:
+      name: mediaId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    UserId:
+      name: userId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    InvitationId:
+      name: invitationId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    MembershipId:
+      name: membershipId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    TagId:
+      name: tagId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    Cursor:
+      name: cursor
+      in: query
+      schema: { type: string, nullable: true }
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema: { type: string, minLength: 1, maxLength: 200 }
+    IfMatch:
+      name: If-Match
+      in: header
+      required: true
+      schema: { type: string }

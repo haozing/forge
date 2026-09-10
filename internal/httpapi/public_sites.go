@@ -226,7 +226,8 @@ func publicSiteSection(deps Dependencies) http.HandlerFunc {
 		page, err := deps.PublicSites.Section(r.Context(),
 			effectiveClientAddr(r, deps.TrustedProxyCIDRs),
 			publicVisitorPrincipal(r, deps), slug,
-			r.PathValue("sectionSlug"), atoiDefault(r.URL.Query().Get("limit"), 20))
+			r.PathValue("sectionSlug"), r.URL.Query().Get("model_key"),
+			atoiDefault(r.URL.Query().Get("limit"), 20))
 		if err != nil {
 			writePublicSiteError(w, err)
 			return

@@ -120,6 +120,41 @@ func (s Service) require(ctx context.Context, principal auth.Principal, workspac
 	return scope, err
 }
 
+// requireModelAction authorizes an action on a loaded model. Workspace-scoped
+// models run the workspace policy unchanged. Builtin models are
+// organization-level (workspace_id NULL): reads are open to every member,
+// writes (model.manage) require the organization admin — the same predicate
+// authz/scope.go applies for ownership, needed here because no workspace row
+// exists to authorize against.
+func (s Service) requireModelAction(ctx context.Context, principal auth.Principal, model Model, action string) error {
+	if model.WorkspaceID != "" {
+		if _, err := s.require(ctx, principal, model.WorkspaceID, model.ID, action); err != nil {
+			return err
+		}
+		return nil
+	}
+	if principal.UserType != auth.UserTypeMember {
+		return ErrForbidden
+	}
+	if action != "model.manage" {
+		return nil
+	}
+	var isAdmin bool
+	if err := s.Store.Pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM identity.users u
+			WHERE u.id = $1::uuid AND u.organization_id = $2::uuid
+			  AND u.user_type = 'member' AND u.status = 'active' AND u.organization_role = 'admin'
+		)
+	`, principal.UserID, principal.OrganizationID).Scan(&isAdmin); err != nil {
+		return fmt.Errorf("check organization admin: %w", err)
+	}
+	if !isAdmin {
+		return ErrForbidden
+	}
+	return nil
+}
+
 func (s Service) List(ctx context.Context, principal auth.Principal, workspaceID string) ([]Model, error) {
 	scope, err := s.require(ctx, principal, workspaceID, "", "model.read")
 	if err != nil {
@@ -164,6 +199,10 @@ func (s Service) Get(ctx context.Context, principal auth.Principal, modelID stri
 	if err := s.validate(principal); err != nil {
 		return Model{}, err
 	}
+	// Builtin models are organization-level (workspace_id NULL) and visible
+	// to every member of the organization; workspace-scoped models resolve
+	// their workspace and run the workspace policy as before.
+	organizationScoped := false
 	var workspaceID string
 	if err := s.Store.Pool.QueryRow(ctx, `SELECT COALESCE(workspace_id::text, '') FROM model.resource_models WHERE organization_id = $1::uuid AND id = $2::uuid`, principal.OrganizationID, modelID).Scan(&workspaceID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -172,21 +211,29 @@ func (s Service) Get(ctx context.Context, principal auth.Principal, modelID stri
 		return Model{}, fmt.Errorf("load resource model workspace: %w", err)
 	}
 	if workspaceID == "" {
-		return Model{}, ErrNotFound
+		if principal.UserType != auth.UserTypeMember {
+			return Model{}, ErrNotFound
+		}
+		organizationScoped = true
 	}
-	scope, err := s.require(ctx, principal, workspaceID, modelID, "model.read")
-	if err != nil {
-		return Model{}, err
+	var scope authz.Scope
+	if !organizationScoped {
+		var err error
+		scope, err = s.require(ctx, principal, workspaceID, modelID, "model.read")
+		if err != nil {
+			return Model{}, err
+		}
 	}
 	row := s.Store.Pool.QueryRow(ctx, `
-		SELECT rm.id::text, rm.workspace_id::text, rm.model_key, rm.name, rm.description,
+		SELECT rm.id::text, COALESCE(rm.workspace_id::text, '') AS workspace_id, rm.model_key, rm.name, rm.description,
 		       rm.content_kind, rm.status, rm.model_capabilities, rm.created_at, rm.updated_at,
 		       mv.id::text, mv.version_no, mv.status, mv.field_schema, mv.form_schema,
 		       mv.list_schema, mv.policy, mv.schema_checksum, mv.validated_at, mv.published_at, mv.retired_at, mv.created_at
 		FROM model.resource_models rm
 		LEFT JOIN model.resource_model_versions mv ON mv.organization_id = rm.organization_id AND mv.id = rm.current_version_id
-		WHERE rm.organization_id = $1::uuid AND rm.id = $2::uuid AND rm.workspace_id = $3::uuid
-	`, principal.OrganizationID, modelID, workspaceID)
+		WHERE rm.organization_id = $1::uuid AND rm.id = $2::uuid
+		  AND (rm.workspace_id = NULLIF($3, '')::uuid OR $4::bool)
+	`, principal.OrganizationID, modelID, workspaceID, organizationScoped)
 	item, err := scanModel(row, scope)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Model{}, ErrNotFound
@@ -250,7 +297,7 @@ func (s Service) Patch(ctx context.Context, principal auth.Principal, modelID st
 	if err != nil {
 		return Model{}, err
 	}
-	if _, err := s.require(ctx, principal, model.WorkspaceID, modelID, "model.manage"); err != nil {
+	if err := s.requireModelAction(ctx, principal, model, "model.manage"); err != nil {
 		return Model{}, err
 	}
 	name, description, status := model.Name, model.Description, model.Status
@@ -280,7 +327,7 @@ func (s Service) Versions(ctx context.Context, principal auth.Principal, modelID
 	if err != nil {
 		return nil, err
 	}
-	if _, err := s.require(ctx, principal, model.WorkspaceID, modelID, "model.read"); err != nil {
+	if err := s.requireModelAction(ctx, principal, model, "model.read"); err != nil {
 		return nil, err
 	}
 	rows, err := s.Store.Pool.Query(ctx, `
@@ -308,7 +355,7 @@ func (s Service) CreateVersion(ctx context.Context, principal auth.Principal, mo
 	if err != nil {
 		return Version{}, err
 	}
-	if _, err := s.require(ctx, principal, model.WorkspaceID, modelID, "model.manage"); err != nil {
+	if err := s.requireModelAction(ctx, principal, model, "model.manage"); err != nil {
 		return Version{}, err
 	}
 	checksum, err := SchemaChecksum(model.ContentKind, input.FieldSchema, input.FormSchema, input.ListSchema, input.Policy)
@@ -339,7 +386,7 @@ func (s Service) PatchVersion(ctx context.Context, principal auth.Principal, ver
 	if err != nil {
 		return Version{}, err
 	}
-	if _, err := s.require(ctx, principal, model.WorkspaceID, model.ID, "model.manage"); err != nil {
+	if err := s.requireModelAction(ctx, principal, model, "model.manage"); err != nil {
 		return Version{}, err
 	}
 	if version.Status != "draft" {
@@ -375,16 +422,22 @@ func (s Service) GetVersion(ctx context.Context, principal auth.Principal, versi
 	if !validID(versionID) {
 		return Version{}, ErrInvalidInput
 	}
+	// Builtin (organization-level, workspace_id NULL) models answer version
+	// reads to any member; workspace-scoped models run the workspace policy.
 	var modelID, workspaceID string
 	err := s.Store.Pool.QueryRow(ctx, `SELECT rm.id::text, COALESCE(rm.workspace_id::text, '') FROM model.resource_model_versions mv JOIN model.resource_models rm ON rm.organization_id = mv.organization_id AND rm.id = mv.resource_model_id WHERE mv.id = $1::uuid AND mv.organization_id = $2::uuid`, versionID, principal.OrganizationID).Scan(&modelID, &workspaceID)
-	if errors.Is(err, pgx.ErrNoRows) || workspaceID == "" {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return Version{}, ErrNotFound
 	}
 	if err != nil {
 		return Version{}, fmt.Errorf("load resource model version scope: %w", err)
 	}
-	if _, err := s.require(ctx, principal, workspaceID, modelID, "model.read"); err != nil {
-		return Version{}, err
+	if workspaceID != "" {
+		if _, err := s.require(ctx, principal, workspaceID, modelID, "model.read"); err != nil {
+			return Version{}, err
+		}
+	} else if principal.UserType != auth.UserTypeMember {
+		return Version{}, ErrNotFound
 	}
 	row := s.Store.Pool.QueryRow(ctx, `SELECT id::text, resource_model_id::text, version_no, status, field_schema, form_schema, list_schema, policy, schema_checksum, validated_at, published_at, retired_at, created_at FROM model.resource_model_versions WHERE organization_id = $1::uuid AND id = $2::uuid`, principal.OrganizationID, versionID)
 	return scanVersion(row)
@@ -399,7 +452,7 @@ func (s Service) ValidateVersion(ctx context.Context, principal auth.Principal, 
 	if err != nil {
 		return Version{}, err
 	}
-	if _, err := s.require(ctx, principal, model.WorkspaceID, model.ID, "model.manage"); err != nil {
+	if err := s.requireModelAction(ctx, principal, model, "model.manage"); err != nil {
 		return Version{}, err
 	}
 	checksum, err := SchemaChecksum(model.ContentKind, version.FieldSchema, version.FormSchema, version.ListSchema, version.Policy)
@@ -421,7 +474,7 @@ func (s Service) PublishVersion(ctx context.Context, principal auth.Principal, v
 	if err != nil {
 		return Version{}, err
 	}
-	if _, err := s.require(ctx, principal, model.WorkspaceID, model.ID, "model.manage"); err != nil {
+	if err := s.requireModelAction(ctx, principal, model, "model.manage"); err != nil {
 		return Version{}, err
 	}
 	tx, err := s.Store.Pool.Begin(ctx)
@@ -442,7 +495,7 @@ func (s Service) PublishVersion(ctx context.Context, principal auth.Principal, v
 	if _, err := tx.Exec(ctx, `UPDATE model.resource_model_versions SET status = 'published', published_at = now() WHERE organization_id = $1::uuid AND id = $2::uuid`, principal.OrganizationID, versionID); err != nil {
 		return Version{}, fmt.Errorf("publish resource model version: %w", err)
 	}
-	if _, err := tx.Exec(ctx, `UPDATE model.resource_models SET current_version_id = $3::uuid, status = 'active', updated_at = now() WHERE organization_id = $1::uuid AND id = $2::uuid AND workspace_id = $4::uuid`, principal.OrganizationID, model.ID, versionID, model.WorkspaceID); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE model.resource_models SET current_version_id = $3::uuid, status = 'active', updated_at = now() WHERE organization_id = $1::uuid AND id = $2::uuid AND workspace_id IS NOT DISTINCT FROM NULLIF($4, '')::uuid`, principal.OrganizationID, model.ID, versionID, model.WorkspaceID); err != nil {
 		return Version{}, fmt.Errorf("set current resource model version: %w", err)
 	}
 	if s.Events == nil {
@@ -480,7 +533,7 @@ func (s Service) RetireVersion(ctx context.Context, principal auth.Principal, ve
 	if err != nil {
 		return Version{}, err
 	}
-	if _, err := s.require(ctx, principal, model.WorkspaceID, model.ID, "model.manage"); err != nil {
+	if err := s.requireModelAction(ctx, principal, model, "model.manage"); err != nil {
 		return Version{}, err
 	}
 	if version.Status != "published" {

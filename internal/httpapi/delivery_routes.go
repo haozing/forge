@@ -221,7 +221,8 @@ func deliverySiteSection(deps Dependencies) http.HandlerFunc {
 			return
 		}
 		page, err := service.Section(r.Context(), effectiveClientAddr(r, deps.TrustedProxyCIDRs),
-			publicVisitorPrincipal(r, deps), slug, r.PathValue("sectionSlug"), deliveryBaseURL(r))
+			publicVisitorPrincipal(r, deps), slug, r.PathValue("sectionSlug"),
+			r.URL.Query().Get("model_key"), deliveryBaseURL(r))
 		if err != nil {
 			writeDeliveryError(w, r, service, err)
 			return

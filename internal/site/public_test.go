@@ -298,10 +298,11 @@ func TestParseHomepageConfig(t *testing.T) {
 		{"type":"latest","limit":5,"title":"Newest"},
 		{"type":"featured"},
 		{"type":"column","section_slug":"news"},
+		{"type":"latest","model_key":"builtin_shot","title":"镜头"},
 		{"type":"future-thing"}
 	]}`))
-	if len(sections) != 4 {
-		t.Fatalf("sections = %d, want 4", len(sections))
+	if len(sections) != 5 {
+		t.Fatalf("sections = %d, want 5", len(sections))
 	}
 	if sections[0].Type != "latest" || sections[0].Limit != 5 || sections[0].Title != "Newest" {
 		t.Fatalf("latest section = %+v", sections[0])
@@ -309,8 +310,11 @@ func TestParseHomepageConfig(t *testing.T) {
 	if sections[2].SectionSlug != "news" {
 		t.Fatalf("column section = %+v", sections[2])
 	}
-	if sections[3].Type != "future-thing" {
-		t.Fatalf("unknown section carried through = %+v", sections[3])
+	if sections[3].ModelKey != "builtin_shot" {
+		t.Fatalf("model-scoped section must carry model_key = %+v", sections[3])
+	}
+	if sections[4].Type != "future-thing" {
+		t.Fatalf("unknown section carried through = %+v", sections[4])
 	}
 }
 

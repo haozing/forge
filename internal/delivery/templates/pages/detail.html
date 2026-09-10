@@ -10,6 +10,7 @@
   </footer>
   {{if and (ne .Site.Style.Sidebar "toc") (gt (len .TOC) 1)}}<nav class="toc"><h2>目录</h2><ul>{{range .TOC}}<li class="toc-l{{.Level}}"><a href="#{{.ID}}">{{.Text}}</a></li>{{end}}</ul></nav>{{end}}
   <div class="article-body">{{noescape .ContentHTML}}</div>
+  {{if .Fields}}<section class="article-fields"><h2>结构化字段</h2><dl>{{range .Fields}}<div class="field-row"><dt>{{.Key}}</dt><dd>{{.Value}}</dd></div>{{end}}</dl></section>{{end}}
   {{if .Related}}<section class="related-posts">
     <h2>相关文章</h2>
     <div class="related-grid">{{range .Related}}{{template "card" .}}{{end}}</div>

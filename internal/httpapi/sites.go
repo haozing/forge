@@ -73,16 +73,17 @@ type CreateSiteRequest struct {
 }
 
 type UpdateSiteRequest struct {
-	Name                *string          `json:"name"`
-	Domain              *string          `json:"domain"`
-	Template            *string          `json:"template"`
-	DefaultContentScope *string          `json:"default_content_scope"`
-	HomepageConfig      *json.RawMessage `json:"homepage_config"`
-	NavigationConfig    *json.RawMessage `json:"navigation_config"`
-	StyleConfig         *json.RawMessage `json:"style_config"`
-	CustomCss           *string          `json:"custom_css"`
-	CommentsMode        *string          `json:"comments_mode"`
-	Status              *string          `json:"status"`
+	Name                *string                    `json:"name"`
+	Domain              *string                    `json:"domain"`
+	Template            *string                    `json:"template"`
+	DefaultContentScope *string                    `json:"default_content_scope"`
+	HomepageConfig      *json.RawMessage           `json:"homepage_config"`
+	NavigationConfig    *json.RawMessage           `json:"navigation_config"`
+	StyleConfig         *json.RawMessage           `json:"style_config"`
+	CustomCss           *string                    `json:"custom_css"`
+	CommentsMode        *string                    `json:"comments_mode"`
+	Status              *string                    `json:"status"`
+	ModelViews          *map[string]site.ModelView `json:"model_views"`
 }
 
 // SitesCollection serves GET/POST /api/workspaces/{workspaceId}/sites.
@@ -201,8 +202,19 @@ func SiteResource(deps Dependencies) http.HandlerFunc {
 					CustomCss:           input.CustomCss,
 					CommentsMode:        input.CommentsMode,
 					Status:              input.Status,
+					ModelViews:          input.ModelViews,
 				})
 			if err != nil {
+				var modelViewErr *site.ModelViewError
+				if errors.As(err, &modelViewErr) {
+					writeErrorDetail(w, http.StatusUnprocessableEntity, "validation_failed",
+						"model view validation failed", map[string]any{
+							"model_id": modelViewErr.ModelID,
+							"field":    modelViewErr.Field,
+							"reason":   modelViewErr.Reason,
+						})
+					return
+				}
 				SiteError(w, err, "slug_conflict")
 				return
 			}

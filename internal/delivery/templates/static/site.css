@@ -155,3 +155,13 @@ h2 { font-size: 1.35em; }
 .related-posts h2 { font-size: 1.25em; margin: 0 0 calc(var(--space) * 1.5); }
 .related-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: calc(var(--space) * 1.5); }
 @media (max-width: 640px) { .related-grid { grid-template-columns: 1fr; } }
+
+
+/* Structured field whitelist rendering (model_views). */
+.article-fields{margin:2rem 0 0}
+.article-fields h2{font-size:1rem;margin:0 0 .5rem}
+.article-fields dl{margin:0;display:grid;grid-template-columns:max-content 1fr;gap:.25rem 1rem}
+.article-fields .field-row{display:contents}
+.article-fields dt{font-weight:600;color:var(--muted,#555)}
+.article-fields dd{margin:0;overflow-wrap:anywhere}
+.card-fields{margin:.25rem 0 0;font-size:.85rem;color:var(--muted,#555)}

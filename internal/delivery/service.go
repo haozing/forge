@@ -435,14 +435,14 @@ func (s *Service) Post(ctx context.Context, addr string, principal auth.Principa
 }
 
 // Section serves one section page.
-func (s *Service) Section(ctx context.Context, addr string, principal auth.Principal, slug, sectionSlug, baseURL string) (*Response, error) {
+func (s *Service) Section(ctx context.Context, addr string, principal auth.Principal, slug, sectionSlug, modelKey, baseURL string) (*Response, error) {
 	routePath := "/sites/" + slug + "/sections/" + sectionSlug + "/"
 	return s.pipeline(ctx, addr, principal, slug, routePath, baseURL, func(ctx context.Context, facts site.SiteFacts, band string) (renderOutput, error) {
 		if gated(facts, band) {
 			return s.gateOutput(facts)
 		}
 		config := style(facts)
-		page, err := s.Reader.Section(ctx, addr, principal, slug, sectionSlug, config.PostsPerPage)
+		page, err := s.Reader.Section(ctx, addr, principal, slug, sectionSlug, modelKey, config.PostsPerPage)
 		if err != nil {
 			return renderOutput{}, err
 		}

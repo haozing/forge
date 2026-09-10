@@ -34,6 +34,16 @@ type requestIDWriter struct {
 
 func (w requestIDWriter) RequestID() string { return w.id }
 
+// Flush forwards to the underlying writer: without it the SSE handlers'
+// w.(http.Flusher) assertion fails for every request that passes through
+// withRequestID, killing the notification stream and agent chat streams
+// (found by live deployment testing 2026-09-10).
+func (w requestIDWriter) Flush() {
+	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
 type requestIDCarrier interface{ RequestID() string }
 
 func requestIDFromWriter(w http.ResponseWriter) string {

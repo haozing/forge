@@ -52,6 +52,10 @@ type Site struct {
 	CustomCss string `json:"custom_css"`
 	// CommentsMode gates the comment section (二期 §8).
 	CommentsMode string `json:"comments_mode"`
+	// ModelViews is the per-model field display whitelist (CMS plan §7.2):
+	// which structured fields the site publishes on cards and detail pages.
+	// Empty/absent views publish zero fields (fail-closed).
+	ModelViews map[string]ModelView `json:"model_views"`
 	// PublishedReleaseID points at the live immutable config snapshot; NULL
 	// means the public render falls back to the working columns above.
 	PublishedReleaseID *string   `json:"published_release_id"`
@@ -91,6 +95,9 @@ type UpdateSiteInput struct {
 	CustomCss           *string
 	CommentsMode        *string
 	Status              *string
+	// ModelViews replaces the whole per-model field display whitelist when
+	// non-nil (whole-document semantics, like homepage_config).
+	ModelViews *map[string]ModelView
 }
 
 // SitePage is one keyset page of the workspace site catalog.
@@ -143,17 +150,20 @@ func (s Service) require(ctx context.Context, principal auth.Principal, workspac
 const siteColumns = `id::text, organization_id::text, workspace_id::text, slug, name,
 	COALESCE(domain, ''), template, default_content_scope, status, revision,
 	homepage_config, navigation_config, style_config, custom_css, comments_mode,
-	published_release_id::text, created_at, updated_at`
+	model_views, published_release_id::text, created_at, updated_at`
 
 func scanSiteRow(row interface{ Scan(...any) error }) (Site, error) {
 	var item Site
+	var modelViews []byte
 	err := row.Scan(&item.ID, &item.OrganizationID, &item.WorkspaceID, &item.Slug, &item.Name,
 		&item.Domain, &item.Template, &item.DefaultContentScope, &item.Status, &item.Revision,
 		&item.HomepageConfig, &item.NavigationConfig, &item.StyleConfig, &item.CustomCss,
-		&item.CommentsMode, &item.PublishedReleaseID, &item.CreatedAt, &item.UpdatedAt)
+		&item.CommentsMode, &modelViews, &item.PublishedReleaseID, &item.CreatedAt, &item.UpdatedAt)
 	if err != nil {
 		return Site{}, err
 	}
+	item.ModelViews = map[string]ModelView{}
+	_ = json.Unmarshal(modelViews, &item.ModelViews)
 	item.ETag = fmt.Sprint(item.Revision)
 	return item, nil
 }
@@ -415,6 +425,11 @@ func (s Service) UpdateSite(ctx context.Context, principal auth.Principal, works
 	if input.Status != nil && *input.Status != StatusActive && *input.Status != StatusDisabled {
 		return Site{}, ErrInvalidInput
 	}
+	if input.ModelViews != nil {
+		if err := ValidateModelViewShape(*input.ModelViews); err != nil {
+			return Site{}, err
+		}
+	}
 	var homepage, navigation json.RawMessage
 	if input.HomepageConfig != nil {
 		if !validConfigObject(*input.HomepageConfig) {
@@ -464,6 +479,11 @@ func (s Service) UpdateSite(ctx context.Context, principal auth.Principal, works
 		if input.CustomCss == nil && strings.TrimSpace(presetCSS) != "" {
 			copied, _ := SanitizeCSS(presetCSS)
 			input.CustomCss = &copied
+		}
+	}
+	if input.ModelViews != nil {
+		if err := ValidateModelViewReferences(ctx, tx, principal.OrganizationID, workspaceID, *input.ModelViews); err != nil {
+			return Site{}, err
 		}
 	}
 	// The L2 layer is sanitized at write; the stored form is the canonical
@@ -547,6 +567,13 @@ func applySiteUpdate(ctx context.Context, tx pgx.Tx, principal auth.Principal, w
 	}
 	if input.Status != nil {
 		sets = append(sets, "status = "+arg(*input.Status))
+	}
+	if input.ModelViews != nil {
+		modelViews, err := json.Marshal(*input.ModelViews)
+		if err != nil {
+			return Site{}, fmt.Errorf("encode model views: %w", err)
+		}
+		sets = append(sets, "model_views = "+arg(string(modelViews))+"::jsonb")
 	}
 	item, err := scanSiteRow(tx.QueryRow(ctx, `
 		UPDATE site.public_sites

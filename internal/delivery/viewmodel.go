@@ -6,6 +6,9 @@ package delivery
 // site.PublicReader DTOs through this whitelist.
 
 import (
+	"encoding/json"
+	"strings"
+
 	"time"
 
 	"agentchunzhi/internal/query"
@@ -91,6 +94,7 @@ type TagChip struct {
 
 // CardVM is one post card (list, home sections, search results).
 type CardVM struct {
+	Fields      []FieldValueVM
 	Title       string
 	Href        string
 	Summary     string
@@ -120,7 +124,10 @@ type HomeVM struct {
 type SectionVM struct {
 	Type  string // featured | latest | column
 	Title string
-	Items []CardVM
+	// ModelKey is set when the section is narrowed to one resource model
+	// (P1-B); templates may use it for a data attribute.
+	ModelKey string
+	Items    []CardVM
 }
 
 // ListVM renders the post list and section pages.
@@ -132,6 +139,14 @@ type ListVM struct {
 }
 
 // DetailVM renders one post detail page.
+// FieldValueVM is one whitelisted structured field rendered as a
+// label/value row (presentation text already formatted per type).
+type FieldValueVM struct {
+	Key   string
+	Type  string
+	Value string
+}
+
 type DetailVM struct {
 	Page
 	AssetID     string
@@ -139,6 +154,7 @@ type DetailVM struct {
 	SectionHref string
 	ContentHTML string
 	TOC         []Heading
+	Fields      []FieldValueVM
 	PublishedOn string
 	UpdatedISO  string
 	Tags        []TagChip
@@ -277,6 +293,7 @@ func cardVM(slug string, post site.PublicPost, summaryRunes int) CardVM {
 		Title:       post.Title,
 		Href:        postHref(slug, post.DisplayPath),
 		Summary:     summary,
+		Fields:      FormatFieldValues(post.Fields),
 		PublishedOn: FormatDate(post.PublishedAt),
 		UpdatedOn:   FormatDate(post.UpdatedAt),
 		Tags:        tagChips(slug, post.Tags),
@@ -291,31 +308,54 @@ func cardVM(slug string, post site.PublicPost, summaryRunes int) CardVM {
 // home component order of the style IA (featured → latest → tag_cloud).
 func ResolveHome(view site.PublicHomeView, style site.StyleConfig, tags []tag.FacetItem) HomeVM {
 	vm := HomeVM{Page: Page{Kind: "home"}}
-	var featured, latest []CardVM
+	// P1-B: a section may carry model_key (one resource model owns a slot).
+	// Model-scoped latest/featured slots must NOT merge into the generic
+	// "最新/精选" buckets — each becomes its own titled section. Only
+	// model-less sections keep the legacy merge-by-component behaviour.
 	columnOrder := []string{}
 	columnsBySlug := map[string]SectionVM{}
+	namedOrder := []string{}
+	namedByKey := map[string]SectionVM{}
+	var featured, latest []CardVM
+
 	for _, section := range view.Sections {
 		items := make([]CardVM, 0, len(section.Items))
 		for _, post := range section.Items {
 			items = append(items, cardVM(view.Site.Slug, post, style.SummaryLength))
 		}
-		switch section.Type {
-		case site.HomepageSectionFeatured:
-			featured = append(featured, items...)
-		case site.HomepageSectionLatest:
-			latest = append(latest, items...)
-		case site.HomepageSectionColumn:
+		modelScoped := strings.TrimSpace(section.ModelKey) != ""
+		switch {
+		case section.Type == site.HomepageSectionColumn:
 			title := section.Title
 			if title == "" {
 				title = section.SectionSlug
 			}
-			existing, ok := columnsBySlug[section.SectionSlug]
+			key := section.SectionSlug + ":" + section.ModelKey
+			existing, ok := columnsBySlug[key]
 			if !ok {
-				columnOrder = append(columnOrder, section.SectionSlug)
-				existing = SectionVM{Type: "column", Title: title}
+				columnOrder = append(columnOrder, key)
+				existing = SectionVM{Type: "column", Title: title, ModelKey: section.ModelKey}
 			}
 			existing.Items = append(existing.Items, items...)
-			columnsBySlug[section.SectionSlug] = existing
+			columnsBySlug[key] = existing
+		case modelScoped:
+			// Model-scoped latest/featured: standalone titled section.
+			title := section.Title
+			if title == "" {
+				title = section.ModelKey
+			}
+			key := section.Type + ":" + section.ModelKey
+			existing, ok := namedByKey[key]
+			if !ok {
+				namedOrder = append(namedOrder, key)
+				existing = SectionVM{Type: section.Type, Title: title, ModelKey: section.ModelKey}
+			}
+			existing.Items = append(existing.Items, items...)
+			namedByKey[key] = existing
+		case section.Type == site.HomepageSectionFeatured:
+			featured = append(featured, items...)
+		case section.Type == site.HomepageSectionLatest:
+			latest = append(latest, items...)
 		}
 	}
 	componentSet := map[string]bool{}
@@ -336,6 +376,11 @@ func ResolveHome(view site.PublicHomeView, style site.StyleConfig, tags []tag.Fa
 	for _, slug := range columnOrder {
 		if column := columnsBySlug[slug]; len(column.Items) > 0 {
 			vm.Sections = append(vm.Sections, column)
+		}
+	}
+	for _, key := range namedOrder {
+		if named := namedByKey[key]; len(named.Items) > 0 {
+			vm.Sections = append(vm.Sections, named)
 		}
 	}
 	if tags != nil {
@@ -396,6 +441,7 @@ func ResolveDetail(slug string, content site.PublicPostContent, authorizedImages
 		SectionHref: sectionHref(slug, content.Section),
 		ContentHTML: markdown.HTML,
 		TOC:         markdown.Headings,
+		Fields:      FormatFieldValues(content.Fields),
 		PublishedOn: FormatDate(content.PublishedAt),
 		UpdatedISO:  FormatISO(content.UpdatedAt),
 		Tags:        tagChips(slug, content.Tags),
@@ -411,4 +457,42 @@ func ResolveDetail(slug string, content site.PublicPostContent, authorizedImages
 // ResolveTags projects the facet cloud into the tag index VM.
 func ResolveTags(slug string, items []tag.FacetItem) TagsVM {
 	return TagsVM{Page: Page{Kind: "tags"}, Tags: facetChips(slug, items)}
+}
+
+// FormatFieldValues renders whitelisted public fields into presentable
+// label/value rows, formatted per the field's declared type. All values pass
+// through html/template escaping at render time.
+func FormatFieldValues(fields []site.PublicFieldValue) []FieldValueVM {
+	if len(fields) == 0 {
+		return nil
+	}
+	out := make([]FieldValueVM, 0, len(fields))
+	for _, field := range fields {
+		out = append(out, FieldValueVM{Key: field.Key, Type: field.Type, Value: formatFieldValue(field)})
+	}
+	return out
+}
+
+func formatFieldValue(field site.PublicFieldValue) string {
+	switch field.Type {
+	case "boolean":
+		if string(field.Value) == "true" {
+			return "是"
+		}
+		return "否"
+	case "multiselect":
+		var items []string
+		if err := json.Unmarshal(field.Value, &items); err == nil {
+			return strings.Join(items, "、")
+		}
+		return ""
+	case "string", "enum":
+		var text string
+		if err := json.Unmarshal(field.Value, &text); err == nil {
+			return text
+		}
+		return ""
+	default: // integer / number / date / datetime travel as bare JSON scalars
+		return string(field.Value)
+	}
 }
