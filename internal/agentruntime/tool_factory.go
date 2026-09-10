@@ -458,6 +458,24 @@ func parseToolPolicy(raw map[string]any) runtimetools.Policy {
 	return policy
 }
 
+// agentVisibilityBand resolves the agent's data_scope policy row into the
+// asset visibility band its read tools may touch. The tool SQL used to read
+// published relations/attachment text without any visibility narrowing, so a
+// workspace-visible asset leaked into a public-scope agent's context; missing
+// policy rows fail closed to public-only.
+func (f DomainToolFactory) agentVisibilityBand(ctx context.Context, scope ReActToolScope) []string {
+	var dataScope string
+	_ = f.Store.Pool.QueryRow(ctx, "SELECT ap.data_scope FROM content.agent_access_policies ap WHERE ap.agent_user_id = $1::uuid AND (ap.workspace_id = $2::uuid OR ap.workspace_id IS NULL) ORDER BY ap.workspace_id NULLS LAST LIMIT 1", scope.AgentUserID, scope.WorkspaceID).Scan(&dataScope)
+	switch dataScope {
+	case "workspace":
+		return []string{"public", "organization", "workspace"}
+	case "organization":
+		return []string{"public", "organization"}
+	default:
+		return []string{"public"}
+	}
+}
+
 func (f DomainToolFactory) getSchema(ctx context.Context, scope ReActToolScope, modelID string, allowed []string) (map[string]any, error) {
 	if !contains(allowed, modelID) {
 		return nil, errors.New("resource model is not authorized")
@@ -487,8 +505,9 @@ func (f DomainToolFactory) getRelatedAssets(ctx context.Context, scope ReActTool
 		WHERE rel.organization_id = $1::uuid AND source.id = $2::uuid
 		  AND source.resource_model_id::text = ANY($3::text[])
 		  AND target.resource_model_id::text = ANY($3::text[])
+		  AND target.visibility = ANY($5::text[])
 		ORDER BY rel.created_at DESC LIMIT $4
-	`, scope.OrganizationID, assetID, allowed, limit)
+	`, scope.OrganizationID, assetID, allowed, limit, f.agentVisibilityBand(ctx, scope))
 	if err != nil {
 		return nil, err
 	}
@@ -516,7 +535,8 @@ func (f DomainToolFactory) getAttachmentText(ctx context.Context, scope ReActToo
 		WHERE att.organization_id = $1::uuid AND att.id = $2::uuid AND att.deleted_at IS NULL
 		  AND att.status = 'clean' AND att.extraction_status = 'succeeded'
 		  AND a.resource_model_id::text = ANY($3::text[])
-	`, scope.OrganizationID, attachmentID, allowed).Scan(&text, &checksum, &language)
+		  AND a.visibility = ANY($4::text[])
+	`, scope.OrganizationID, attachmentID, allowed, f.agentVisibilityBand(ctx, scope)).Scan(&text, &checksum, &language)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errors.New("attachment text was not found")
 	}

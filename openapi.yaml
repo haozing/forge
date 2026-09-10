@@ -1869,6 +1869,48 @@ paths:
                       stats: { $ref: '#/components/schemas/WorkspaceStats' }
                       counts: { $ref: '#/components/schemas/WorkspaceCounts' }
                   - $ref: '#/components/schemas/Envelope'
+  /api/workspaces/{workspaceId}/audit:
+    get:
+      tags: [query]
+      operationId: listWorkspaceActivity
+      summary: List the workspace audit trail (admin only)
+      description: |
+        audit.audit_log 的读取面（治理/内容写入一直在此留痕，此前只写不读）。
+        需要 audit.read（组织管理员）。keyset 游标 = 最后一行的 base64(created_at|id)。
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - name: cursor
+          in: query
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 50, maximum: 100 }
+      responses:
+        '200':
+          description: 活动分页（新→旧）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            event_id: { type: string }
+                            event_type: { type: string }
+                            actor: { type: object }
+                            object_type: { type: string }
+                            object_id: { type: string }
+                            summary: { type: string }
+                            metadata: { type: object, additionalProperties: true }
+                            created_at: { type: string, format: date-time }
+                      has_more: { type: boolean }
+                      next_cursor: { type: string }
+                  - $ref: '#/components/schemas/Envelope'
+        '403': { $ref: '#/components/responses/Error' }
   /api/workspaces/{workspaceId}/members:
     get:
       tags: [workspaces]
@@ -2946,11 +2988,35 @@ paths:
               type: object
               properties:
                 style_config: { type: object, description: 候选样式补丁（patch 语义） }
+                custom_css: { type: string, description: 非空时替换站点 custom_css 参与渲染（过白名单清洗） }
                 page: { type: string, enum: [home, posts, detail], description: 缺省 home }
                 display_path: { type: string, description: page=detail 时的文章路径 }
+                base_url: { type: string, description: 非空时把渲染结果中的根相对链接改写为该 http(s) 来源的绝对 URL（跨域 iframe 预览用） }
       responses:
         '200': { description: 预览 HTML, content: { text/html: { schema: { type: string } } } }
         '422': { description: 样式补丁非法（style_patch_invalid 映射 validation_failed） }
+  /api/workspaces/{workspaceId}/sites/{siteId}/summary:
+    get:
+      tags: [sites]
+      operationId: getSiteSummary
+      summary: 站点概览计数
+      description: 绑定数与待审评论数（site.read；概览页免拉全量列表）。
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/SiteId'
+      responses:
+        '200':
+          description: 计数块
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    properties:
+                      bindings_count: { type: integer }
+                      pending_comments_count: { type: integer }
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
   /api/workspaces/{workspaceId}/sites/{siteId}/releases:
     get:
       tags: [sites]
@@ -4077,11 +4143,213 @@ paths:
             text/event-stream:
               schema: { type: string }
         '404': { $ref: '#/components/responses/Error' }
+  /api/workspaces/{workspaceId}/note-containers:
+    get:
+      tags: [conversations]
+      operationId: listNoteContainers
+      description: '「我的笔记」目录树清单（平铺返回，前端按 parent_id 组树；按 sort_key, created_at, id 稳定排序）'
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+      responses:
+        '200':
+          description: 目录清单
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/Folder' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+    post:
+      tags: [conversations]
+      operationId: createNoteContainer
+      description: 新建笔记目录（parent_id 缺省建在根层；需要 Idempotency-Key）
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title]
+              properties:
+                title: { type: string, maxLength: 200 }
+                parent_id: { type: string, format: uuid, description: 父目录，缺省为根层 }
+      responses:
+        '201':
+          description: 已创建
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Folder' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+  /api/workspaces/{workspaceId}/note-containers/{containerId}:
+    patch:
+      tags: [conversations]
+      operationId: updateNoteContainer
+      description: 重命名/移动/改排序。携带 parent_id（空串=根层）或 set_parent_id=true 时移动；移动到自己的子树会被 422 folder_invalid_parent 拒绝
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - name: containerId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title: { type: string, maxLength: 200 }
+                parent_id: { type: string, format: uuid }
+                set_parent_id: { type: boolean, description: true 时按 parent_id 移动（空串=根层） }
+                sort_key: { type: string, maxLength: 128 }
+      responses:
+        '200':
+          description: 已更新
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Folder' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+    delete:
+      tags: [conversations]
+      operationId: deleteNoteContainer
+      description: 删除目录。目录非空（有子目录或仍挂笔记）时 409 folder_not_empty
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - name: containerId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: 已删除
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/workspaces/{workspaceId}/doc-containers:
+    get:
+      tags: [assets]
+      operationId: listDocContainers
+      description: 知识库分类树清单（同 note-containers 契约，kind=doc_folder）
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+      responses:
+        '200':
+          description: 分类清单
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/Folder' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+    post:
+      tags: [assets]
+      operationId: createDocContainer
+      description: 新建知识库分类（需要 Idempotency-Key）
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title]
+              properties:
+                title: { type: string, maxLength: 200 }
+                parent_id: { type: string, format: uuid }
+      responses:
+        '201':
+          description: 已创建
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Folder' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+  /api/workspaces/{workspaceId}/doc-containers/{containerId}:
+    patch:
+      tags: [assets]
+      operationId: updateDocContainer
+      description: 重命名/移动/改排序（同 note-containers）
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - name: containerId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title: { type: string, maxLength: 200 }
+                parent_id: { type: string, format: uuid }
+                set_parent_id: { type: boolean }
+                sort_key: { type: string, maxLength: 128 }
+      responses:
+        '200':
+          description: 已更新
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Folder' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+    delete:
+      tags: [assets]
+      operationId: deleteDocContainer
+      description: 删除分类（非空时 409）
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - name: containerId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: 已删除
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/conversations/{conversationId}/note-container:
+    put:
+      tags: [conversations]
+      operationId: assignNoteContainer
+      description: 把会话绑定的灵感笔记挂进/摘出目录。container_id 为空串表示摘下（回到未分组）。仅笔记所属者可操作
+      parameters:
+        - $ref: '#/components/parameters/ConversationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [container_id]
+              properties:
+                container_id: { type: string, format: uuid, description: '目录 ID；空串 = 摘出' }
+      responses:
+        '200':
+          description: 已更新
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
   /api/workspaces/{workspaceId}/conversations:
     get:
       tags: [conversations]
       operationId: listConversations
-      description: "我的灵感"卡片列表——仅返回当前成员自己发起的会话；每张卡携带五态徽标（card_status）、驳回意见（card_status_detail）、送审期间新改动角标（has_new_changes）与笔记首行摘要（note_first_line）。
+      description: '我的灵感"卡片列表——仅返回当前成员自己发起的会话；每张卡携带五态徽标（card_status）、驳回意见（card_status_detail）、送审期间新改动角标（has_new_changes）与笔记首行摘要（note_first_line）。'
       parameters:
         - $ref: '#/components/parameters/WorkspaceId'
         - name: q
@@ -4091,6 +4359,10 @@ paths:
           in: query
           description: 按卡片状态筛选 organizing(整理中)/reviewing(审核中)/rejected(未通过)/published(已入库)/pending_update(待入库)
           schema: { type: string, enum: [organizing, reviewing, rejected, published, pending_update] }
+        - name: container_id
+          in: query
+          description: 按笔记目录过滤（note_folder 的容器 id；空串=不过滤）
+          schema: { type: string }
         - $ref: '#/components/parameters/Limit'
         - $ref: '#/components/parameters/Cursor'
       responses:
@@ -4860,6 +5132,38 @@ paths:
                   - $ref: '#/components/schemas/Envelope'
         '404': { $ref: '#/components/responses/Error' }
         '422': { $ref: '#/components/responses/Error' }
+  /api/notifications:
+    get:
+      tags: [notifications]
+      operationId: listAllNotifications
+      summary: List the caller's notifications across workspaces
+      description: 全局（顶部栏）通知面；按 recipient 聚合组织内所有工作区。游标为上一页最后一行的十进制 stream_id。
+      parameters:
+        - name: cursor
+          in: query
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 50, maximum: 100 }
+        - name: unread_only
+          in: query
+          schema: { type: string, enum: ["true", "false"] }
+      responses:
+        '200':
+          description: 通知分页（新→旧）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/Notification' }
+                      has_more: { type: boolean }
+                      next_cursor: { type: string }
+                  - $ref: '#/components/schemas/Envelope'
+        '401': { $ref: '#/components/responses/Error' }
   /api/workspaces/{workspaceId}/notifications/read-all:
     post:
       tags: [notifications]
@@ -5601,6 +5905,16 @@ paths:
         '422': { $ref: '#/components/responses/Error' }
 components:
   schemas:
+    Folder:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        workspace_id: { type: string, format: uuid }
+        title: { type: string }
+        parent_id: { type: string, format: uuid }
+        sort_key: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
     ConversationList:
       type: object
       properties:
@@ -5645,6 +5959,7 @@ components:
         workspace_id: { type: string, format: uuid }
         container_id: { type: string, format: uuid }
         note_asset_id: { type: string, format: uuid }
+        note_folder_id: { type: string, format: uuid, description: 笔记所在目录（0026）；未分组为空串 }
         agent_application_id: { type: string, format: uuid }
         bound_agent_user_id: { type: string, format: uuid }
         status: { type: string }
@@ -5870,6 +6185,7 @@ components:
       type: object
       properties:
         id: { type: string, format: uuid }
+        organization_id: { type: string, format: uuid }
         workspace_id: { type: string, format: uuid }
         slug: { type: string }
         name: { type: string }
@@ -5878,10 +6194,15 @@ components:
         default_content_scope: { type: string, enum: [public, organization, workspace] }
         homepage_config: { type: object }
         navigation_config: { type: object }
+        style_config: { type: object }
+        custom_css: { type: string }
+        comments_mode: { type: string, enum: [off, moderated, open] }
+        published_release_id: { type: string, format: uuid, nullable: true }
         status: { type: string, enum: [active, disabled] }
         revision: { type: integer }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
+        etag: { type: string, description: 表示版本（= revision），供 If-Match 使用 }
     SiteCreate:
       type: object
       required: [slug, name]
@@ -5889,6 +6210,7 @@ components:
         slug: { type: string, pattern: '^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$' }
         name: { type: string, maxLength: 200 }
         domain: { type: string }
+        style_config: { type: object, description: L1 样式参数空间（写入时完整校验） }
         template: { type: string, enum: [blog, pro] }
         default_content_scope: { type: string, enum: [public, organization, workspace] }
         homepage_config: { type: object }
@@ -5902,6 +6224,9 @@ components:
         default_content_scope: { type: string, enum: [public, organization, workspace] }
         homepage_config: { type: object }
         navigation_config: { type: object }
+        style_config: { type: object, description: patch 语义，深合并到工作样式 }
+        custom_css: { type: string, description: L2 自定义 CSS（服务端白名单清洗） }
+        comments_mode: { type: string, enum: [off, moderated, open] }
         status: { type: string, enum: [active, disabled] }
     SiteBinding:
       type: object
@@ -5948,6 +6273,7 @@ components:
         bindings:
           type: array
           items: { $ref: '#/components/schemas/SiteBinding' }
+        generated_at: { type: string, format: date-time }
     PublicSiteInfo:
       type: object
       properties:
@@ -6928,11 +7254,19 @@ components:
         created_at: { type: string, format: date-time }
     Notification:
       type: object
+      description: |
+        站内通知的渲染视图。写入方必须在 payload 里携带 title/body
+        （object_type/object_id 推荐）；读取侧按 kind 为历史行兜底。
+        metadata 是完整 payload，kind 专属业务字段从中取。
       properties:
         id: { type: string, format: uuid }
         workspace_id: { type: string, format: uuid }
-        kind: { type: string }
-        payload: { type: object, additionalProperties: true }
+        type: { type: string, description: 通知类别，即 content.notifications.kind }
+        title: { type: string }
+        body: { type: string }
+        object_type: { type: string }
+        object_id: { type: string }
+        metadata: { type: object, additionalProperties: true }
         read_at: { type: string, format: date-time, nullable: true }
         created_at: { type: string, format: date-time }
     ResourceModel:

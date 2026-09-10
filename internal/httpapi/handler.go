@@ -27,6 +27,7 @@ import (
 	contentservice "agentchunzhi/internal/content"
 	"agentchunzhi/internal/conversation"
 	"agentchunzhi/internal/delivery"
+	"agentchunzhi/internal/folder"
 	"agentchunzhi/internal/identity"
 	"agentchunzhi/internal/modelendpoint"
 	"agentchunzhi/internal/organization"
@@ -73,6 +74,8 @@ type Dependencies struct {
 	// Phase 2 tag domain services.
 	TagService   tag.Service
 	FacetService tag.FacetService
+	// 目录树（0026）：笔记目录与知识库分类共用的组织性容器服务。
+	FolderService folder.Service
 	// Phase 5 public-site management service (site CRUD, bindings, preview).
 	Sites *site.Service
 	// Phase 5 public-site read face (anonymous/optional-member visitors):
@@ -525,7 +528,7 @@ func finalizeDerivation(deps Dependencies) http.HandlerFunc {
 		result, err := deps.ConversationService.FinalizeDerivation(r.Context(), principal, idempotencyKey, r.PathValue("derivationId"), contentservice.FinalizeDerivationInput{
 			Disposition: input.Disposition, TargetAssetID: input.TargetAssetID,
 			ExpectedSourceAssetVersionID: input.ExpectedSourceAssetVersionID, ExpectedTargetAssetVersionID: input.ExpectedTargetAssetVersionID,
-			MergeMode: input.MergeMode,
+			MergeMode:   input.MergeMode,
 			AutoArchive: input.AutoArchive,
 		})
 		if errors.Is(err, contentservice.ErrInvalidInput) {
@@ -1534,7 +1537,7 @@ func streamAgentSession(deps Dependencies) http.HandlerFunc {
 		eventID++
 		if err := writeSSEWithID(w, flusher, eventID, "message.complete", map[string]any{
 			"message_id": streamMessageID, "conversation_id": final.ConversationID,
-			"grounded": final.Grounded,
+			"grounded":                 final.Grounded,
 			"rejected_reference_count": final.RejectedReferenceCount, "usage": final.Usage,
 		}); err != nil {
 			return
@@ -1705,6 +1708,10 @@ func writeAssetMutationError(w http.ResponseWriter, err error, fallback string) 
 		writeError(w, http.StatusNotFound, "asset_not_found")
 	case errors.Is(err, assetservice.ErrConflict), errors.Is(err, assetservice.ErrIdempotencyConflict):
 		writeError(w, http.StatusConflict, "asset_conflict")
+	case errors.Is(err, assetservice.ErrDraftRevisionMismatch):
+		writeError(w, http.StatusPreconditionFailed, "draft_revision_mismatch")
+	case errors.Is(err, assetservice.ErrAssetArchived):
+		writeError(w, http.StatusConflict, "asset_archived")
 	case errors.Is(err, assetservice.ErrInvalidInput):
 		writeError(w, http.StatusUnprocessableEntity, "invalid_asset_request")
 	default:

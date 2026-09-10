@@ -19,13 +19,13 @@ import (
 )
 
 var (
-	ErrNotFound      = errors.New("asset not found")
-	ErrConflict      = errors.New("asset state conflict")
-	ErrInvalidInput  = errors.New("invalid asset input")
-	ErrForbidden     = errors.New("asset action forbidden")
-	ErrAssetArchived      = errors.New("asset is archived")
+	ErrNotFound          = errors.New("asset not found")
+	ErrConflict          = errors.New("asset state conflict")
+	ErrInvalidInput      = errors.New("invalid asset input")
+	ErrForbidden         = errors.New("asset action forbidden")
+	ErrAssetArchived     = errors.New("asset is archived")
 	ErrNoteBlocksManaged = errors.New("note content is managed as blocks")
-	ErrDraftDirty    = errors.New("asset draft revision mismatch")
+	ErrDraftDirty        = errors.New("asset draft revision mismatch")
 )
 
 // LifecycleRow is the mutable asset state a transition needs.
@@ -240,12 +240,19 @@ func CancelPendingRequestsTx(ctx context.Context, tx pgx.Tx, events *eventing.Ev
 				return 0, fmt.Errorf("append auto-cancel event: %w", err)
 			}
 		}
+		var assetTitle string
+		_ = tx.QueryRow(ctx, `SELECT title FROM asset.assets WHERE organization_id = $1::uuid AND id = $2::uuid`, row.OrganizationID, item.assetID).Scan(&assetTitle)
+		if assetTitle == "" {
+			assetTitle = "未命名内容"
+		}
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO content.notifications (organization_id, workspace_id, recipient_user_id, kind, payload)
 			SELECT $1::uuid, $2::uuid, $3::uuid, 'publication.cancelled', $4::jsonb
 			WHERE $3::uuid IS DISTINCT FROM $5::uuid
 		`, row.OrganizationID, item.workspaceID, item.submittedBy, []byte(fmt.Sprintf(
-			`{"request_id":%q,"asset_id":%q,"status":"cancelled","reason":%q}`, item.id, item.assetID, item.cancelReason,
+			`{"request_id":%q,"asset_id":%q,"status":"cancelled","reason":%q,"title":"发布申请已取消","body":%q,"object_type":"publication_request","object_id":%q}`,
+			item.id, item.assetID, item.cancelReason,
+			fmt.Sprintf("《%s》的发布申请因内容更新或归档被自动取消。", assetTitle), item.id,
 		)), actor.UserID); err != nil {
 			return 0, fmt.Errorf("record auto-cancel notification: %w", err)
 		}

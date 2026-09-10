@@ -27,7 +27,12 @@ func listConversations(deps Dependencies) http.HandlerFunc {
 			}
 			limit = parsed
 		}
-		items, hasMore, nextCursor, err := deps.ConversationService.ListPage(r.Context(), principal, r.PathValue("workspaceId"), r.URL.Query().Get("q"), limit, r.URL.Query().Get("cursor"), r.URL.Query().Get("status"))
+		containerFilter := r.URL.Query().Get("container_id")
+		if containerFilter != "" && len(containerFilter) != 36 {
+			writeError(w, http.StatusUnprocessableEntity, "invalid_container_id")
+			return
+		}
+		items, hasMore, nextCursor, err := deps.ConversationService.ListPage(r.Context(), principal, r.PathValue("workspaceId"), r.URL.Query().Get("q"), limit, r.URL.Query().Get("cursor"), r.URL.Query().Get("status"), containerFilter)
 		if errors.Is(err, conversation.ErrForbidden) {
 			writeError(w, http.StatusForbidden, "workspace_access_denied")
 			return

@@ -27,6 +27,7 @@ import (
 	"agentchunzhi/internal/conversation"
 	"agentchunzhi/internal/delivery"
 	"agentchunzhi/internal/eventing"
+	"agentchunzhi/internal/folder"
 	"agentchunzhi/internal/httpapi"
 	"agentchunzhi/internal/identity"
 	"agentchunzhi/internal/modelendpoint"
@@ -37,8 +38,8 @@ import (
 	"agentchunzhi/internal/resourcemodel"
 	"agentchunzhi/internal/retrieval"
 	"agentchunzhi/internal/review"
-	"agentchunzhi/internal/store"
 	"agentchunzhi/internal/site"
+	"agentchunzhi/internal/store"
 	"agentchunzhi/internal/tag"
 	"agentchunzhi/internal/workspace"
 
@@ -73,9 +74,9 @@ func main() {
 		Cipher:  credentialCipher,
 		Secrets: agentruntime.EnvironmentSecretResolver{},
 		Factory: agentruntime.OpenAIModelFactory{
-			AllowedHosts: cfg.AgentModelAllowedHosts,
+			AllowedHosts:       cfg.AgentModelAllowedHosts,
 			AllowPrivateEgress: cfg.AgentModelAllowPrivateEgress,
-			Limiter:      agentruntime.NewModelRequestLimiter(cfg.AgentModelMaxConcurrentRequests),
+			Limiter:            agentruntime.NewModelRequestLimiter(cfg.AgentModelMaxConcurrentRequests),
 		},
 		MaxEntries: cfg.AgentModelMaxCacheEntries,
 	}
@@ -206,11 +207,12 @@ func main() {
 		MemberAssetService:   memberAssetService,
 		SuggestionReviews:    &assetservice.SuggestionReviewService{Store: db, Policy: authz.WorkspacePolicyService{Store: db}},
 		TransferService:      assetservice.TransferService{Store: db, Policy: authz.WorkspacePolicyService{Store: db}},
-		ReviewService:        review.Service{Store: db, Policy: authz.WorkspacePolicyService{Store: db}, Events: &events, Committer: memberAssetService},
+		ReviewService:        review.Service{Store: db, Policy: authz.WorkspacePolicyService{Store: db}, Events: &events, Committer: memberAssetService, Cipher: deliveryCipher, KeyVersion: deliveryKeyVersion, BaseURL: cfg.PublicAppBaseURL},
 		ConversationService:  conversation.Service{Store: db, Policy: authz.WorkspacePolicyService{Store: db}, Content: contentservice.Service{Store: db, Events: events}},
 		AutomationService:    automation.Service{Store: db, Policy: authz.WorkspacePolicyService{Store: db}},
 		OrganizationService:  organization.Service{Store: db, Events: &events},
 		TagService:           tag.Service{Store: db, Events: &events},
+		FolderService:        folder.Service{Store: db},
 		FacetService:         tag.FacetService{Store: db},
 		// Phase 5 public-site management: workspace policy gate plus site
 		// events/audit inside the same transaction as the business write.

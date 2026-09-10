@@ -52,6 +52,25 @@ func (r TextTemplateRenderer) Render(template, organizationName string, payload 
 			"Reset your password: " + link + "\n\n" +
 			"The link is valid for 30 minutes. If you did not request a reset, ignore this email.\n"
 		return Message{Subject: subject, Body: body}, nil
+	case TemplatePublicationDecision:
+		action := stringFrom(payload["action"])
+		title := stringFrom(payload["asset_title"])
+		if title == "" {
+			title = "your submission"
+		}
+		var subject, body string
+		if action == "approved" {
+			subject = "Your submission was approved"
+			body = "Hello,\n\n\"" + title + "\" has been approved and is now published."
+		} else {
+			subject = "Your submission needs changes"
+			body = "Hello,\n\n\"" + title + "\" was not approved this time."
+			if decisionComment := stringFrom(payload["decision_comment"]); decisionComment != "" {
+				body += "\n\nReviewer comment: " + decisionComment
+			}
+		}
+		body += "\n\nOpen your workspace knowledge base: " + link + "\n"
+		return Message{Subject: subject, Body: body}, nil
 	default:
 		return Message{}, fmt.Errorf("unsupported email template %q", template)
 	}

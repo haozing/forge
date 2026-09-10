@@ -7,6 +7,7 @@ package site
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"strings"
@@ -16,6 +17,8 @@ import (
 	"agentchunzhi/internal/authz"
 	"agentchunzhi/internal/eventing"
 	agentquery "agentchunzhi/internal/query"
+
+	"github.com/google/uuid"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -202,8 +205,11 @@ func (s Service) VisibleComments(ctx context.Context, organizationID, siteID, as
 	return items, rows.Err()
 }
 
-// ListComments pages the moderation queue (management face).
-func (s Service) ListComments(ctx context.Context, principal auth.Principal, workspaceID, siteID, status string) (CommentPage, error) {
+// ListComments pages the moderation queue (management face). The cursor is
+// the base64 `"<RFC3339Nano created_at>|<id>"` keyset of the last row of the
+// previous page; limit is clamped to 1..100 (previously a hard LIMIT 100
+// with no way to reach older rows).
+func (s Service) ListComments(ctx context.Context, principal auth.Principal, workspaceID, siteID, status, cursor string, limit int) (CommentPage, error) {
 	if err := s.require(ctx, principal, workspaceID, authz.ActionSiteRead); err != nil {
 		return CommentPage{}, err
 	}
@@ -213,12 +219,25 @@ func (s Service) ListComments(ctx context.Context, principal auth.Principal, wor
 	if status != "pending" && status != "visible" && status != "rejected" && status != "all" {
 		return CommentPage{}, ErrInvalidInput
 	}
+	if limit <= 0 || limit > 100 {
+		limit = 50
+	}
 	filter := ""
 	args := []any{principal.OrganizationID, workspaceID, siteID}
 	if status != "all" {
 		args = append(args, status)
 		filter = fmt.Sprintf(" AND c.status = $%d", len(args))
 	}
+	createdBefore, idBefore, err := decodeCommentCursor(cursor)
+	if err != nil {
+		return CommentPage{}, ErrInvalidInput
+	}
+	keyset := ""
+	if cursor != "" {
+		args = append(args, createdBefore, idBefore)
+		keyset = fmt.Sprintf(" AND (c.created_at, c.id) < ($%d::timestamptz, $%d::uuid)", len(args)-1, len(args))
+	}
+	args = append(args, limit+1)
 	rows, err := s.Store.Pool.Query(ctx, `
 		SELECT c.id::text, c.asset_id::text, c.display_path, u.display_name, c.body, c.status, c.created_at
 		FROM site.site_comments c
@@ -226,9 +245,9 @@ func (s Service) ListComments(ctx context.Context, principal auth.Principal, wor
 		WHERE c.organization_id = $1::uuid
 		  AND c.site_id = (SELECT id FROM site.public_sites
 		                   WHERE organization_id = $1::uuid AND workspace_id = $2::uuid AND id = $3::uuid)
-	`+filter+`
-		ORDER BY c.created_at DESC
-		LIMIT 100
+	`+filter+keyset+`
+		ORDER BY c.created_at DESC, c.id DESC
+		LIMIT $`+fmt.Sprint(len(args))+`
 	`, args...)
 	if err != nil {
 		return CommentPage{}, fmt.Errorf("list comments: %w", err)
@@ -243,7 +262,44 @@ func (s Service) ListComments(ctx context.Context, principal auth.Principal, wor
 		}
 		page.Items = append(page.Items, comment)
 	}
-	return page, rows.Err()
+	if err := rows.Err(); err != nil {
+		return CommentPage{}, err
+	}
+	if len(page.Items) > limit {
+		page.HasMore = true
+		page.Items = page.Items[:limit]
+		last := page.Items[len(page.Items)-1]
+		page.NextCursor = encodeCommentCursor(last.CreatedAt, last.ID)
+	}
+	return page, nil
+}
+
+// encodeCommentCursor packs the keyset of the last row into one opaque token.
+func encodeCommentCursor(createdAt time.Time, id string) string {
+	return base64.URLEncoding.EncodeToString([]byte(createdAt.Format(time.RFC3339Nano) + "|" + id))
+}
+
+func decodeCommentCursor(cursor string) (string, string, error) {
+	if cursor == "" {
+		return "", "", nil
+	}
+	raw, err := base64.URLEncoding.DecodeString(cursor)
+	if err != nil {
+		return "", "", ErrInvalidInput
+	}
+	parts := strings.SplitN(string(raw), "|", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", "", ErrInvalidInput
+	}
+	// Both halves are cast in SQL ($::timestamptz / $::uuid); malformed
+	// content must fail as input validation (422), not as a DB error (500).
+	if _, err := time.Parse(time.RFC3339Nano, parts[0]); err != nil {
+		return "", "", ErrInvalidInput
+	}
+	if _, err := uuid.Parse(parts[1]); err != nil {
+		return "", "", ErrInvalidInput
+	}
+	return parts[0], parts[1], nil
 }
 
 // ModerateComment sets the status (visible/rejected) behind site.manage.

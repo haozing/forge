@@ -69,6 +69,14 @@ func writePublicSiteError(w http.ResponseWriter, err error) {
 		// or configuration feedback (plan §4 / D5').
 		writeError(w, http.StatusNotFound, "site_not_found")
 		return
+	case errors.Is(err, site.ErrInvalidInput):
+		// Public comment writes (body empty/too long) and malformed inputs
+		// must answer 422, not collapse into the infrastructure 500.
+		writeError(w, http.StatusUnprocessableEntity, "validation_failed")
+		return
+	case errors.Is(err, site.ErrForbidden):
+		writeError(w, http.StatusForbidden, "action_not_allowed")
+		return
 	case errors.Is(err, site.ErrPublicThrottleUnavailable):
 		writeError(w, http.StatusServiceUnavailable, "database_unavailable")
 		return

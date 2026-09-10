@@ -69,7 +69,12 @@ func (p Processor) ProcessNext(ctx context.Context) error {
 			(organization_id, workspace_id, recipient_user_id, kind, payload)
 		VALUES ($1::uuid, $2::uuid, $3::uuid, 'system',
 		        jsonb_build_object('resource_type', $4::text, 'resource_id', $5::text,
-		                           'deletion_job_id', $6::text, 'status', 'completed'))
+		                           'deletion_job_id', $6::text, 'status', 'completed',
+		                           'title', '删除完成',
+		                           'body', CASE WHEN $4::text = 'workspace'
+		                                        THEN '知识库及其内容已彻底删除。'
+		                                        ELSE '内容已彻底删除。' END,
+		                           'object_type', 'deletion_job', 'object_id', $6::text))
 	`, organizationID, workspaceID, requestedBy, resourceType, resourceID, jobID); err != nil {
 		return fmt.Errorf("create deletion notification: %w", err)
 	}

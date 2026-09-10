@@ -100,6 +100,7 @@ type Summary struct {
 	HasNewChanges        bool      `json:"has_new_changes"`
 	ContainerID          string    `json:"container_id"`
 	NoteAssetID          string    `json:"note_asset_id"`
+	NoteFolderID         string    `json:"note_folder_id"`
 	NoteFirstLine        string    `json:"note_first_line"`
 	ParentConversationID string    `json:"parent_conversation_id"`
 	OriginDerivationID   string    `json:"origin_derivation_id"`
@@ -192,7 +193,7 @@ func (s Service) require(ctx context.Context, principal auth.Principal, workspac
 }
 
 func (s Service) List(ctx context.Context, principal auth.Principal, workspaceID, query string, limit int) ([]Summary, error) {
-	items, _, _, err := s.ListPage(ctx, principal, workspaceID, query, limit, "", "")
+	items, _, _, err := s.ListPage(ctx, principal, workspaceID, query, limit, "", "", "")
 	return items, err
 }
 
@@ -200,7 +201,7 @@ func (s Service) List(ctx context.Context, principal auth.Principal, workspaceID
 // (product: 灵感卡仅自己), each carrying the five-state badge, the note's
 // first line and a new-changes flag for cards under review. status filters
 // by badge (organizing/reviewing/rejected/published/pending_update).
-func (s Service) ListPage(ctx context.Context, principal auth.Principal, workspaceID, query string, limit int, cursor, status string) ([]Summary, bool, string, error) {
+func (s Service) ListPage(ctx context.Context, principal auth.Principal, workspaceID, query string, limit int, cursor, status, containerID string) ([]Summary, bool, string, error) {
 	if err := s.require(ctx, principal, workspaceID); err != nil {
 		return nil, false, "", err
 	}
@@ -223,11 +224,18 @@ func (s Service) ListPage(ctx context.Context, principal auth.Principal, workspa
 		       (note.pending_review AND (note.working_version IS DISTINCT FROM note.submitted_version OR note.dirty)),
 		       COALESCE(note.container_id, ''), COALESCE(note.note_asset_id, ''),
 		       COALESCE(c.parent_conversation_id::text, ''), COALESCE(c.origin_derivation_id::text, ''),
-		       COALESCE(last_message.content, ''), COALESCE(message_counts.message_count, 0), c.updated_at
+		       COALESCE(last_message.content, ''), COALESCE(message_counts.message_count, 0), c.updated_at,
+		       COALESCE(note_folder.container_id::text, '')
 		FROM content.conversations c
 		`+noteStatusLateral+`
 		LEFT JOIN LATERAL (SELECT br.content FROM content.message_blocks mb JOIN content.block_revisions br ON br.id = mb.block_revision_id WHERE mb.conversation_id = c.id ORDER BY mb.sequence_no DESC LIMIT 1) last_message ON true
 		LEFT JOIN LATERAL (SELECT count(*) AS message_count FROM content.message_blocks mb WHERE mb.conversation_id = c.id) message_counts ON true
+		LEFT JOIN content.note_bindings list_nb ON list_nb.conversation_id = c.id
+		LEFT JOIN LATERAL (SELECT ca.container_id::text AS container_id
+		                   FROM content.container_assets ca
+		                   JOIN content.containers fc ON fc.id = ca.container_id AND fc.kind = 'note_folder' AND fc.status = 'active'
+		                   WHERE ca.organization_id = list_nb.organization_id AND ca.asset_id = list_nb.note_asset_id
+		                   ORDER BY ca.container_id LIMIT 1) note_folder ON true
 		WHERE c.organization_id = $1::uuid AND c.workspace_id = $2::uuid AND c.status <> 'archived'
 		  AND c.initiator_user_id = $3::uuid
 		  AND EXISTS (SELECT 1 FROM content.workspace_members wm
@@ -236,8 +244,11 @@ func (s Service) ListPage(ctx context.Context, principal auth.Principal, workspa
 		  AND ($4 = '' OR `+cardStatus+` = $4)
 		  AND ($5 = '' OR c.title ILIKE '%' || $5 || '%' OR last_message.content ILIKE '%' || $5 || '%' OR note.note_first_line ILIKE '%' || $5 || '%')
 		  AND ($6 = '' OR c.updated_at < NULLIF($6, '')::timestamptz OR (c.updated_at = NULLIF($6, '')::timestamptz AND c.id > NULLIF($7, '')::uuid))
-		ORDER BY c.updated_at DESC, c.id LIMIT $8
-	`, principal.OrganizationID, workspaceID, principal.UserID, status, query, cursorTime, cursorID, limit+1)
+		  AND ($8 = '' OR EXISTS (SELECT 1 FROM content.note_bindings fb
+		              JOIN content.container_assets fc ON fc.asset_id = fb.note_asset_id
+		              WHERE fb.conversation_id = c.id AND fc.container_id = $8::uuid))
+		ORDER BY c.updated_at DESC, c.id LIMIT $9
+	`, principal.OrganizationID, workspaceID, principal.UserID, status, query, cursorTime, cursorID, containerID, limit+1)
 	if err != nil {
 		return nil, false, "", fmt.Errorf("list conversations: %w", err)
 	}
@@ -249,7 +260,7 @@ func (s Service) ListPage(ctx context.Context, principal auth.Principal, workspa
 			&item.CardStatus, &item.CardStatusDetail, &item.NoteFirstLine, &item.HasNewChanges,
 			&item.ContainerID, &item.NoteAssetID,
 			&item.ParentConversationID, &item.OriginDerivationID,
-			&item.LastMessagePreview, &item.MessageCount, &item.UpdatedAt); err != nil {
+			&item.LastMessagePreview, &item.MessageCount, &item.UpdatedAt, &item.NoteFolderID); err != nil {
 			return nil, false, "", fmt.Errorf("scan conversation summary: %w", err)
 		}
 		items = append(items, item)

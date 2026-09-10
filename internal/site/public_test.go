@@ -214,14 +214,14 @@ func TestETagMatches(t *testing.T) {
 		header string
 		want   bool
 	}{
-		{"", false},                 // absent header never matches (no 304)
-		{`"abc123"`, true},          // exact quoted validator
-		{"abc123", true},            // unquoted tolerated
-		{`W/"abc123"`, true},        // weak comparison
-		{`"xyz", "abc123"`, true},   // validator list
-		{"*", true},                 // wildcard
-		{`"abc124"`, false},         // different representation
-		{`W/"abc124"`, false},       // different, weak
+		{"", false},               // absent header never matches (no 304)
+		{`"abc123"`, true},        // exact quoted validator
+		{"abc123", true},          // unquoted tolerated
+		{`W/"abc123"`, true},      // weak comparison
+		{`"xyz", "abc123"`, true}, // validator list
+		{"*", true},               // wildcard
+		{`"abc124"`, false},       // different representation
+		{`W/"abc124"`, false},     // different, weak
 	}
 	for _, tc := range cases {
 		if got := ETagMatches(tc.header, etag); got != tc.want {

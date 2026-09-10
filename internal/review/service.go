@@ -18,8 +18,10 @@ import (
 	"agentchunzhi/internal/auth"
 	"agentchunzhi/internal/authz"
 	"agentchunzhi/internal/eventing"
+	"agentchunzhi/internal/notification"
 	"agentchunzhi/internal/store"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -43,6 +45,12 @@ type Service struct {
 	Policy    authz.WorkspacePolicy
 	Events    *eventing.EventStore
 	Committer VersionCommitter
+	// Email decision notifications ride the same encrypted-delivery queue as
+	// invitations; composition root provides cipher/key/base URL. All three
+	// are optional — unset means decisions stay on in-app notifications only.
+	Cipher     *notification.Cipher
+	KeyVersion int32
+	BaseURL    string
 }
 
 type Request struct {
@@ -287,9 +295,13 @@ func (s Service) Submit(ctx context.Context, principal auth.Principal, workspace
 		  AND wm.role IN ('reviewer', 'admin')
 		  AND wm.user_id <> $4::uuid
 	`, principal.OrganizationID, assetWorkspace, mustJSON(map[string]any{
-		"request_id": request.ID,
-		"asset_id":   request.AssetID,
-		"status":     request.Status,
+		"request_id":  request.ID,
+		"asset_id":    request.AssetID,
+		"status":      request.Status,
+		"title":       "有新内容待审核",
+		"body":        fmt.Sprintf("《%s》提交了发布申请，等待审核。", assetTitleTx(ctx, tx, principal.OrganizationID, request.AssetID)),
+		"object_type": "publication_request",
+		"object_id":   request.ID,
 	}), principal.UserID); err != nil {
 		return Request{}, fmt.Errorf("record reviewer notification: %w", err)
 	}
@@ -386,20 +398,95 @@ func (s Service) appendEventTx(ctx context.Context, tx pgx.Tx, principal auth.Pr
 	// Notify the submitter (and approver for decisions) through the
 	// notification table; consumers keep delivery idempotent by request id.
 	kind := "publication." + strings.TrimPrefix(eventType, "publication_request.")
+	decisionTitle, decisionBody := "处理进度通知", "你的发布申请有新的状态更新。"
+	switch kind {
+	case "publication.approved":
+		decisionTitle, decisionBody = "审核通过", fmt.Sprintf("《%s》已通过审核并发布。", assetTitleTx(ctx, tx, principal.OrganizationID, request.AssetID))
+	case "publication.rejected":
+		decisionTitle, decisionBody = "审核驳回", fmt.Sprintf("《%s》未通过审核，请查看驳回意见。", assetTitleTx(ctx, tx, principal.OrganizationID, request.AssetID))
+	case "publication.cancelled":
+		decisionTitle, decisionBody = "发布申请已取消", fmt.Sprintf("《%s》的发布申请已取消。", assetTitleTx(ctx, tx, principal.OrganizationID, request.AssetID))
+	}
 	_, err = tx.Exec(ctx, `
 		INSERT INTO content.notifications (organization_id, workspace_id, recipient_user_id, kind, payload)
 		SELECT organization_id, workspace_id, submitted_by, $3, $4::jsonb
 		FROM asset.publication_requests WHERE id = $1::uuid AND organization_id = $2::uuid
 		  AND submitted_by <> NULLIF($5,'')::uuid
 	`, request.ID, principal.OrganizationID, kind, mustJSON(map[string]any{
-		"request_id": request.ID,
-		"asset_id":   request.AssetID,
-		"status":     request.Status,
+		"request_id":  request.ID,
+		"asset_id":    request.AssetID,
+		"status":      request.Status,
+		"title":       decisionTitle,
+		"body":        decisionBody,
+		"object_type": "publication_request",
+		"object_id":   request.ID,
 	}), principal.UserID)
 	if err != nil {
 		return fmt.Errorf("record publication notification: %w", err)
 	}
 	_ = extra
+	return nil
+}
+
+// assetTitleTx resolves the display title for notification copy. A missing
+// or blank title degrades to a neutral placeholder instead of failing the
+// surrounding transaction.
+func assetTitleTx(ctx context.Context, tx pgx.Tx, organizationID, assetID string) string {
+	var title string
+	_ = tx.QueryRow(ctx, `SELECT title FROM asset.assets WHERE organization_id = $1::uuid AND id = $2::uuid`, organizationID, assetID).Scan(&title)
+	if strings.TrimSpace(title) == "" {
+		return "未命名内容"
+	}
+	return title
+}
+
+// enqueueDecisionEmailTx mails the submitter about approve/reject through
+// the encrypted delivery queue (N8). Best-effort by configuration: without
+// cipher/base URL wiring the decision stands on in-app notifications alone;
+// with it, an enqueue failure fails the transaction like every other write.
+func (s Service) enqueueDecisionEmailTx(ctx context.Context, tx pgx.Tx, principal auth.Principal, request Request, nextStatus, comment string) error {
+	if s.Cipher == nil || s.BaseURL == "" {
+		return nil
+	}
+	if nextStatus != RequestApproved && nextStatus != RequestRejected {
+		return nil
+	}
+	if request.SubmittedBy == "" || request.SubmittedBy == principal.UserID {
+		return nil
+	}
+	var email string
+	err := tx.QueryRow(ctx, `SELECT email FROM identity.users WHERE id = $1::uuid`, request.SubmittedBy).Scan(&email)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("resolve submitter email: %w", err)
+	}
+	action := "approved"
+	if nextStatus == RequestRejected {
+		action = "rejected"
+	}
+	link, err := notification.JoinBaseURL(s.BaseURL, "/workspaces/"+request.WorkspaceID+"/knowledge")
+	if err != nil {
+		return fmt.Errorf("resolve decision email link: %w", err)
+	}
+	payload, err := json.Marshal(map[string]any{
+		"action":           action,
+		"asset_title":      assetTitleTx(ctx, tx, principal.OrganizationID, request.AssetID),
+		"decision_comment": comment,
+		"link":             link,
+	})
+	if err != nil {
+		return fmt.Errorf("encode decision email payload: %w", err)
+	}
+	deliveryID := uuid.NewString()
+	_, ciphertext, err := s.Cipher.Encrypt(deliveryID, notification.TemplatePublicationDecision, payload)
+	if err != nil {
+		return fmt.Errorf("seal decision email: %w", err)
+	}
+	if _, err := notification.Enqueue(ctx, tx, deliveryID, principal.OrganizationID, notification.TemplatePublicationDecision, email, s.KeyVersion, ciphertext); err != nil {
+		return fmt.Errorf("enqueue decision email: %w", err)
+	}
 	return nil
 }
 
@@ -659,6 +746,12 @@ func (s Service) decide(ctx context.Context, principal auth.Principal, workspace
 		}
 	}
 	if err := s.appendEventTx(ctx, tx, principal, request, publicationEventFor(nextStatus, ""), nil); err != nil {
+		return Request{}, err
+	}
+	// Decision email rides the same transaction (N8); placement after the
+	// in-app notification keeps a mail enqueue failure from flipping the
+	// decision outcome silently — the whole decision rolls back instead.
+	if err := s.enqueueDecisionEmailTx(ctx, tx, principal, request, nextStatus, comment); err != nil {
 		return Request{}, err
 	}
 	decisionMetadata := map[string]any{
@@ -955,8 +1048,8 @@ func (s Service) ListComments(ctx context.Context, principal auth.Principal, wor
 // implementation, no copies.
 type dueScheduledRow struct {
 	id, organizationID, workspaceID, assetID, versionID, submittedBy string
-	scheduledAt time.Time
-	revision    int64
+	scheduledAt                                                      time.Time
+	revision                                                         int64
 }
 
 func (s Service) executeApprovedTx(ctx context.Context, tx pgx.Tx, principal auth.Principal, assetID, versionID string) (map[string]any, error) {
@@ -1230,8 +1323,13 @@ func (s Service) failScheduled(ctx context.Context, actor auth.Principal, item d
 		INSERT INTO content.notifications (organization_id, workspace_id, recipient_user_id, kind, payload)
 		VALUES ($1::uuid, $2::uuid, $3::uuid, 'publication.scheduled_failed', $4::jsonb)
 	`, item.organizationID, item.workspaceID, item.submittedBy, mustJSON(map[string]any{
-		"request_id": item.id, "asset_id": item.assetID,
+		"request_id":   item.id,
+		"asset_id":     item.assetID,
 		"scheduled_at": item.scheduledAt.UTC().Format(time.RFC3339),
+		"title":        "定时发布失败",
+		"body":         fmt.Sprintf("原定 %s 的定时发布未能执行，请重新发布。", item.scheduledAt.UTC().Format(time.RFC3339)),
+		"object_type":  "publication_request",
+		"object_id":    item.id,
 	})); err != nil {
 		return err
 	}
@@ -1240,4 +1338,3 @@ func (s Service) failScheduled(ctx context.Context, actor auth.Principal, item d
 	}), item.workspaceID)
 	return tx.Commit(ctx)
 }
-		

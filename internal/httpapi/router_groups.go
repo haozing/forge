@@ -24,6 +24,7 @@ func newRouter(deps Dependencies) *http.ServeMux {
 	registerQueryRoutes(deps, mux)
 	registerAttachmentRoutes(deps, mux)
 	registerConversationRoutes(deps, mux)
+	registerFolderRoutes(deps, mux)
 	registerAgentRoutes(deps, mux)
 	registerAutomationRoutes(deps, mux)
 	registerTransferRoutes(deps, mux)
@@ -185,6 +186,7 @@ func registerWorkspaceRoutes(deps Dependencies, mux *http.ServeMux) {
 		PatchWorkspace(deps)(w, r)
 	})
 	mux.HandleFunc("/api/workspaces/{workspaceId}/summary", GetWorkspaceSummary(deps))
+	mux.HandleFunc("/api/workspaces/{workspaceId}/audit", WorkspaceActivity(deps))
 	mux.HandleFunc("/api/workspaces/{workspaceId}/members", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
 			ListWorkspaceMembers(deps)(w, r)
@@ -277,6 +279,7 @@ func registerSiteRoutes(deps Dependencies, mux *http.ServeMux) {
 	mux.HandleFunc("/api/workspaces/{workspaceId}/sites/{siteId}", SiteResource(deps))
 	mux.HandleFunc("/api/workspaces/{workspaceId}/sites/{siteId}/bindings", SiteBindingsCollection(deps))
 	mux.HandleFunc("/api/workspaces/{workspaceId}/sites/{siteId}/bindings/{bindingId}", SiteBindingResource(deps))
+	mux.HandleFunc("/api/workspaces/{workspaceId}/sites/{siteId}/summary", SiteSummary(deps))
 	mux.HandleFunc("/api/workspaces/{workspaceId}/sites/{siteId}/preview", SitePreview(deps))
 	mux.HandleFunc("/api/workspaces/{workspaceId}/sites/{siteId}/releases", SiteReleases(deps))
 	mux.HandleFunc("/api/workspaces/{workspaceId}/sites/{siteId}/comments", SiteComments(deps))
@@ -312,6 +315,15 @@ func registerAttachmentRoutes(deps Dependencies, mux *http.ServeMux) {
 // transcription. The note's live block tree IS the draft; "saving" is the
 // asset commit-draft freeze, and publishing rides the shared governance chain
 // (commit-draft → confirm → publish / publication-requests).
+// registerFolderRoutes — 笔记/知识库目录树（0026 起的组织性容器）。
+func registerFolderRoutes(deps Dependencies, mux *http.ServeMux) {
+	mux.HandleFunc("/api/workspaces/{workspaceId}/note-containers", NoteFolderCollection(deps))
+	mux.HandleFunc("/api/workspaces/{workspaceId}/note-containers/{containerId}", NoteFolderResource(deps))
+	mux.HandleFunc("/api/workspaces/{workspaceId}/doc-containers", DocFolderCollection(deps))
+	mux.HandleFunc("/api/workspaces/{workspaceId}/doc-containers/{containerId}", DocFolderResource(deps))
+	mux.HandleFunc("/api/conversations/{conversationId}/note-container", noteContainerResource(deps))
+}
+
 func registerConversationRoutes(deps Dependencies, mux *http.ServeMux) {
 	mux.HandleFunc("/api/workspaces/{workspaceId}/conversations", conversationsCollection(deps))
 	mux.HandleFunc("/api/conversations/{conversationId}", conversationResource(deps))
@@ -380,6 +392,7 @@ func registerTransferRoutes(deps Dependencies, mux *http.ServeMux) {
 // registerNotificationRoutes holds the member notification surface: list,
 // unread count, read markers and the SSE stream.
 func registerNotificationRoutes(deps Dependencies, mux *http.ServeMux) {
+	mux.HandleFunc("/api/notifications", listAllNotifications(deps))
 	mux.HandleFunc("/api/workspaces/{workspaceId}/notifications", listNotifications(deps))
 	mux.HandleFunc("/api/workspaces/{workspaceId}/notifications/unread-count", unreadNotificationCount(deps))
 	mux.HandleFunc("/api/notifications/{notificationId}/read", markNotificationRead(deps))

@@ -8,6 +8,7 @@ package httpapi
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
 )
 
 // OrganizationStylePresets serves GET/POST /api/organization/style-presets.
@@ -131,12 +132,17 @@ func SiteComments(deps Dependencies) http.HandlerFunc {
 		if !requirePathUUID(w, workspaceID, siteID) {
 			return
 		}
-		page, err := deps.Sites.ListComments(r.Context(), principal, workspaceID, siteID, r.URL.Query().Get("status"))
+		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+		page, err := deps.Sites.ListComments(r.Context(), principal, workspaceID, siteID,
+			r.URL.Query().Get("status"), r.URL.Query().Get("cursor"), limit)
 		if err != nil {
 			SiteError(w, err, "slug_conflict")
 			return
 		}
-		writeData(w, r, http.StatusOK, map[string]any{"items": page.Items})
+		writeData(w, r, http.StatusOK, map[string]any{
+			"items": page.Items,
+			"page":  map[string]any{"next_cursor": page.NextCursor, "has_more": page.HasMore},
+		})
 	}
 }
 
@@ -185,5 +191,34 @@ func SiteCommentResource(deps Dependencies) http.HandlerFunc {
 		default:
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
 		}
+	}
+}
+
+// SiteSummary serves GET /api/workspaces/{workspaceId}/sites/{siteId}/summary:
+// the site-level counter block (bindings, pending comments) behind site.read.
+func SiteSummary(deps Dependencies) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
+			return
+		}
+		principal, ok := sessionPrincipal(w, r, deps)
+		if !ok {
+			return
+		}
+		if !requireSiteService(w, deps) {
+			return
+		}
+		workspaceID := r.PathValue("workspaceId")
+		siteID := r.PathValue("siteId")
+		if !requirePathUUID(w, workspaceID, siteID) {
+			return
+		}
+		summary, err := deps.Sites.Summary(r.Context(), principal, workspaceID, siteID)
+		if err != nil {
+			SiteError(w, err, "slug_conflict")
+			return
+		}
+		writeData(w, r, http.StatusOK, summary)
 	}
 }

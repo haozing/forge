@@ -54,10 +54,10 @@ type Site struct {
 	CommentsMode string `json:"comments_mode"`
 	// PublishedReleaseID points at the live immutable config snapshot; NULL
 	// means the public render falls back to the working columns above.
-	PublishedReleaseID *string         `json:"published_release_id"`
-	Revision           int64           `json:"revision"`
-	CreatedAt          time.Time       `json:"created_at"`
-	UpdatedAt          time.Time       `json:"updated_at"`
+	PublishedReleaseID *string   `json:"published_release_id"`
+	Revision           int64     `json:"revision"`
+	CreatedAt          time.Time `json:"created_at"`
+	UpdatedAt          time.Time `json:"updated_at"`
 	// ETag is the representation version (the revision); handlers emit it for
 	// the If-Match contract.
 	ETag string `json:"etag"`

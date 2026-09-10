@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strings"
 
 	"agentchunzhi/internal/auth"
@@ -23,6 +24,11 @@ type PreviewInput struct {
 	CustomCss   string          `json:"custom_css"`
 	Page        string          `json:"page"`
 	DisplayPath string          `json:"display_path"`
+	// BaseURL optionally rewrites the rendered site's root-relative links
+	// (href/src/action starting with "/") to this origin, so the management
+	// UI can show the preview inside a cross-origin iframe with working
+	// media and script references. Must be an absolute http(s) origin.
+	BaseURL string `json:"base_url"`
 }
 
 // RenderPreview renders one candidate page. The site service call enforces
@@ -65,11 +71,25 @@ func (s *Service) RenderPreview(ctx context.Context, principal auth.Principal, w
 		CustomCss:        customCss,
 		Template:         row.Template,
 	}
+	// The base URL must validate before any rendering happens; the closure
+	// below rewrites root-relative references so cross-origin iframe
+	// previews resolve media and script references.
+	baseURL := ""
+	if raw := strings.TrimSpace(input.BaseURL); raw != "" {
+		parsed, err := url.Parse(raw)
+		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+			return nil, fmt.Errorf("%w: base_url must be an absolute http(s) origin", site.ErrInvalidInput)
+		}
+		baseURL = parsed.Scheme + "://" + parsed.Host
+	}
 	// Previews bypass the page cache by construction (no pipeline).
 	render := func(kind string, vm any) (*Response, error) {
 		body, err := s.Render.RenderPage(kind, vm)
 		if err != nil {
 			return nil, err
+		}
+		if baseURL != "" {
+			body = []byte(absolutizePreviewBody(string(body), baseURL))
 		}
 		return &Response{Body: body, ContentType: contentHTML, CacheControl: noStorePolicy, NoIndex: true, Status: 200}, nil
 	}
@@ -128,3 +148,13 @@ func (s *Service) RenderPreview(ctx context.Context, principal auth.Principal, w
 // previewAddr is the synthetic client address of preview reads (the preview
 // is member-gated; the shared anonymous budget is not consumed).
 const previewAddr = "preview"
+
+// absolutizePreviewBody rewrites root-relative href/src/action references to
+// the given origin. Only the preview face uses this; the live face renders on
+// its own origin and never rewrites.
+func absolutizePreviewBody(body, baseURL string) string {
+	body = strings.ReplaceAll(body, `href="/`, `href="`+baseURL+`/`)
+	body = strings.ReplaceAll(body, `src="/`, `src="`+baseURL+`/`)
+	body = strings.ReplaceAll(body, `action="/`, `action="`+baseURL+`/`)
+	return body
+}

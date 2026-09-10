@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"agentchunzhi/internal/auth"
 )
 
 // Simple in-process token bucket rate limiting for the two highest-abuse
@@ -29,6 +31,7 @@ const (
 	defaultLoginRatePerMinute     = 10
 	defaultLoginBackstopPerMinute = 90
 	defaultOpenRatePerMinute      = 60
+	defaultMemberRatePerMinute    = 240
 
 	bucketIdleTTL = 30 * time.Minute
 	sweepInterval = 5 * time.Minute
@@ -125,6 +128,7 @@ func rateLimitMiddleware(next http.Handler) http.Handler {
 	loginLimit := envRateLimit("RATE_LIMIT_LOGIN_PER_MIN", defaultLoginRatePerMinute)
 	loginBackstopLimit := envRateLimit("RATE_LIMIT_LOGIN_IP_PER_MIN", defaultLoginBackstopPerMinute)
 	openLimit := envRateLimit("RATE_LIMIT_OPEN_PER_MIN", defaultOpenRatePerMinute)
+	memberLimit := envRateLimit("RATE_LIMIT_MEMBER_PER_MIN", defaultMemberRatePerMinute)
 	trustXFF := trustForwardedFor()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -154,6 +158,21 @@ func rateLimitMiddleware(next http.Handler) http.Handler {
 			}
 			if !sharedRateLimiter.allow(key, openLimit) {
 				w.Header().Set("Retry-After", "10")
+				writeError(w, http.StatusTooManyRequests, "rate_limited")
+				return
+			}
+		case strings.HasPrefix(r.URL.Path, "/api/") && !strings.HasPrefix(r.URL.Path, "/api/public/"):
+			// Member face fair use: bucket by session digest (identity-level
+			// fairness without touching the session store), falling back to
+			// the caller address for unauthenticated /api traffic. The public
+			// face (/api/public/*) keeps its own anonymous budget and stays
+			// exempt here.
+			key := "member:" + socketAddr(r, trustXFF)
+			if cookie, err := r.Cookie(auth.SessionCookieConfig.Name); err == nil && cookie.Value != "" {
+				key = stableClientKey("member-session:" + cookie.Value)
+			}
+			if !sharedRateLimiter.allow(key, memberLimit) {
+				w.Header().Set("Retry-After", "30")
 				writeError(w, http.StatusTooManyRequests, "rate_limited")
 				return
 			}

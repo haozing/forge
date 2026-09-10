@@ -22,6 +22,7 @@ import (
 const (
 	TemplateOrganizationInvitation = "organization_invitation"
 	TemplatePasswordReset          = "password_reset"
+	TemplatePublicationDecision    = "publication_decision"
 )
 
 // Delivery statuses.
@@ -171,9 +172,9 @@ func ClassifyProviderError(err error) string {
 }
 
 var (
-	ErrProviderTimeout      = errors.New("email provider timeout")
-	ErrProviderRateLimited  = errors.New("email provider rate limited")
-	ErrProviderUnavailable  = errors.New("email provider unavailable")
+	ErrProviderTimeout     = errors.New("email provider timeout")
+	ErrProviderRateLimited = errors.New("email provider rate limited")
+	ErrProviderUnavailable = errors.New("email provider unavailable")
 )
 
 // RetryBackoff returns the exponential backoff for attempt n (1-based).

@@ -382,22 +382,22 @@ type PublicHomeView struct {
 // verbatim (sanitization is the React renderer's job), fields are projected
 // through the model schema whitelist.
 type PublicPostContent struct {
-	AssetID     string                  `json:"id"`
-	DisplayPath string                  `json:"display_path"`
-	Section     string                  `json:"section"`
-	Title       string                  `json:"title"`
-	Summary     string                  `json:"summary"`
-	Markdown    string                  `json:"markdown"`
+	AssetID     string                     `json:"id"`
+	DisplayPath string                     `json:"display_path"`
+	Section     string                     `json:"section"`
+	Title       string                     `json:"title"`
+	Summary     string                     `json:"summary"`
+	Markdown    string                     `json:"markdown"`
 	Fields      map[string]json.RawMessage `json:"fields"`
-	Tags        []agentquery.TagSummary `json:"tags"`
-	ContentKind string                  `json:"content_kind"`
-	UpdatedAt   *time.Time              `json:"updated_at"`
-	PublishedAt *time.Time              `json:"published_at"`
+	Tags        []agentquery.TagSummary    `json:"tags"`
+	ContentKind string                     `json:"content_kind"`
+	UpdatedAt   *time.Time                 `json:"updated_at"`
+	PublishedAt *time.Time                 `json:"published_at"`
 	// CoverAttachmentID is the published version's cover image (二期 §6).
-	CoverAttachmentID string              `json:"cover_attachment_id"`
+	CoverAttachmentID string `json:"cover_attachment_id"`
 	// CoverAlt is the cover's alt text frozen with the version (G6).
-	CoverAlt          string              `json:"cover_alt"`
-	ETag              string              `json:"-"`
+	CoverAlt string `json:"cover_alt"`
+	ETag     string `json:"-"`
 }
 
 // ---------------------------------------------------------------------------
@@ -522,17 +522,17 @@ func (r *PublicReader) Tags(ctx context.Context, visitorAddr string, principal a
 // postRow is the detail read model: the binding, the live published version
 // main data and the asset/model facts the projection needs.
 type postRow struct {
-	Binding          Binding
-	AssetRevision    int64
-	AssetUpdatedAt   time.Time
-	AssetPublishedAt *time.Time
-	ContentKind      string
-	VersionID        string
-	Title            string
-	Summary          string
-	Markdown         string
-	Fields           []byte
-	FieldSchema      []byte
+	Binding           Binding
+	AssetRevision     int64
+	AssetUpdatedAt    time.Time
+	AssetPublishedAt  *time.Time
+	ContentKind       string
+	VersionID         string
+	Title             string
+	Summary           string
+	Markdown          string
+	Fields            []byte
+	FieldSchema       []byte
 	CoverAttachmentID string
 	// CoverAlt is the cover's alt text frozen with the published version
 	// (G6); empty falls back to the title at render time.
@@ -582,20 +582,20 @@ func (r *PublicReader) Post(ctx context.Context, visitorAddr string, principal a
 	}
 	publishedAt := ResolveDisplayPublishedAt(row.Binding.DisplayPublishedAt, row.AssetPublishedAt)
 	return PublicPostContent{
-		AssetID:     row.Binding.AssetID,
-		DisplayPath: row.Binding.DisplayPath,
-		Section:     row.Binding.SectionSlug,
-		Title:       row.Title,
-		Summary:     row.Summary,
-		Markdown:    row.Markdown,
-		Fields:      ProjectFields(fields, ParseFieldSchema(row.FieldSchema)),
-		Tags:        summary,
-		ContentKind: row.ContentKind,
-		UpdatedAt:   timePtr(row.AssetUpdatedAt),
-		PublishedAt: publishedAt,
+		AssetID:           row.Binding.AssetID,
+		DisplayPath:       row.Binding.DisplayPath,
+		Section:           row.Binding.SectionSlug,
+		Title:             row.Title,
+		Summary:           row.Summary,
+		Markdown:          row.Markdown,
+		Fields:            ProjectFields(fields, ParseFieldSchema(row.FieldSchema)),
+		Tags:              summary,
+		ContentKind:       row.ContentKind,
+		UpdatedAt:         timePtr(row.AssetUpdatedAt),
+		PublishedAt:       publishedAt,
 		CoverAttachmentID: row.CoverAttachmentID,
 		CoverAlt:          row.CoverAlt,
-		ETag:        DetailETag(item.Revision, row.AssetRevision, row.VersionID, row.Binding.UpdatedAt),
+		ETag:              DetailETag(item.Revision, row.AssetRevision, row.VersionID, row.Binding.UpdatedAt),
 	}, nil
 }
 
@@ -1031,14 +1031,14 @@ func (r *PublicReader) projectBoundRows(ctx context.Context, item Site, visitor 
 			summary = []agentquery.TagSummary{}
 		}
 		items = append(items, PublicPost{
-			AssetID:     row.Binding.AssetID,
-			DisplayPath: row.Binding.DisplayPath,
-			Title:       row.Title,
-			Summary:     SafeSummary(row.Summary, publicSummaryRunes),
-			ContentKind: row.ContentKind,
-			Tags:        summary,
-			UpdatedAt:   timePtr(row.AssetUpdatedAt),
-			PublishedAt: ResolveDisplayPublishedAt(row.Binding.DisplayPublishedAt, row.AssetPublishedAt),
+			AssetID:           row.Binding.AssetID,
+			DisplayPath:       row.Binding.DisplayPath,
+			Title:             row.Title,
+			Summary:           SafeSummary(row.Summary, publicSummaryRunes),
+			ContentKind:       row.ContentKind,
+			Tags:              summary,
+			UpdatedAt:         timePtr(row.AssetUpdatedAt),
+			PublishedAt:       ResolveDisplayPublishedAt(row.Binding.DisplayPublishedAt, row.AssetPublishedAt),
 			CoverAttachmentID: row.CoverAttachmentID,
 		})
 	}
@@ -1272,7 +1272,7 @@ func stripMarkdown(value string) string {
 			builder.WriteByte(' ')
 		}
 		trimmed := strings.TrimSpace(line)
-		trimmed = strings.TrimLeft(trimmed, "#>")    // headings and quotes
+		trimmed = strings.TrimLeft(trimmed, "#>")                     // headings and quotes
 		trimmed = strings.TrimLeft(strings.TrimSpace(trimmed), "-*+") // list markers
 		builder.WriteString(stripInlineMarkdown(strings.TrimSpace(trimmed)))
 	}

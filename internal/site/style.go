@@ -25,8 +25,8 @@ var (
 	styleShadows      = map[string]bool{"flat": true, "subtle": true, "lifted": true}
 	// 二期 §3: masonry (CSS columns) and carousel (scroll-snap track) join
 	// the layout catalog.
-	styleHomeStyles = map[string]bool{"hero": true, "plain": true, "grid": true, "carousel": true}
-	styleListStyles = map[string]bool{"list": true, "grid": true, "masonry": true, "timeline": true}
+	styleHomeStyles     = map[string]bool{"hero": true, "plain": true, "grid": true, "carousel": true}
+	styleListStyles     = map[string]bool{"list": true, "grid": true, "masonry": true, "timeline": true}
 	styleCardRatios     = map[string]bool{"16:9": true, "4:3": true, "1:1": true, "text": true}
 	styleSidebars       = map[string]bool{"none": true, "toc": true, "tags": true}
 	styleHomeComponents = map[string]bool{"featured": true, "latest": true, "tag_cloud": true}
@@ -34,11 +34,11 @@ var (
 
 // Style ranges (inclusive).
 const (
-	styleBodySizeMin, styleBodySizeMax       = 15, 19
-	styleReadingWidthMin, styleReadingWidthMax = 640, 860
+	styleBodySizeMin, styleBodySizeMax           = 15, 19
+	styleReadingWidthMin, styleReadingWidthMax   = 640, 860
 	styleSummaryLengthMin, styleSummaryLengthMax = 80, 320
 	stylePostsPerPageMin, stylePostsPerPageMax   = 6, 24
-	styleHomeComponentsMax                    = 3
+	styleHomeComponentsMax                       = 3
 )
 
 // stylePreset is the factory palette and layout default set of one preset.
@@ -315,8 +315,8 @@ func validateStyleDocument(document map[string]any) error {
 		}
 	}
 	for _, entry := range []struct {
-		key          string
-		min, max     float64
+		key      string
+		min, max float64
 	}{
 		{"body_size", styleBodySizeMin, styleBodySizeMax},
 		{"reading_width", styleReadingWidthMin, styleReadingWidthMax},
