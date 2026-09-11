@@ -351,15 +351,22 @@ func confirmAssetVersion(ctx context.Context, deps Deps, principal auth.Principa
 }
 
 // workingVersionID resolves the asset's current working version for confirm.
+// Direct store read: MemberService.Get runs the workspace policy that bars
+// agent principals, while confirm itself authorizes by version ownership.
 func workingVersionID(ctx context.Context, deps Deps, principal auth.Principal, assetID string) (string, error) {
-	memberAsset, err := deps.MemberAssetService.Get(ctx, principal, assetID)
+	var versionID string
+	err := deps.AssetService.Store.Pool.QueryRow(ctx, `
+		SELECT a.current_working_version_id::text
+		FROM asset.assets a
+		WHERE a.organization_id = $1::uuid AND a.id = $2::uuid AND a.deleted_at IS NULL
+	`, principal.OrganizationID, assetID).Scan(&versionID)
 	if err != nil {
 		return "", fmt.Errorf("解析当前工作版本失败: %w", err)
 	}
-	if memberAsset.CurrentWorkingVersionID == "" {
+	if versionID == "" {
 		return "", fmt.Errorf("资产 %s 没有当前工作版本", assetID)
 	}
-	return memberAsset.CurrentWorkingVersionID, nil
+	return versionID, nil
 }
 
 func publishAsset(ctx context.Context, deps Deps, principal auth.Principal, args publishAssetArgs) (*mcp.CallToolResult, any, error) {
