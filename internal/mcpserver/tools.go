@@ -197,23 +197,51 @@ func getAsset(ctx context.Context, deps Deps, principal auth.Principal, args get
 }
 
 func listTables(ctx context.Context, deps Deps, principal auth.Principal, _ listTablesArgs) (*mcp.CallToolResult, any, error) {
-	models, err := deps.ResourceModelService.List(ctx, principal, "")
+	tables, err := listTablesForAgent(ctx, deps, principal)
 	if err != nil {
 		return toolError(err)
 	}
-	type table struct {
-		ID       string `json:"id"`
-		ModelKey string `json:"model_key"`
-		Name     string `json:"name"`
-	}
-	tables := make([]table, 0, len(models))
-	var lines strings.Builder
-	for _, model := range models {
-		tables = append(tables, table{ID: model.ID, ModelKey: model.ModelKey, Name: model.Name})
-		fmt.Fprintf(&lines, "- %s（model_id=%s, key=%s）\n", model.Name, model.ID, model.ModelKey)
-	}
-	summary := fmt.Sprintf("共 %d 张表。\n%s", len(tables), lines.String())
+	summary := fmt.Sprintf("共 %d 张表。\n%s", len(tables), renderTables(tables))
 	return textResult(summary, map[string]any{"tables": tables})
+}
+
+type agentTable struct {
+	ID       string `json:"id"`
+	ModelKey string `json:"model_key"`
+	Name     string `json:"name"`
+}
+
+func renderTables(tables []agentTable) string {
+	var lines strings.Builder
+	for _, t := range tables {
+		fmt.Fprintf(&lines, "- %s（model_id=%s, key=%s）\n", t.Name, t.ID, t.ModelKey)
+	}
+	return lines.String()
+}
+
+// listTablesForAgent reads active models straight from the store:
+// resourcemodel.Service.List is member-gated (workspace policy), while
+// agents legitimately need the model catalog for create/insert tools.
+func listTablesForAgent(ctx context.Context, deps Deps, principal auth.Principal) ([]agentTable, error) {
+	rows, err := deps.AssetService.Store.Pool.Query(ctx, `
+		SELECT rm.id::text, rm.model_key, rm.name
+		FROM model.resource_models rm
+		WHERE rm.organization_id = $1::uuid AND rm.status = 'active'
+		ORDER BY rm.name, rm.id
+	`, principal.OrganizationID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	tables := []agentTable{}
+	for rows.Next() {
+		var t agentTable
+		if err := rows.Scan(&t.ID, &t.ModelKey, &t.Name); err != nil {
+			return nil, err
+		}
+		tables = append(tables, t)
+	}
+	return tables, rows.Err()
 }
 
 func createDocument(ctx context.Context, deps Deps, principal auth.Principal, args createDocumentArgs) (*mcp.CallToolResult, any, error) {
