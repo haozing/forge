@@ -22,6 +22,7 @@ h2 { font-size: 1.35em; }
 .site-header { border-bottom: 1px solid var(--c-border); background: var(--c-surface); }
 .header-inner { display: flex; align-items: center; gap: calc(var(--space) * 2); padding-top: var(--space); padding-bottom: var(--space); flex-wrap: wrap; }
 .site-name { font-family: var(--font-heading); font-weight: 700; font-size: 1.2em; color: var(--c-text); }
+.site-logo { height: 34px; width: auto; display: block; }
 .site-nav { display: flex; gap: calc(var(--space) * 1.5); flex-wrap: wrap; }
 .site-nav a { color: var(--c-muted); }
 .site-nav a:hover { color: var(--c-primary); text-decoration: none; }
@@ -165,3 +166,13 @@ h2 { font-size: 1.35em; }
 .article-fields dt{font-weight:600;color:var(--muted,#555)}
 .article-fields dd{margin:0;overflow-wrap:anywhere}
 .card-fields{margin:.25rem 0 0;font-size:.85rem;color:var(--muted,#555)}
+
+.post-neighbors { display: flex; justify-content: space-between; gap: 16px; margin: 32px 0; }
+.post-neighbors .neighbor { flex: 1; max-width: 48%; border: 1px solid var(--c-border, #e2e8f0); border-radius: 8px; padding: 10px 12px; text-decoration: none; color: inherit; }
+.post-neighbors .neighbor:hover { border-color: var(--c-primary, #4f46e5); }
+.post-neighbors .neighbor-label { display: block; font-size: 12px; color: #8a94a6; }
+.post-neighbors .neighbor-title { font-weight: 600; font-size: 14px; }
+.attachments { margin-top: 24px; }
+.attachments ul { list-style: none; margin: 0; padding: 0; }
+.attachments li { padding: 6px 0; border-bottom: 1px dashed #e2e8f0; }
+.attachments .att-meta { margin-left: 8px; font-size: 12px; color: #8a94a6; }

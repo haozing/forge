@@ -6195,6 +6195,9 @@ components:
         navigation_config: { type: object }
         style_config: { type: object }
         model_views: { type: object, description: '按资源模型的字段展示白名单：model_id → card_fields / detail_fields；空 = 不公开任何结构化字段' }
+        logo_attachment_id: { type: string, format: uuid, nullable: true, description: '站点 Logo 图片附件（image/*）' }
+        favicon_attachment_id: { type: string, format: uuid, nullable: true, description: '站点 Favicon 图片附件' }
+        social_image_attachment_id: { type: string, format: uuid, nullable: true, description: '社交分享图附件（og:image）' }
         custom_css: { type: string }
         comments_mode: { type: string, enum: [off, moderated, open] }
         published_release_id: { type: string, format: uuid, nullable: true }

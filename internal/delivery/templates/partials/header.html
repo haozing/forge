@@ -1,6 +1,6 @@
 {{define "header"}}<header class="site-header">
   <div class="container header-inner">
-    <a class="site-name" href="{{.Site.HomeHref}}">{{.Site.Name}}</a>
+    <a class="site-name" href="{{.Site.HomeHref}}">{{if .Site.LogoURL}}<img class="site-logo" src="{{.Site.LogoURL}}" alt="{{.Site.Name}}">{{else}}{{.Site.Name}}{{end}}</a>
     <nav class="site-nav">
       {{range .Site.Nav}}<a href="{{.Href}}">{{.Label}}</a>{{end}}
     </nav>

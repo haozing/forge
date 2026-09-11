@@ -52,6 +52,11 @@ type Site struct {
 	CustomCss string `json:"custom_css"`
 	// CommentsMode gates the comment section (二期 §8).
 	CommentsMode string `json:"comments_mode"`
+	// 品牌媒体（CMS §10.7）：站点 Logo、Favicon 与社交分享图，引用
+	// asset.attachments（image/*，交付面媒体路由校验后对外服务）。
+	LogoAttachmentID       string `json:"logo_attachment_id"`
+	FaviconAttachmentID    string `json:"favicon_attachment_id"`
+	SocialImageAttachmentID string `json:"social_image_attachment_id"`
 	// ModelViews is the per-model field display whitelist (CMS plan §7.2):
 	// which structured fields the site publishes on cards and detail pages.
 	// Empty/absent views publish zero fields (fail-closed).
@@ -95,6 +100,10 @@ type UpdateSiteInput struct {
 	CustomCss           *string
 	CommentsMode        *string
 	Status              *string
+	// 品牌媒体附件（image/*）：整体更新语义（nil = 不动；空串 = 清除）。
+	LogoAttachmentID        *string
+	FaviconAttachmentID     *string
+	SocialImageAttachmentID *string
 	// ModelViews replaces the whole per-model field display whitelist when
 	// non-nil (whole-document semantics, like homepage_config).
 	ModelViews *map[string]ModelView
@@ -150,7 +159,9 @@ func (s Service) require(ctx context.Context, principal auth.Principal, workspac
 const siteColumns = `id::text, organization_id::text, workspace_id::text, slug, name,
 	COALESCE(domain, ''), template, default_content_scope, status, revision,
 	homepage_config, navigation_config, style_config, custom_css, comments_mode,
-	model_views, published_release_id::text, created_at, updated_at`
+	model_views, published_release_id::text, created_at, updated_at,
+	COALESCE(logo_attachment_id::text, ''), COALESCE(favicon_attachment_id::text, ''),
+	COALESCE(social_image_attachment_id::text, '')`
 
 func scanSiteRow(row interface{ Scan(...any) error }) (Site, error) {
 	var item Site
@@ -158,7 +169,8 @@ func scanSiteRow(row interface{ Scan(...any) error }) (Site, error) {
 	err := row.Scan(&item.ID, &item.OrganizationID, &item.WorkspaceID, &item.Slug, &item.Name,
 		&item.Domain, &item.Template, &item.DefaultContentScope, &item.Status, &item.Revision,
 		&item.HomepageConfig, &item.NavigationConfig, &item.StyleConfig, &item.CustomCss,
-		&item.CommentsMode, &modelViews, &item.PublishedReleaseID, &item.CreatedAt, &item.UpdatedAt)
+		&item.CommentsMode, &modelViews, &item.PublishedReleaseID, &item.CreatedAt, &item.UpdatedAt,
+		&item.LogoAttachmentID, &item.FaviconAttachmentID, &item.SocialImageAttachmentID)
 	if err != nil {
 		return Site{}, err
 	}
@@ -499,6 +511,9 @@ func (s Service) UpdateSite(ctx context.Context, principal auth.Principal, works
 	if input.CommentsMode != nil && !ValidCommentsMode(*input.CommentsMode) {
 		return Site{}, ErrInvalidInput
 	}
+	if err := s.validateBrandingAttachments(ctx, principal.OrganizationID, input); err != nil {
+		return Site{}, err
+	}
 	if domain != "" && domain != current.Domain {
 		var exists bool
 		if err := tx.QueryRow(ctx, `
@@ -527,6 +542,46 @@ func (s Service) UpdateSite(ctx context.Context, principal auth.Principal, works
 		return Site{}, err
 	}
 	return item, nil
+}
+
+// validateBrandingAttachments checks the branding media pointers: every
+// non-empty id must reference an image/*, clean attachment of this
+// organization (same safety bar the delivery media route applies).
+func (s Service) validateBrandingAttachments(ctx context.Context, organizationID string, input UpdateSiteInput) error {
+	for _, entry := range []struct {
+		name string
+		id   *string
+	}{
+		{"logo_attachment_id", input.LogoAttachmentID},
+		{"favicon_attachment_id", input.FaviconAttachmentID},
+		{"social_image_attachment_id", input.SocialImageAttachmentID},
+	} {
+		if entry.id == nil {
+			continue
+		}
+		id := strings.TrimSpace(*entry.id)
+		if id == "" {
+			continue // 空串 = 清除
+		}
+		if !validID(id) {
+			return fmt.Errorf("%w: %s 不是合法的附件 UUID", ErrInvalidInput, entry.name)
+		}
+		var ok bool
+		if err := s.Store.Pool.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM asset.attachments
+				WHERE organization_id = $1::uuid AND id = $2::uuid
+				  AND deleted_at IS NULL AND status = 'clean'
+				  AND media_type LIKE 'image/%'
+			)
+		`, organizationID, id).Scan(&ok); err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("%w: %s 必须是本组织已上传的图片附件", ErrInvalidInput, entry.name)
+		}
+	}
+	return nil
 }
 
 // applySiteUpdate renders the dynamic SET clause from the non-nil pointers
@@ -564,6 +619,15 @@ func applySiteUpdate(ctx context.Context, tx pgx.Tx, principal auth.Principal, w
 	}
 	if input.CommentsMode != nil {
 		sets = append(sets, "comments_mode = "+arg(*input.CommentsMode))
+	}
+	if input.LogoAttachmentID != nil {
+		sets = append(sets, "logo_attachment_id = NULLIF("+arg(strings.TrimSpace(*input.LogoAttachmentID))+", '')::uuid")
+	}
+	if input.FaviconAttachmentID != nil {
+		sets = append(sets, "favicon_attachment_id = NULLIF("+arg(strings.TrimSpace(*input.FaviconAttachmentID))+", '')::uuid")
+	}
+	if input.SocialImageAttachmentID != nil {
+		sets = append(sets, "social_image_attachment_id = NULLIF("+arg(strings.TrimSpace(*input.SocialImageAttachmentID))+", '')::uuid")
 	}
 	if input.Status != nil {
 		sets = append(sets, "status = "+arg(*input.Status))

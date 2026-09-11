@@ -30,12 +30,16 @@ type Chrome struct {
 	Name        string
 	Template    string
 	ScopePublic bool
-	Nav         []NavItem
-	HomeHref    string
-	PostsHref   string
-	TagsHref    string
-	SearchHref  string
-	RSSHref     string
+	// 品牌媒体：站点 Logo、Favicon 与社交分享图的公开媒体地址（空 = 未配置）。
+	LogoURL        string
+	FaviconURL     string
+	SocialImageURL string
+	Nav            []NavItem
+	HomeHref       string
+	PostsHref      string
+	TagsHref       string
+	SearchHref     string
+	RSSHref        string
 	// Style carries the resolved style document.
 	Style site.StyleConfig
 	// StyleCSSVars is the generated CSS custom-properties block plus the
@@ -165,6 +169,11 @@ type DetailVM struct {
 	// Comments (二期 §8): enabled by the site mode, listed newest-last,
 	// writable by members (the form posts through the JS-free fallback: the
 	// console owns the rich UX; the page renders the plain form).
+	// 附件下载列表：已发布版本上的文件附件（非内嵌图片）。
+	Attachments []AttachmentVM
+	// 同站点内按发布顺序的上一篇/下一篇。
+	Prev            *NeighborLink
+	Next            *NeighborLink
 	CommentsEnabled bool
 	Comments        []CommentVM
 	CanComment      bool
@@ -495,4 +504,16 @@ func formatFieldValue(field site.PublicFieldValue) string {
 	default: // integer / number / date / datetime travel as bare JSON scalars
 		return string(field.Value)
 	}
+}
+
+type AttachmentVM struct {
+	Name      string
+	URL       string
+	MediaType string
+	ByteSize  int64
+}
+
+type NeighborLink struct {
+	Title string
+	Href  string
 }

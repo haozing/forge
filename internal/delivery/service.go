@@ -135,11 +135,24 @@ func sanitizedCustomCSS(raw string) string {
 // cascade so it overrides the base stylesheet (二期 §4.4).
 func chrome(facts site.SiteFacts, style site.StyleConfig, pageKind string) Chrome {
 	slug := facts.Site.Slug
+	logoURL, faviconURL, socialURL := "", "", ""
+	if facts.Site.LogoAttachmentID != "" {
+		logoURL = "/sites/" + slug + "/media/" + facts.Site.LogoAttachmentID
+	}
+	if facts.Site.FaviconAttachmentID != "" {
+		faviconURL = "/sites/" + slug + "/media/" + facts.Site.FaviconAttachmentID
+	}
+	if facts.Site.SocialImageAttachmentID != "" {
+		socialURL = "/sites/" + slug + "/media/" + facts.Site.SocialImageAttachmentID
+	}
 	return Chrome{
 		Slug:          slug,
 		Name:          facts.Site.Name,
 		Template:      facts.Template,
 		ScopePublic:   facts.Site.DefaultContentScope == site.ScopePublic,
+		LogoURL:       logoURL,
+		FaviconURL:    faviconURL,
+		SocialImageURL: socialURL,
 		Nav:           parseNavigation(facts.NavigationConfig, slug),
 		HomeHref:      "/sites/" + slug + "/",
 		PostsHref:     "/sites/" + slug + "/posts/",
@@ -428,6 +441,11 @@ func (s *Service) Post(ctx context.Context, addr string, principal auth.Principa
 			sectionURL = baseURL + "/sites/" + slug + "/sections/" + content.Section + "/"
 		}
 		vm.JSONLD = articleJSONLD(facts, content, vm.Canonical, baseURL+"/sites/"+slug, sectionURL, vm.CanonicalImage)
+		// 附件下载列表与上/下篇导航（产品文档 §11.2）。
+		if attachments, err := s.postAttachments(ctx, facts, content.AssetID); err == nil && len(attachments) > 0 {
+			vm.Attachments = attachments
+		}
+		vm.Prev, vm.Next = s.postNeighbors(ctx, facts, content.AssetID)
 		s.attachDetailComments(ctx, &vm, facts, band, slug)
 		s.attachDetailRelated(ctx, addr, principal, slug, content, &vm)
 		return renderOutput{kind: "detail", vm: vm, noIndex: vm.NoIndex}, nil

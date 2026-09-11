@@ -7,6 +7,7 @@ package delivery
 import (
 	"context"
 	"errors"
+	"time"
 
 	"agentchunzhi/internal/auth"
 	agentquery "agentchunzhi/internal/query"
@@ -111,10 +112,11 @@ func groupArchive(slug string, items []site.PublicPost, summaryRunes int) []Arch
 
 // MediaObject is one authorized public cover image.
 type MediaObject struct {
-	ObjectKey string
-	MediaType string
-	ByteSize  int64
-	ETag      string
+	ObjectKey        string
+	MediaType        string
+	ByteSize         int64
+	ETag             string
+	OriginalFilename string
 }
 
 // authorizedBodyImages resolves which frozen image references of one page
@@ -180,9 +182,37 @@ func (s *Service) Media(ctx context.Context, addr string, principal auth.Princip
 	}
 	var media MediaObject
 	var assetID, versionID string
+
+	// 站点品牌媒体（Logo/Favicon/分享图）直接挂在 site 行上，不走资产
+	// 绑定链；站点是公开读的，品牌图对访客可见即站点的公开配置。
+	brandErr := s.Store.Pool.QueryRow(ctx, `
+		SELECT media.object_key, media.media_type, media.byte_size,
+		       COALESCE(media.sha256::text, ''), ''::text, ''::text
+		FROM asset.attachments media
+		JOIN site.public_sites site_row
+		  ON site_row.organization_id = media.organization_id
+		 AND (site_row.logo_attachment_id = media.id
+		   OR site_row.favicon_attachment_id = media.id
+		   OR site_row.social_image_attachment_id = media.id)
+		WHERE media.organization_id = $1::uuid
+		  AND media.id = $2::uuid
+		  AND media.deleted_at IS NULL
+		  AND media.status = 'clean'
+		  AND media.media_type LIKE 'image/%'
+		  AND site_row.id = $3::uuid
+		  AND site_row.status = 'active'
+		LIMIT 1
+	`, facts.Site.OrganizationID, attachmentID, facts.Site.ID).Scan(
+		&media.ObjectKey, &media.MediaType, &media.ByteSize, &media.ETag,
+		&assetID, &versionID)
+	if brandErr == nil {
+		return media, nil
+	}
+
 	err = s.Store.Pool.QueryRow(ctx, `
 		SELECT media.object_key, media.media_type, media.byte_size,
-		       COALESCE(media.sha256::text, ''), a.id::text, v.id::text
+		       COALESCE(media.sha256::text, ''), COALESCE(media.original_filename, ''),
+		       a.id::text, v.id::text
 		FROM asset.attachments media
 		JOIN asset.asset_version_attachments cav
 		  ON cav.organization_id = media.organization_id AND cav.attachment_id = media.id
@@ -198,12 +228,11 @@ func (s *Service) Media(ctx context.Context, addr string, principal auth.Princip
 		  AND media.id = $2::uuid
 		  AND media.deleted_at IS NULL
 		  AND media.status = 'clean'
-		  AND media.media_type LIKE 'image/%'
 		  AND b.site_id = $3::uuid
 		LIMIT 1
 	`, facts.Site.OrganizationID, attachmentID, facts.Site.ID).Scan(
 		&media.ObjectKey, &media.MediaType, &media.ByteSize, &media.ETag,
-		&assetID, &versionID)
+		&media.OriginalFilename, &assetID, &versionID)
 	if err != nil {
 		return MediaObject{}, errMediaNotFound
 	}
@@ -257,4 +286,92 @@ func (s *Service) attachDetailComments(ctx context.Context, vm *DetailVM, facts 
 			Created: comment.CreatedAt.UTC().Format("2006-01-02"),
 		})
 	}
+}
+
+// postAttachments lists the downloadable file attachments (non-inline
+// images) materialized on the asset's current published version, bound to
+// this site. Same publish+binding+clean contract the media route enforces.
+func (s *Service) postAttachments(ctx context.Context, facts site.SiteFacts, assetID string) ([]AttachmentVM, error) {
+	rows, err := s.Store.Pool.Query(ctx, `
+		SELECT media.original_filename, media.id::text, media.media_type, media.byte_size
+		FROM asset.asset_version_attachments cav
+		JOIN asset.attachments media
+		  ON media.organization_id = cav.organization_id AND media.id = cav.attachment_id
+		JOIN asset.asset_versions v
+		  ON v.organization_id = cav.organization_id AND v.id = cav.asset_version_id
+		JOIN asset.assets a
+		  ON a.organization_id = v.organization_id AND a.id = v.asset_id
+		 AND a.current_published_version_id = v.id
+		JOIN site.site_content_bindings b
+		  ON b.organization_id = a.organization_id AND b.asset_id = a.id
+		WHERE cav.organization_id = $1::uuid
+		  AND v.asset_id = $2::uuid
+		  AND b.site_id = $3::uuid
+		  AND media.deleted_at IS NULL AND media.status = 'clean'
+		  AND media.media_type NOT LIKE 'image/%'
+		GROUP BY media.id, media.original_filename, media.media_type, media.byte_size
+		ORDER BY media.original_filename
+	`, facts.Site.OrganizationID, assetID, facts.Site.ID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []AttachmentVM{}
+	for rows.Next() {
+		var att AttachmentVM
+		var name string
+		if err := rows.Scan(&name, &att.URL, &att.MediaType, &att.ByteSize); err != nil {
+			return nil, err
+		}
+		att.Name = name
+		att.URL = "/sites/" + facts.Site.Slug + "/media/" + att.URL
+		out = append(out, att)
+	}
+	return out, rows.Err()
+}
+
+// postNeighbors resolves the previous/next published posts of one site by
+// (published_at, id) around the current asset — for the detail page's
+// sequential reading navigation (product doc §11.2).
+func (s *Service) postNeighbors(ctx context.Context, facts site.SiteFacts, assetID string) (prev, next *NeighborLink) {
+	current := struct {
+		PublishedAt *time.Time
+		ID          string
+	}{}
+	err := s.Store.Pool.QueryRow(ctx, `
+		SELECT published_at, id::text FROM asset.assets
+		WHERE organization_id = $1::uuid AND id = $2::uuid AND deleted_at IS NULL
+	`, facts.Site.OrganizationID, assetID).Scan(&current.PublishedAt, &current.ID)
+	if err != nil || current.PublishedAt == nil {
+		return nil, nil
+	}
+	neighbor := func(direction string) *NeighborLink {
+		order := "DESC"
+		cmp := "<"
+		if direction == "next" {
+			order, cmp = "ASC", ">"
+		}
+		q := `
+			SELECT a.id::text, b.display_path, COALESCE(v.title, '')
+			FROM site.site_content_bindings b
+			JOIN asset.assets a
+			  ON a.organization_id = b.organization_id AND a.id = b.asset_id
+			 AND a.deleted_at IS NULL AND a.current_published_version_id IS NOT NULL
+			JOIN asset.asset_versions v
+			  ON v.organization_id = a.organization_id AND v.id = a.current_published_version_id
+			WHERE b.organization_id = $1::uuid AND b.site_id = $2::uuid
+			  AND a.id <> $3::uuid
+			  AND (v.published_at, a.id) ` + cmp + ` ((SELECT published_at FROM asset.assets WHERE id = $3::uuid), $3::uuid)
+			ORDER BY v.published_at ` + order + `, a.id ` + order + `
+			LIMIT 1
+		`
+		var id, path, title string
+		if err := s.Store.Pool.QueryRow(ctx, q,
+			facts.Site.OrganizationID, facts.Site.ID, assetID).Scan(&id, &path, &title); err != nil {
+			return nil
+		}
+		href := "/sites/" + facts.Site.Slug + "/posts/" + path
+		return &NeighborLink{Title: title, Href: href}
+	}
+	return neighbor("prev"), neighbor("next")
 }

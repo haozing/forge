@@ -10,6 +10,7 @@ import (
 	"errors"
 	"io"
 	"math"
+	"strings"
 	"net/http"
 	"strconv"
 
@@ -480,6 +481,9 @@ func deliverySiteMedia(deps Dependencies) http.HandlerFunc {
 		w.Header().Set("Content-Type", contentType)
 		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
+		if !strings.HasPrefix(contentType, "image/") {
+			w.Header().Set("Content-Disposition", "attachment; filename=\""+media.OriginalFilename+"\"")
+		}
 		// The original's length is known from the DB; a processed variant
 		// reports its own length from the object store response.
 		responseLength := media.ByteSize
