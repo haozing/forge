@@ -70,6 +70,7 @@ var AllActions = []string{
 var agentAllowedActions = map[string]bool{
 	ActionAssetRead:         true,
 	ActionAssetWrite:        true,
+	ActionAssetConfirm:      true,
 	ActionAssetPublish:      true,
 	ActionPublicationSubmit: true,
 	ActionQueryExecute:      true,
