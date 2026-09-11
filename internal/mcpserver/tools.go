@@ -20,7 +20,9 @@ import (
 // doing organization/workspace authorization — capabilities only gate which
 // tools are listed.
 func registerTools(server *mcp.Server, deps Deps, principal auth.Principal) {
-	if can(principal, "query.read") || can(principal, "reference.read") {
+	// OpenAPI 检索通道要求 query.execute（与 /api/open/query 一致）；
+	// query.read 仅放宽只读资产工具的可见性。
+	if can(principal, "query.execute") {
 		mcp.AddTool(server, &mcp.Tool{
 			Name:        "search_assets",
 			Description: "在资产中台检索知识资产（全文/语义/混合）。返回资产标题、摘要、可见性与相关度。写作或答问前先调用本工具检索已有知识。",

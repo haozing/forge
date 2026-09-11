@@ -48,15 +48,25 @@ func agentWith(capabilities ...string) auth.Principal {
 }
 
 func TestToolVisibilityFollowsCapabilities(t *testing.T) {
-	// query.read 是检索能力，读资产只读工具（get_asset/list_tables）随之可见。
-	readOnly := capabilitiesClient(t, buildServer(Deps{}, agentWith("query.read")))
-	wantRead := map[string]bool{"search_assets": true, "get_asset": true, "list_tables": true}
-	if len(readOnly) != len(wantRead) {
-		t.Errorf("query.read key should see exactly %v, got %v", wantRead, readOnly)
+	// 检索走 OpenAPI 通道，要求 query.execute；query.read 只放宽只读资产工具。
+	readonly := capabilitiesClient(t, buildServer(Deps{}, agentWith("query.read")))
+	wantRead := map[string]bool{"get_asset": true, "list_tables": true}
+	if len(readonly) != len(wantRead) {
+		t.Errorf("query.read key should see exactly %v, got %v", wantRead, readonly)
+	}
+	for _, name := range readonly {
+		if !wantRead[name] {
+			t.Errorf("query.read key sees unexpected tool %q", name)
+		}
+	}
+	readOnly := capabilitiesClient(t, buildServer(Deps{}, agentWith("query.read", "query.execute")))
+	wantSearch := map[string]bool{"search_assets": true, "get_asset": true, "list_tables": true}
+	if len(readOnly) != len(wantSearch) {
+		t.Errorf("query.read+execute key should see exactly %v, got %v", wantSearch, readOnly)
 	}
 	for _, name := range readOnly {
-		if !wantRead[name] {
-			t.Errorf("read-only key sees unexpected tool %q", name)
+		if !wantSearch[name] {
+			t.Errorf("search key sees unexpected tool %q", name)
 		}
 	}
 
@@ -91,7 +101,7 @@ func TestUnauthenticatedAndMemberPrincipalsSeeNoTools(t *testing.T) {
 
 func TestFullWriteKeySeesCompleteChain(t *testing.T) {
 	tools := capabilitiesClient(t, buildServer(Deps{}, agentWith(
-		"query.read", "asset.read", "asset.create", "asset.edit", "asset.publish", "asset.archive",
+		"query.read", "query.execute", "asset.read", "asset.create", "asset.edit", "asset.publish", "asset.archive",
 	)))
 	want := []string{
 		"search_assets", "get_asset", "list_tables",
