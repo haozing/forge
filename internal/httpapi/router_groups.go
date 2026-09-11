@@ -6,7 +6,11 @@ package httpapi
 // the operator surface under /api/admin. No /api/v2, /api/frontend or
 // /api/open/v1 prefixes exist anymore (dev-stage cleanup, no redirects).
 
-import "net/http"
+import (
+	"net/http"
+
+	"agentchunzhi/internal/mcpserver"
+)
 
 func newRouter(deps Dependencies) *http.ServeMux {
 	mux := http.NewServeMux()
@@ -31,6 +35,7 @@ func newRouter(deps Dependencies) *http.ServeMux {
 	registerNotificationRoutes(deps, mux)
 	registerModelRoutes(deps, mux)
 	registerOpenRoutes(deps, mux)
+	registerMCPRoute(deps, mux)
 	registerAdminRoutes(deps, mux)
 	return mux
 }
@@ -416,6 +421,55 @@ func registerModelRoutes(deps Dependencies, mux *http.ServeMux) {
 	mux.HandleFunc("/api/model-endpoints/{endpointId}/test", testModelEndpoint(deps))
 	mux.HandleFunc("/api/model-endpoints/{endpointId}/enable", setModelEndpointStatus(deps, "active"))
 	mux.HandleFunc("/api/model-endpoints/{endpointId}/disable", setModelEndpointStatus(deps, "disabled"))
+}
+
+// registerMCPRoute mounts the built-in MCP server under /mcp (Streamable
+// HTTP). Disabled via config: the route 404s like any unknown path.
+func registerMCPRoute(deps Dependencies, mux *http.ServeMux) {
+	if !deps.MCPEnabled {
+		return
+	}
+	handler := mcpserver.NewHandler(mcpserver.Deps{
+		Authenticator:        deps.Authenticator,
+		QueryService:         deps.QueryService,
+		AssetService:         deps.AssetService,
+		MemberAssetService:   deps.MemberAssetService,
+		ResourceModelService: deps.ResourceModelService,
+		ScopeResolver:        deps.ScopeResolver,
+	})
+	// 协议发现（静态声明，与 MCP 端点同生命周期）。
+	mux.HandleFunc("/.well-known/agents.json", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{
+  "name": "资产中台 (asset-hub)",
+  "mcp": {"transport": "streamable-http", "endpoint": "/mcp", "auth": {"type": "bearer", "header": "Authorization"}},
+  "docs": ["/llms.txt"],
+  "capabilities": ["search_assets", "get_asset", "list_tables", "create_document", "update_document", "confirm_asset_version", "publish_asset", "archive_asset", "insert_record"]
+}`))
+	})
+	mux.HandleFunc("/llms.txt", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`# 资产中台 (asset-hub)
+
+企业知识资产管理平台：知识库（文档/FAQ）、结构化数据表、公开站点发布。
+
+## Machine access
+- MCP server: POST /mcp (Streamable HTTP, JSON-RPC)
+- Auth: Authorization: Bearer <API key>（管理员在管理台为 agent 用户签发）
+- 能力按 key 的 capabilities 过滤：query.read / asset.read / asset.create / asset.edit / asset.publish / asset.archive
+
+## Tools
+- search_assets: 检索知识资产（fulltext/semantic/hybrid）
+- get_asset: 读取资产正文与结构化字段
+- list_tables: 列出数据表（资源模型）
+- create_document / update_document / confirm_asset_version / publish_asset / archive_asset: 文档写链（含治理闸门）
+- insert_record: 数据表写记录
+`))
+	})
+	mux.Handle("/mcp", handler)
+	mux.Handle("/mcp/", handler)
 }
 
 // registerOpenRoutes holds the technical OpenAPI surface for external agent

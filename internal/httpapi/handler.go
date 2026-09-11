@@ -94,6 +94,10 @@ type Dependencies struct {
 	// for rate-limit keys; AllowedOrigins drives the CSRF Origin policy.
 	TrustedProxyCIDRs []string
 	AllowedOrigins    []string
+	// MCP gate: Enabled toggles /mcp; WritePerMinute rate-limits mutating
+	// tools per API key (0 = default 30).
+	MCPEnabled     bool
+	MCPWritePerMin int
 	// Phase 3 retrieval readiness: SemanticAvailable mirrors the provider
 	// registry result and ManifestFingerprint is the embedding manifest
 	// fingerprint compared against worker heartbeats by /readyz.

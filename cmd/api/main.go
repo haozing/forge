@@ -251,6 +251,8 @@ func main() {
 		LoginThrottle:     loginThrottle,
 		TrustedProxyCIDRs: cfg.TrustedProxyCIDRs,
 		AllowedOrigins:    cfg.MemberAllowedOrigins,
+		MCPEnabled:        cfg.MCPEnabled,
+		MCPWritePerMin:    cfg.MCPWriteRPM,
 		// Phase 3 retrieval readiness inputs (/readyz wiring is completed by
 		// the query/httpapi work package).
 		SemanticAvailable:   semanticAvailable,

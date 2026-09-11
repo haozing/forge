@@ -80,6 +80,9 @@ type Config struct {
 	SMTPUsername                   string
 	SMTPPassword                   string
 	TrustedProxyCIDRs              []string
+	// MCP server (built-in, /mcp).
+	MCPEnabled  bool
+	MCPWriteRPM int
 }
 
 func Load() Config {
@@ -141,7 +144,9 @@ func Load() Config {
 		SMTPPort:                       strings.TrimSpace(envOrDefault("SMTP_PORT", "587")),
 		SMTPUsername:                   strings.TrimSpace(os.Getenv("SMTP_USERNAME")),
 		SMTPPassword:                   os.Getenv("SMTP_PASSWORD"),
-		TrustedProxyCIDRs:              envCSV("TRUSTED_PROXY_CIDRS"),
+		TrustedProxyCIDRs:              envCSV("TRUSTED_PROXY_CIDRs"),
+		MCPEnabled:                     os.Getenv("MCP_ENABLED") != "false",
+		MCPWriteRPM:                    int(envInt64OrDefault("MCP_WRITE_RPM", 30)),
 	}
 }
 

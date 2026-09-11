@@ -11,12 +11,13 @@ require (
 	github.com/gorilla/css v1.0.1
 	github.com/jackc/pgx/v5 v5.7.2
 	github.com/microcosm-cc/bluemonday v1.0.27
+	github.com/modelcontextprotocol/go-sdk v1.7.0
 	github.com/riverqueue/river v0.18.0
 	github.com/riverqueue/river/riverdriver/riverpgxv5 v0.18.0
 	github.com/riverqueue/river/rivertype v0.18.0
 	github.com/yuin/goldmark v1.7.8
 	golang.org/x/crypto v0.31.0
-	golang.org/x/sync v0.11.0
+	golang.org/x/sync v0.20.0
 	golang.org/x/text v0.22.0
 	gopkg.in/yaml.v3 v3.0.1
 )
@@ -33,6 +34,7 @@ require (
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/evanphx/json-patch v0.5.2 // indirect
+	github.com/google/jsonschema-go v0.4.3 // indirect
 	github.com/goph/emperror v0.17.2 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
@@ -49,6 +51,8 @@ require (
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/riverqueue/river/riverdriver v0.18.0 // indirect
 	github.com/riverqueue/river/rivershared v0.18.0 // indirect
+	github.com/segmentio/asm v1.1.3 // indirect
+	github.com/segmentio/encoding v0.5.4 // indirect
 	github.com/sirupsen/logrus v1.9.3 // indirect
 	github.com/slongfield/pyfmt v0.0.0-20220222012616-ea85ff4c361f // indirect
 	github.com/stretchr/testify v1.11.1 // indirect
@@ -59,10 +63,12 @@ require (
 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
 	github.com/wk8/go-ordered-map/v2 v2.1.8 // indirect
 	github.com/yargevad/filepathx v1.0.0 // indirect
+	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
 	go.uber.org/goleak v1.3.0 // indirect
 	golang.org/x/arch v0.11.0 // indirect
 	golang.org/x/exp v0.0.0-20230713183714-613f0c0eb8a1 // indirect
 	golang.org/x/net v0.26.0 // indirect
-	golang.org/x/sys v0.29.0 // indirect
-	golang.org/x/time v0.4.0 // indirect
+	golang.org/x/oauth2 v0.35.0 // indirect
+	golang.org/x/sys v0.41.0 // indirect
+	golang.org/x/time v0.15.0 // indirect
 )
