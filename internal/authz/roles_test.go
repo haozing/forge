@@ -87,14 +87,16 @@ func TestEditorCanCancelOnlyThroughOwnScopeConstant(t *testing.T) {
 }
 
 func TestAgentActionGate(t *testing.T) {
-	for _, action := range []string{ActionAssetRead, ActionAssetWrite, ActionAssetPublish, ActionPublicationSubmit, ActionQueryExecute, ActionProcessingRun} {
+	// asset.confirm：MCP/agent 入库链的人工确认闸门（key capabilities +
+	// 模型级 agent_access_policies 仍双重约束谁可调用）。
+	for _, action := range []string{ActionAssetRead, ActionAssetWrite, ActionAssetConfirm, ActionAssetPublish, ActionPublicationSubmit, ActionQueryExecute, ActionProcessingRun} {
 		if !AgentActionAllowed(action) {
 			t.Fatalf("agent policy must allow %s", action)
 		}
 	}
 	for _, action := range AllActions {
 		switch action {
-		case ActionAssetRead, ActionAssetWrite, ActionAssetPublish, ActionPublicationSubmit, ActionQueryExecute, ActionProcessingRun:
+		case ActionAssetRead, ActionAssetWrite, ActionAssetConfirm, ActionAssetPublish, ActionPublicationSubmit, ActionQueryExecute, ActionProcessingRun:
 		default:
 			if AgentActionAllowed(action) {
 				t.Fatalf("agent policy must never grant %s", action)
