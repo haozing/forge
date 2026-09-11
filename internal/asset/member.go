@@ -135,7 +135,27 @@ type MemberAsset struct {
 }
 
 func (s MemberService) require(ctx context.Context, principal auth.Principal, workspaceID, modelID, action string) (authz.Scope, error) {
-	if principal.UserType != auth.UserTypeMember || s.Store == nil || s.Store.Pool == nil {
+	if s.Store == nil || s.Store.Pool == nil {
+		return authz.Scope{}, ErrForbidden
+	}
+	// Agent principals (open-face API keys) authorize through the same
+	// WorkspacePolicy the agent_access_policies rows back — the asset.confirm
+	// grant rides the key capabilities + the model-level policy. Member-only
+	// session semantics stay reserved for UserType=member.
+	if principal.UserType == auth.UserTypeAgent {
+		if principal.OrganizationID == "" || principal.UserID == "" {
+			return authz.Scope{}, ErrForbidden
+		}
+		if !principal.HasCapability(action) {
+			return authz.Scope{}, ErrForbidden
+		}
+		scope, err := s.Policy.Require(ctx, principal, workspaceID, modelID, action)
+		if errors.Is(err, authz.ErrWorkspaceForbidden) || errors.Is(err, authz.ErrWorkspaceNotFound) {
+			return authz.Scope{}, ErrForbidden
+		}
+		return scope, err
+	}
+	if principal.UserType != auth.UserTypeMember {
 		return authz.Scope{}, ErrForbidden
 	}
 	if s.Policy == nil {
@@ -594,7 +614,7 @@ func (s MemberService) Create(ctx context.Context, principal auth.Principal, wor
 	material := VersionMaterial{
 		OrganizationID:         principal.OrganizationID,
 		WorkspaceID:            workspaceID,
-		AssetID:               assetID,
+		AssetID:                assetID,
 		ResourceModelID:        input.ResourceModelID,
 		ResourceModelVersionID: resourceModelVersionID,
 		Origin:                 OriginHuman,
