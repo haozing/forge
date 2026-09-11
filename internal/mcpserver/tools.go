@@ -69,7 +69,7 @@ func registerTools(server *mcp.Server, deps Deps, principal auth.Principal) {
 	if can(principal, "asset.publish") {
 		mcp.AddTool(server, &mcp.Tool{
 			Name:        "confirm_asset_version",
-			Description: "人工确认资产的当前工作版本（入库治理链第一步；direct 发布策略要求先确认）。",
+			Description: "人工确认资产的当前工作版本（入库治理链第一步；direct 发布策略要求先确认）。version_id 缺省时自动解析当前工作版本。",
 		}, func(ctx context.Context, req *mcp.CallToolRequest, args confirmAssetArgs) (*mcp.CallToolResult, any, error) {
 			return confirmAssetVersion(ctx, deps, principal, args)
 		})
@@ -128,7 +128,8 @@ type updateDocumentArgs struct {
 }
 
 type confirmAssetArgs struct {
-	AssetID string `json:"asset_id" jsonschema:"资产 UUID"`
+	AssetID   string `json:"asset_id" jsonschema:"资产 UUID"`
+	VersionID string `json:"version_id,omitempty" jsonschema:"工作版本 UUID（可选；缺省自动解析当前工作版本）"`
 }
 
 type publishAssetArgs struct {
@@ -333,12 +334,32 @@ func updateDocument(ctx context.Context, deps Deps, principal auth.Principal, ar
 }
 
 func confirmAssetVersion(ctx context.Context, deps Deps, principal auth.Principal, args confirmAssetArgs) (*mcp.CallToolResult, any, error) {
-	version, err := deps.MemberAssetService.ConfirmVersion(ctx, principal, workingVersionOf(args.AssetID), newIdempotencyKey())
+	versionID := strings.TrimSpace(args.VersionID)
+	if versionID == "" {
+		var err error
+		versionID, err = workingVersionID(ctx, deps, principal, args.AssetID)
+		if err != nil {
+			return toolError(err)
+		}
+	}
+	version, err := deps.MemberAssetService.ConfirmVersion(ctx, principal, versionID, newIdempotencyKey())
 	if err != nil {
 		return toolError(err)
 	}
-	summary := fmt.Sprintf("版本已人工确认：version_id=%s。下一步 publish_asset。", version.ID)
+	summary := fmt.Sprintf("版本已人工确认：version_id=%s。下一步 publish_asset（base_version_id 用它）。", version.ID)
 	return textResult(summary, version)
+}
+
+// workingVersionID resolves the asset's current working version for confirm.
+func workingVersionID(ctx context.Context, deps Deps, principal auth.Principal, assetID string) (string, error) {
+	memberAsset, err := deps.MemberAssetService.Get(ctx, principal, assetID)
+	if err != nil {
+		return "", fmt.Errorf("解析当前工作版本失败: %w", err)
+	}
+	if memberAsset.CurrentWorkingVersionID == "" {
+		return "", fmt.Errorf("资产 %s 没有当前工作版本", assetID)
+	}
+	return memberAsset.CurrentWorkingVersionID, nil
 }
 
 func publishAsset(ctx context.Context, deps Deps, principal auth.Principal, args publishAssetArgs) (*mcp.CallToolResult, any, error) {
@@ -385,12 +406,6 @@ func builtinDocumentModelID(ctx context.Context, deps Deps, principal auth.Princ
 		}
 	}
 	return ""
-}
-
-// workingVersionOf reads the asset's current working version id — confirm
-// operates on the working copy, so agents do not have to thread it through.
-func workingVersionOf(assetID string) string {
-	return assetID
 }
 
 func newIdempotencyKey() string {
