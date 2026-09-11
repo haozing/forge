@@ -11,6 +11,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"agentchunzhi/internal/auth"
+	"agentchunzhi/internal/authz"
 )
 
 func capabilitiesClient(t *testing.T, server *mcp.Server) []string {
@@ -116,5 +117,13 @@ func TestFullWriteKeySeesCompleteChain(t *testing.T) {
 		if !seen[name] {
 			t.Errorf("full key missing %q (got %v)", name, seen)
 		}
+	}
+}
+
+func TestAgentActionGateCoversConfirm(t *testing.T) {
+	// 与 internal/authz 的门禁表保持一致：asset.confirm 必须可授予 agent，
+	// 否则 MCP 确认入库工具永远 403（2026-09-11 线上 conformance 发现）。
+	if !authz.AgentActionAllowed("asset.confirm") {
+		t.Fatal("authz gate must allow asset.confirm for agents")
 	}
 }
