@@ -375,13 +375,13 @@ func archiveAsset(ctx context.Context, deps Deps, principal auth.Principal, args
 // ---------------------------------------------------------------------------
 
 func builtinDocumentModelID(ctx context.Context, deps Deps, principal auth.Principal) string {
-	models, err := deps.ResourceModelService.List(ctx, principal, "")
+	tables, err := listTablesForAgent(ctx, deps, principal)
 	if err != nil {
 		return ""
 	}
-	for _, model := range models {
-		if model.ModelKey == "builtin_document" {
-			return model.ID
+	for _, t := range tables {
+		if t.ModelKey == "builtin_document" {
+			return t.ID
 		}
 	}
 	return ""
