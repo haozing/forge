@@ -444,11 +444,15 @@ func ResolveList(slug, heading, basePath string, page site.PublicPostPage, style
 func ResolveDetail(slug string, content site.PublicPostContent, authorizedImages map[string]bool) DetailVM {
 	markdown := RenderSiteMarkdown(content.Markdown, slug, authorizedImages)
 	// Meta description: the editor's summary when present, otherwise a
-	// plain-text excerpt of the body — a detail page without any
-	// description is the single most common on-page SEO defect.
+	// plain-text excerpt of the body, otherwise the title — a detail page
+	// without any description is the single most common on-page SEO defect,
+	// and field-only records (empty markdown) must still carry one.
 	description := strings.TrimSpace(content.Summary)
 	if description == "" {
 		description = PlainTextExcerpt(content.Markdown, 150)
+	}
+	if description == "" {
+		description = content.Title
 	}
 	detail := DetailVM{
 		Page:        Page{Kind: "detail", Title: content.Title, Description: description},
