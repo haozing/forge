@@ -425,7 +425,9 @@ func (s *Service) Post(ctx context.Context, addr string, principal auth.Principa
 		vm := ResolveDetail(slug, content, s.authorizedBodyImages(ctx, facts, content.Markdown))
 		vm.Site = chrome(facts, config, "detail")
 		vm.Title = content.Title + " · " + facts.Site.Name
-		vm.Description = content.Summary
+		// Description comes from ResolveDetail (summary -> body excerpt ->
+		// title); overwriting it with the raw summary would drop the
+		// fallback for posts without one.
 		vm.Canonical = baseURL + routePath
 		if vm.CoverURL != "" {
 			vm.CanonicalImage = baseURL + vm.CoverURL

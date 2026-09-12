@@ -30,7 +30,7 @@ func (s *Service) About(ctx context.Context, addr string, principal auth.Princip
 		vm.Kind = "about"
 		vm.Site = chrome(facts, config, "about")
 		vm.Title = content.Title + " · " + facts.Site.Name
-		vm.Description = content.Summary
+		// Keep ResolveDetail's description (summary -> excerpt -> title).
 		vm.Canonical = baseURL + routePath
 		vm.NoIndex = !vm.Site.ScopePublic
 		return renderOutput{kind: "about", vm: vm, noIndex: vm.NoIndex}, nil
