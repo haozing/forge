@@ -39,6 +39,11 @@ var supportedAgentActions = map[string]struct{}{
 	"edit":    {},
 	"publish": {},
 	"archive": {},
+	// agentAllowedActions 已收录 asset.confirm（bb7db38）；MCP/open 链路的
+	// 检索闸门要求 query.execute。两者缺位时管理员只能 SQL 授权，与管理台
+	// 是唯一发钥/授权路径的约定冲突。
+	"confirm":       {},
+	"query.execute": {},
 }
 
 var supportedAgentDataScopes = map[string]struct{}{
