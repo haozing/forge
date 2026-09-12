@@ -200,7 +200,10 @@ func getAsset(ctx context.Context, deps Deps, principal auth.Principal, args get
 	if err != nil {
 		return toolError(err)
 	}
-	summary := fmt.Sprintf("「%s」状态 %s，当前工作版本 %s。", deref(memberAsset.Title), memberAsset.PublicationStatus, memberAsset.CurrentWorkingVersionID)
+	// draft_revision 是 update_document 的乐观锁值，必须出现在文本输出里，
+	// 否则纯文本客户端拿不到它。
+	summary := fmt.Sprintf("「%s」状态 %s，当前工作版本 %s，draft_revision=%d。",
+		deref(memberAsset.Title), memberAsset.PublicationStatus, memberAsset.CurrentWorkingVersionID, memberAsset.DraftRevision)
 	return textResult(summary, memberAsset)
 }
 
