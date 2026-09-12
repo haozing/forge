@@ -19,20 +19,29 @@ import (
 
 var ErrApplicationUpdateInvalidInput = errors.New("invalid agent application update input")
 
+// ErrApplicationUpdateForbidden means the caller may patch the application
+// but not the specific switch it asked to change (currently: allow_high_write,
+// which only an organization administrator may widen).
+var ErrApplicationUpdateForbidden = errors.New("agent application update not permitted")
+
 // ErrKnowledgeBaseNotReady means the target knowledge base (workspace) has no
 // active default resource model, so an agent moved there would have nothing
 // to retrieve from.
 var ErrKnowledgeBaseNotReady = errors.New("knowledge base workspace has no default resource model")
 
 // ToolPolicyPatch is the admin-facing subset of tool_policy the update
-// endpoint may change. allow_high_write stays SQL-only by design: it widens
-// the approval surface and has no console channel yet.
+// endpoint may change. allow_high_write widens the approval surface (it is
+// what lets an agent run model.manage / other high-risk writes), so it is
+// gated to the organization administrator here and mirrored in the console.
 type ToolPolicyPatch struct {
 	AllowedCapabilities *[]string `json:"allowed_capabilities"`
 	ApproveLowWrite     *bool     `json:"approve_low_write"`
 	// AllowLowWrite toggles the low-write tool class itself (G3/G6/G8 low
 	// writes: cover alt, pattern save); without it those tools never run.
 	AllowLowWrite *bool `json:"allow_low_write"`
+	// AllowHighWrite toggles the high-write tool class (model drafting,
+	// high-risk asset/record writes). Organization administrator only.
+	AllowHighWrite *bool `json:"allow_high_write"`
 }
 
 type UpdateAgentApplicationInput struct {
@@ -202,6 +211,19 @@ func (s Service) UpdateAgentApplication(ctx context.Context, principal auth.Prin
 		if input.ToolPolicy.AllowLowWrite != nil {
 			toolPolicy["allow_low_write"] = *input.ToolPolicy.AllowLowWrite
 		}
+		// Widening the high-write class is an organization-level decision:
+		// it is what unlocks model drafting and other high-risk writes, so
+		// only the organization administrator may flip it.
+		if input.ToolPolicy.AllowHighWrite != nil {
+			isAdmin, err := organizationAdministrator(ctx, tx, principal)
+			if err != nil {
+				return UpdateAgentApplicationResult{}, err
+			}
+			if !isAdmin {
+				return UpdateAgentApplicationResult{}, ErrApplicationUpdateForbidden
+			}
+			toolPolicy["allow_high_write"] = *input.ToolPolicy.AllowHighWrite
+		}
 	}
 	toolPolicyJSON, err := json.Marshal(toolPolicy)
 	if err != nil {
@@ -344,6 +366,24 @@ func (s Service) UpdateAgentApplication(ctx context.Context, principal auth.Prin
 
 func hasApplicationPatch(input UpdateAgentApplicationInput) bool {
 	return input.Name != nil || input.ModelEndpointID != nil || input.RuntimeMode != nil || input.WorkflowKey != nil || input.Capabilities != nil || input.AnswerPosture != nil || input.ToolPolicy != nil || input.KnowledgeBaseWorkspaceID != nil
+}
+
+// organizationAdministrator reports whether the principal is an active
+// organization administrator. It mirrors the predicate authz/scope.go uses
+// for organization-level ownership, needed here because tool_policy's
+// high-write switch has no workspace row to authorize against.
+func organizationAdministrator(ctx context.Context, tx pgx.Tx, principal auth.Principal) (bool, error) {
+	var isAdmin bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM identity.users
+			WHERE id = $1::uuid AND organization_id = $2::uuid
+			  AND user_type = 'member' AND status = 'active' AND organization_role = 'admin'
+		)
+	`, principal.UserID, principal.OrganizationID).Scan(&isAdmin); err != nil {
+		return false, fmt.Errorf("check organization administrator: %w", err)
+	}
+	return isAdmin, nil
 }
 
 func applicationUpdateRequestHash(input UpdateAgentApplicationInput) (string, error) {

@@ -333,3 +333,116 @@ func seedApplicationEndpoint(t *testing.T, ctx context.Context, db *store.Store,
 	}
 	return endpointID
 }
+
+// TestAgentApplicationToolPolicyHighWriteIntegration pins the console channel
+// for allow_high_write: the organization administrator may widen (or narrow)
+// the high-write tool class through PATCH tool_policy, any other member is
+// rejected with ErrApplicationUpdateForbidden, and keys set outside the patch
+// survive the merge.
+func TestAgentApplicationToolPolicyHighWriteIntegration(t *testing.T) {
+	databaseURL := os.Getenv("AGENTCHUNZHI_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("AGENTCHUNZHI_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	db, err := store.Open(ctx, databaseURL)
+	if err != nil {
+		t.Fatalf("open integration database: %v", err)
+	}
+	t.Cleanup(db.Close)
+
+	// Seed an isolated organization so the admin/non-admin split is
+	// deterministic regardless of which org the fixture query lands on.
+	orgID := uuid.NewString()
+	adminID := uuid.NewString()
+	editorID := uuid.NewString()
+	marker := "tool-policy-" + uuid.NewString()
+	t.Cleanup(func() {
+		cleanupApplicationIntegrationRow(t, db, `DELETE FROM audit.audit_log WHERE organization_id = $1::uuid`, orgID)
+		cleanupApplicationIntegrationRow(t, db, `DELETE FROM system.idempotency_keys WHERE organization_id = $1::uuid`, orgID)
+		cleanupApplicationIntegrationRow(t, db, `DELETE FROM integration.agent_applications WHERE organization_id = $1::uuid`, orgID)
+		cleanupApplicationIntegrationRow(t, db, `DELETE FROM identity.api_keys WHERE user_id IN ($1::uuid, $2::uuid)`, adminID, editorID)
+		cleanupApplicationIntegrationRow(t, db, `DELETE FROM identity.users WHERE organization_id = $1::uuid`, orgID)
+		cleanupApplicationIntegrationRow(t, db, `DELETE FROM integration.model_endpoints WHERE organization_id = $1::uuid`, orgID)
+		cleanupApplicationIntegrationRow(t, db, `DELETE FROM organization.organizations WHERE id = $1::uuid`, orgID)
+	})
+	if _, err := db.Pool.Exec(ctx, `INSERT INTO organization.organizations (id, name, slug) VALUES ($1::uuid, $2, $3)`, orgID, marker, marker); err != nil {
+		t.Fatalf("seed organization: %v", err)
+	}
+	for _, member := range []struct{ id, role string }{{adminID, "admin"}, {editorID, "member"}} {
+		if _, err := db.Pool.Exec(ctx, `
+			INSERT INTO identity.users (id, organization_id, user_type, email, password_hash, display_name, organization_role, status)
+			VALUES ($1::uuid, $2::uuid, 'member', $3, 'integration-test', $4, $5, 'active')
+		`, member.id, orgID, member.id+"@integration.test", marker+"-"+member.role, member.role); err != nil {
+			t.Fatalf("seed member %s: %v", member.role, err)
+		}
+	}
+
+	endpointID := seedApplicationEndpoint(t, ctx, db, orgID, adminID, marker+"-endpoint", modelendpoint.Capabilities{Generate: true, Streaming: true, ToolCalling: true})
+	admin := auth.Principal{OrganizationID: orgID, UserID: adminID, UserType: "member"}
+	editor := auth.Principal{OrganizationID: orgID, UserID: editorID, UserType: "member"}
+	service := Service{Store: db}
+	registered, err := service.RegisterAgent(ctx, admin, RegisterAgentInput{
+		DisplayName: marker + " user", ApiKeyName: marker + " key", ApplicationName: marker,
+		ModelEndpointID: endpointID, RuntimeMode: "react", Capabilities: []string{"query.read"},
+		IdempotencyKey: marker + "-register",
+	})
+	if err != nil {
+		t.Fatalf("register application: %v", err)
+	}
+
+	// Non-admin member: the high-write switch is out of reach even though the
+	// rest of the patch would be legal.
+	allow := true
+	if _, err := service.UpdateAgentApplication(ctx, editor, UpdateAgentApplicationInput{
+		ApplicationID: registered.AgentApplicationID, ToolPolicy: &ToolPolicyPatch{AllowHighWrite: &allow},
+		IdempotencyKey: marker + "-editor-high-write",
+	}); !errors.Is(err, ErrApplicationUpdateForbidden) {
+		t.Fatalf("expected non-admin high-write patch to be forbidden, got %v", err)
+	}
+
+	// Admin widens the switch; a key written outside this channel survives.
+	if _, err := db.Pool.Exec(ctx, `
+		UPDATE integration.agent_applications
+		SET tool_policy = jsonb_set(COALESCE(tool_policy, '{}'::jsonb), '{max_tool_calls}', '6')
+		WHERE id = $1::uuid
+	`, registered.AgentApplicationID); err != nil {
+		t.Fatalf("seed out-of-band tool policy key: %v", err)
+	}
+	if _, err := service.UpdateAgentApplication(ctx, admin, UpdateAgentApplicationInput{
+		ApplicationID: registered.AgentApplicationID, ToolPolicy: &ToolPolicyPatch{AllowHighWrite: &allow},
+		IdempotencyKey: marker + "-admin-enable",
+	}); err != nil {
+		t.Fatalf("admin enable high write: %v", err)
+	}
+	summary, err := service.GetAgentApplication(ctx, admin, registered.AgentApplicationID)
+	if err != nil {
+		t.Fatalf("load application after enable: %v", err)
+	}
+	policy, _ := summary.ToolPolicy.(map[string]any)
+	if policy["allow_high_write"] != true || policy["max_tool_calls"] != float64(6) {
+		t.Fatalf("tool policy merge wrong: %+v", policy)
+	}
+
+	// Admin narrows it again; model.manage capability keys validate against
+	// the closed vocabulary in the same patch.
+	modelManage := []string{"model.manage", "query.read"}
+	if _, err := service.UpdateAgentApplication(ctx, admin, UpdateAgentApplicationInput{
+		ApplicationID:  registered.AgentApplicationID,
+		ToolPolicy:     &ToolPolicyPatch{AllowHighWrite: &[]bool{false}[0], AllowedCapabilities: &modelManage},
+		IdempotencyKey: marker + "-admin-disable",
+	}); err != nil {
+		t.Fatalf("admin disable high write: %v", err)
+	}
+	summary, err = service.GetAgentApplication(ctx, admin, registered.AgentApplicationID)
+	if err != nil {
+		t.Fatalf("load application after disable: %v", err)
+	}
+	policy, _ = summary.ToolPolicy.(map[string]any)
+	if policy["allow_high_write"] != false {
+		t.Fatalf("allow_high_write was not narrowed: %+v", policy)
+	}
+	if capabilities, ok := policy["allowed_capabilities"].([]any); !ok || len(capabilities) != 2 {
+		t.Fatalf("allowed_capabilities was not replaced: %+v", policy)
+	}
+}

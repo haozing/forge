@@ -81,6 +81,7 @@ func (s Service) ListAgentApplications(ctx context.Context, principal auth.Princ
 		       aa.name,
 		       aa.status,
 		       aa.capabilities,
+		       COALESCE(aa.tool_policy, '{}'::jsonb),
 		       EXISTS (
 		           SELECT 1
 		           FROM identity.api_keys ak
@@ -115,6 +116,7 @@ func (s Service) ListAgentApplications(ctx context.Context, principal auth.Princ
 	for rows.Next() {
 		var item AgentApplicationSummary
 		var capabilities []byte
+		var toolPolicy []byte
 		if err := rows.Scan(
 			&item.ID,
 			&item.AgentUserID,
@@ -131,6 +133,7 @@ func (s Service) ListAgentApplications(ctx context.Context, principal auth.Princ
 			&item.Name,
 			&item.Status,
 			&capabilities,
+			&toolPolicy,
 			&item.APIKeyActive,
 			&item.Ready,
 			&item.CreatedAt,
@@ -143,6 +146,14 @@ func (s Service) ListAgentApplications(ctx context.Context, principal auth.Princ
 			if err := json.Unmarshal(capabilities, &item.Capabilities); err != nil {
 				return AgentApplicationList{}, fmt.Errorf("decode agent application capabilities: %w", err)
 			}
+		}
+		item.ToolPolicy = map[string]any{}
+		if len(toolPolicy) > 0 {
+			decoded := map[string]any{}
+			if err := json.Unmarshal(toolPolicy, &decoded); err != nil {
+				return AgentApplicationList{}, fmt.Errorf("decode agent application tool policy: %w", err)
+			}
+			item.ToolPolicy = decoded
 		}
 		result.Items = append(result.Items, item)
 	}

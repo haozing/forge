@@ -21,6 +21,8 @@ func writeAgentApplicationError(w http.ResponseWriter, err error, fallback strin
 		writeError(w, http.StatusUnprocessableEntity, "validation_failed")
 	case errors.Is(err, adminservice.ErrKnowledgeBaseNotReady):
 		writeError(w, http.StatusUnprocessableEntity, "knowledge_base_not_ready")
+	case errors.Is(err, adminservice.ErrApplicationUpdateForbidden):
+		writeError(w, http.StatusForbidden, "permission_denied")
 	case errors.Is(err, adminservice.ErrApplicationNotFound):
 		writeError(w, http.StatusNotFound, "agent_application_not_found")
 	case errors.Is(err, adminservice.ErrConflict):
