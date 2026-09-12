@@ -117,3 +117,45 @@ func TestErrorPageRendering(t *testing.T) {
 		t.Fatal("error page must be no-store + noindex")
 	}
 }
+
+// TestDetailTemplateRendersNeighborsAndAttachments locks the §11.2 detail
+// page additions from commit 363d32f: the prev/next post navigation anchors
+// and the downloadable attachment list, plus the empty cases staying silent.
+func TestDetailTemplateRendersNeighborsAndAttachments(t *testing.T) {
+	renderer := NewRenderer()
+	chrome := renderChrome(mustStyleConfig(t, `{"preset":"calm"}`), "detail")
+
+	vm := DetailVM{Page: Page{Kind: "detail", Site: chrome, Title: "Post · Demo"}}
+	vm.ContentHTML = "<p>body</p>"
+	vm.Prev = &NeighborLink{Title: "上一篇标题", Href: "/sites/demo/posts/prev"}
+	vm.Next = &NeighborLink{Title: "下一篇标题", Href: "/sites/demo/posts/next"}
+	vm.Attachments = []AttachmentVM{
+		{Name: "spec.pdf", URL: "/sites/demo/media/att-1", MediaType: "application/pdf", ByteSize: 2048},
+	}
+	body, err := renderer.RenderPage("detail", vm)
+	if err != nil {
+		t.Fatalf("detail render: %v", err)
+	}
+	for _, marker := range []string{
+		`class="neighbor prev"`, `rel="prev"`, "/sites/demo/posts/prev", "上一篇标题", "上一篇",
+		`class="neighbor next"`, `rel="next"`, "/sites/demo/posts/next", "下一篇标题", "下一篇",
+		`class="attachments"`, "附件下载", "spec.pdf", "/sites/demo/media/att-1", "attachment",
+	} {
+		if !strings.Contains(string(body), marker) {
+			t.Fatalf("detail output missing %q", marker)
+		}
+	}
+
+	// Without neighbors or attachments the blocks must not render at all.
+	plain := DetailVM{Page: Page{Kind: "detail", Site: chrome, Title: "Plain · Demo"}}
+	plain.ContentHTML = "<p>body</p>"
+	body, err = renderer.RenderPage("detail", plain)
+	if err != nil {
+		t.Fatalf("plain detail render: %v", err)
+	}
+	for _, marker := range []string{"neighbor", "attachments", "附件下载"} {
+		if strings.Contains(string(body), marker) {
+			t.Fatalf("plain detail must not render %q block", marker)
+		}
+	}
+}
