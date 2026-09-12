@@ -79,3 +79,15 @@ func TestDeliveryBaseURLPrefersConfigured(t *testing.T) {
 		t.Fatal("trailing slash must be trimmed")
 	}
 }
+
+// TestDeliveryCommentFormRouteRegistered pins the JS-free comment fallback:
+// the detail form posts to {PostPath}/comments, so the pattern must be
+// routed (not a mux-level miss) and must not answer the 405 page.
+func TestDeliveryCommentFormRouteRegistered(t *testing.T) {
+	deps := Dependencies{}
+	mux := newRouter(deps)
+	request := &http.Request{Method: http.MethodPost, URL: &url.URL{Path: "/sites/demo/posts/hello/comments"}}
+	if _, pattern := mux.Handler(request); pattern == "" {
+		t.Fatal("POST {PostPath}/comments resolves to no registered pattern")
+	}
+}

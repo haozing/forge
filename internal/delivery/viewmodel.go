@@ -512,7 +512,15 @@ func formatFieldValue(field site.PublicFieldValue) string {
 			return text
 		}
 		return ""
-	default: // integer / number / date / datetime travel as bare JSON scalars
+	case "date", "datetime":
+		// Dates travel as JSON strings ("2024-03-08"); render the raw text
+		// without the JSON quotes.
+		var text string
+		if err := json.Unmarshal(field.Value, &text); err == nil {
+			return text
+		}
+		return string(field.Value)
+	default: // integer / number travel as bare JSON scalars
 		return string(field.Value)
 	}
 }

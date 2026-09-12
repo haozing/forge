@@ -9,11 +9,13 @@ package httpapi
 import (
 	"errors"
 	"io"
+	"log"
 	"math"
 	"strings"
 	"net/http"
 	"strconv"
 
+	"agentchunzhi/internal/auth"
 	"agentchunzhi/internal/delivery"
 	"agentchunzhi/internal/objectstore"
 	"agentchunzhi/internal/site"
@@ -181,6 +183,12 @@ func deliverySitePost(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		service := requireDelivery(w, deps)
 		if service == nil {
+			return
+		}
+		// The detail page's JS-free comment form posts here (action is
+		// {{.PostPath}}/comments); every other non-GET stays a 405 page.
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/comments") {
+			deliverySiteCommentPost(deps)(w, r)
 			return
 		}
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
@@ -577,5 +585,43 @@ func robotsTxt(deps Dependencies) http.HandlerFunc {
 		w.Header().Set("Cache-Control", "public, max-age=300")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(renderRobotsTxt(deps.deliveryBaseURL(r), slugs)))
+	}
+}
+
+// deliverySiteCommentPost serves the POST target of the detail page's
+// JS-free comment form: authenticated members write through the same
+// CreateComment gate as the JSON API, then land back on the post (303 so a
+// reload does not resubmit). Unauthenticated visitors are redirected to the
+// post with the comment hint already on the page.
+func deliverySiteCommentPost(deps Dependencies) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		service := requireDelivery(w, deps)
+		if service == nil {
+			return
+		}
+		slug := r.PathValue("slug")
+		postPath := strings.TrimSuffix(r.URL.Path, "/comments")
+		if err := r.ParseForm(); err != nil {
+			http.Redirect(w, r, postPath, http.StatusSeeOther)
+			return
+		}
+		principal, err := deps.SessionService.Authenticate(r.Context(), r)
+		if err != nil {
+			http.Redirect(w, r, postPath, http.StatusSeeOther)
+			return
+		}
+		if principal.UserType != auth.UserTypeMember {
+			// The form only renders for members; a hand-forged POST from an
+			// anonymous visitor simply lands back on the page.
+			http.Redirect(w, r, postPath, http.StatusSeeOther)
+			return
+		}
+		displayPath := strings.TrimSuffix(r.PathValue("displayPath"), "/comments")
+		if _, err := deps.Sites.CreateComment(r.Context(), principal, slug, displayPath, r.PostFormValue("body")); err != nil {
+			// Degrade silently to the page (the public face has no error
+			// chrome for comment writes); the JSON API surfaces details.
+			log.Printf("delivery comment form write failed slug=%s path=%s: %v", slug, displayPath, err)
+		}
+		http.Redirect(w, r, postPath, http.StatusSeeOther)
 	}
 }
