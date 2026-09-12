@@ -73,17 +73,20 @@ type CreateSiteRequest struct {
 }
 
 type UpdateSiteRequest struct {
-	Name                *string                    `json:"name"`
-	Domain              *string                    `json:"domain"`
-	Template            *string                    `json:"template"`
-	DefaultContentScope *string                    `json:"default_content_scope"`
-	HomepageConfig      *json.RawMessage           `json:"homepage_config"`
-	NavigationConfig    *json.RawMessage           `json:"navigation_config"`
-	StyleConfig         *json.RawMessage           `json:"style_config"`
-	CustomCss           *string                    `json:"custom_css"`
-	CommentsMode        *string                    `json:"comments_mode"`
-	Status              *string                    `json:"status"`
-	ModelViews          *map[string]site.ModelView `json:"model_views"`
+	Name                    *string                    `json:"name"`
+	Domain                  *string                    `json:"domain"`
+	Template                *string                    `json:"template"`
+	DefaultContentScope     *string                    `json:"default_content_scope"`
+	HomepageConfig          *json.RawMessage           `json:"homepage_config"`
+	NavigationConfig        *json.RawMessage           `json:"navigation_config"`
+	StyleConfig             *json.RawMessage           `json:"style_config"`
+	CustomCss               *string                    `json:"custom_css"`
+	CommentsMode            *string                    `json:"comments_mode"`
+	Status                  *string                    `json:"status"`
+	ModelViews              *map[string]site.ModelView `json:"model_views"`
+	LogoAttachmentID        *string                    `json:"logo_attachment_id"`
+	FaviconAttachmentID     *string                    `json:"favicon_attachment_id"`
+	SocialImageAttachmentID *string                    `json:"social_image_attachment_id"`
 }
 
 // SitesCollection serves GET/POST /api/workspaces/{workspaceId}/sites.
@@ -192,17 +195,20 @@ func SiteResource(deps Dependencies) http.HandlerFunc {
 			}
 			item, err := deps.Sites.UpdateSite(r.Context(), principal, workspaceID, siteID,
 				expectedRevisionFromIfMatch(r), site.UpdateSiteInput{
-					Name:                input.Name,
-					Domain:              input.Domain,
-					Template:            input.Template,
-					DefaultContentScope: input.DefaultContentScope,
-					HomepageConfig:      input.HomepageConfig,
-					NavigationConfig:    input.NavigationConfig,
-					StyleConfig:         input.StyleConfig,
-					CustomCss:           input.CustomCss,
-					CommentsMode:        input.CommentsMode,
-					Status:              input.Status,
-					ModelViews:          input.ModelViews,
+					Name:                    input.Name,
+					Domain:                  input.Domain,
+					Template:                input.Template,
+					DefaultContentScope:     input.DefaultContentScope,
+					HomepageConfig:          input.HomepageConfig,
+					NavigationConfig:        input.NavigationConfig,
+					StyleConfig:             input.StyleConfig,
+					CustomCss:               input.CustomCss,
+					CommentsMode:            input.CommentsMode,
+					Status:                  input.Status,
+					ModelViews:              input.ModelViews,
+					LogoAttachmentID:        input.LogoAttachmentID,
+					FaviconAttachmentID:     input.FaviconAttachmentID,
+					SocialImageAttachmentID: input.SocialImageAttachmentID,
 				})
 			if err != nil {
 				var modelViewErr *site.ModelViewError
