@@ -76,12 +76,15 @@ func TestToolVisibilityFollowsCapabilities(t *testing.T) {
 	for _, name := range writer {
 		seen[name] = true
 	}
-	for _, want := range []string{"create_document", "insert_record", "publish_asset"} {
+	// asset.create / asset.edit / asset.write 是同一写类的三种拼写（设计文档
+	// §3.2 把 create/update 系工具记在 asset.write 名下；细分别名仅为兼容），
+	// 任一拼写下发全部写工具。
+	for _, want := range []string{"create_document", "insert_record", "update_document", "publish_asset"} {
 		if !seen[want] {
 			t.Errorf("writer key missing tool %q (got %v)", want, seen)
 		}
 	}
-	for _, forbidden := range []string{"archive_asset", "update_document"} {
+	for _, forbidden := range []string{"archive_asset"} {
 		if seen[forbidden] {
 			t.Errorf("writer key should not see %q", forbidden)
 		}

@@ -44,7 +44,12 @@ func registerTools(server *mcp.Server, deps Deps, principal auth.Principal) {
 			return listTables(ctx, deps, principal, args)
 		})
 	}
-	if can(principal, "asset.create") {
+	// 设计文档 §3.2 能力矩阵把 create/update 系工具记在 asset.write 名下；
+	// asset.create / asset.edit 是实现期引入的细分别名，但控制台签发通道
+	// （allowedAgentCapability 闭集）不认这两个字符串——只按别名判门会让
+	// 正规途径签发的 key 永远拿不到写工具。两种拼写都放行。
+	writeCap := can(principal, "asset.write") || can(principal, "asset.create") || can(principal, "asset.edit")
+	if writeCap {
 		mcp.AddTool(server, &mcp.Tool{
 			Name:        "create_document",
 			Description: "创建知识库文档（通用文档模型）。创建后为工作草稿，需依次调用 confirm_asset_version 与 publish_asset 完成入库。",
@@ -57,8 +62,6 @@ func registerTools(server *mcp.Server, deps Deps, principal auth.Principal) {
 		}, func(ctx context.Context, req *mcp.CallToolRequest, args insertRecordArgs) (*mcp.CallToolResult, any, error) {
 			return insertRecord(ctx, deps, principal, args)
 		})
-	}
-	if can(principal, "asset.edit") {
 		mcp.AddTool(server, &mcp.Tool{
 			Name:        "update_document",
 			Description: "更新资产草稿（标题/正文/字段）。必须携带 base_version_id 乐观锁（来自 create_document 或 get_asset 的输出），防止覆盖他人编辑。",
