@@ -159,3 +159,40 @@ func TestDetailTemplateRendersNeighborsAndAttachments(t *testing.T) {
 		}
 	}
 }
+
+// TestDetailBodyHeadingsDemoteToH2 pins the SEO contract: the chrome renders
+// the post title as the page's single h1, so a level-1 heading inside the
+// body markdown must demote to h2 in both the HTML and the TOC outline.
+func TestDetailBodyHeadingsDemoteToH2(t *testing.T) {
+	result := RenderMarkdown("# 顶级标题\n\n正文")
+	if strings.Contains(result.HTML, "<h1") {
+		t.Fatalf("body h1 must demote, got %q", result.HTML)
+	}
+	if !strings.Contains(result.HTML, "<h2 id=") {
+		t.Fatalf("demoted heading missing: %q", result.HTML)
+	}
+	if len(result.Headings) != 1 || result.Headings[0].Level != 2 {
+		t.Fatalf("TOC must carry the demoted level, got %+v", result.Headings)
+	}
+}
+
+// TestPlainTextExcerpt pins the meta-description fallback: markdown flattens
+// to readable text, images vanish, whitespace collapses and long bodies
+// truncate with an ellipsis.
+func TestPlainTextExcerpt(t *testing.T) {
+	excerpt := PlainTextExcerpt("## 标题\n\n第一段**强调**与[链接](https://x)文字。\n\n![图](chunzhi-media://00000000-0000-4000-8000-000000000001)\n\n第二段。", 100)
+	if excerpt != "标题 第一段 强调 与 链接 文字。 第二段。" {
+		t.Fatalf("unexpected excerpt: %q", excerpt)
+	}
+	long := PlainTextExcerpt(strings.Repeat("字", 300), 150)
+	if got := len([]rune(long)); got != 151 {
+		t.Fatalf("truncated excerpt should be limit+ellipsis runes, got %d", got)
+	}
+	if !strings.HasSuffix(long, "…") {
+		t.Fatal("truncated excerpt must end with ellipsis")
+	}
+	if PlainTextExcerpt("   ", 100) != "" {
+		t.Fatal("blank source must yield empty excerpt")
+	}
+}
+

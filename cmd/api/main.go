@@ -264,6 +264,10 @@ func main() {
 	// the page cache, StyleEngine and the real-render preview (wired after
 	// the dependencies literal so it can reference the reader and service).
 	deps.Delivery = delivery.NewService(db, deps.PublicSites, deps.Sites, 0, log.Printf)
+	// The delivery face pins canonical/og:url/sitemap to the configured
+	// public origin: rendered pages are cached Host-agnostically, so a
+	// request-Host-derived prefix would poison the cache on internal probes.
+	deps.DeliveryPublicBaseURL = cfg.PublicAppBaseURL
 	deps.Delivery.Objects = objects
 	server := &http.Server{
 		Addr:              cfg.HTTPAddr,

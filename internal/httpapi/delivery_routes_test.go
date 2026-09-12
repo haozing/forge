@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"testing"
 )
@@ -49,5 +50,32 @@ func TestDeliveryRoutesRegistered(t *testing.T) {
 	request := &http.Request{Method: http.MethodGet, URL: &url.URL{Path: "/api/public/sites/demo"}}
 	if _, pattern := mux.Handler(request); pattern == "" {
 		t.Error("/api/public/sites/{slug} no longer registered")
+	}
+}
+
+// TestRenderRobotsTxt pins the domain-level robots.txt shape: blanket allow
+// plus one Sitemap line per active released site.
+func TestRenderRobotsTxt(t *testing.T) {
+	body := renderRobotsTxt("https://seo.example", []string{"alpha", "beta"})
+	want := "User-agent: *\nAllow: /\nSitemap: https://seo.example/sites/alpha/sitemap.xml\nSitemap: https://seo.example/sites/beta/sitemap.xml\n"
+	if body != want {
+		t.Fatalf("robots.txt mismatch:\n%s", body)
+	}
+}
+
+// TestDeliveryBaseURLPrefersConfigured pins the cache-poisoning fix: with a
+// configured public base the request Host never leaks into canonical/og:url.
+func TestDeliveryBaseURLPrefersConfigured(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, "http://localhost:3000/sites/demo/", nil)
+	deps := Dependencies{DeliveryPublicBaseURL: "https://seo.example"}
+	if got := deps.deliveryBaseURL(r); got != "https://seo.example" {
+		t.Fatalf("configured base must win, got %q", got)
+	}
+	empty := Dependencies{}
+	if got := empty.deliveryBaseURL(r); got != "http://localhost:3000" {
+		t.Fatalf("fallback must derive from request, got %q", got)
+	}
+	if got := (Dependencies{DeliveryPublicBaseURL: "https://seo.example/"}).deliveryBaseURL(r); got != "https://seo.example" {
+		t.Fatal("trailing slash must be trimmed")
 	}
 }

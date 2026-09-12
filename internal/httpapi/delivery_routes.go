@@ -35,8 +35,16 @@ func requireDelivery(w http.ResponseWriter, deps Dependencies) *delivery.Service
 	return deps.Delivery
 }
 
-// deliveryBaseURL derives the absolute URL prefix of the current request.
-func deliveryBaseURL(r *http.Request) string {
+// deliveryBaseURL resolves the absolute URL prefix for canonical/og:url/
+// sitemap/JSON-LD. The configured DeliveryPublicBaseURL wins whenever it is
+// set: page bodies are cached under a Host-agnostic key, so a Host-derived
+// prefix would let any internal probe bake its own origin into every
+// visitor's canonical for one cache TTL. Request-derived stays the
+// development fallback (no PUBLIC_APP_BASE_URL configured).
+func (d Dependencies) deliveryBaseURL(r *http.Request) string {
+	if strings.TrimSpace(d.DeliveryPublicBaseURL) != "" {
+		return strings.TrimRight(strings.TrimSpace(d.DeliveryPublicBaseURL), "/")
+	}
 	scheme := "http"
 	if r.TLS != nil {
 		scheme = "https"
@@ -131,7 +139,7 @@ func deliverySiteHome(deps Dependencies) http.HandlerFunc {
 			return
 		}
 		page, err := service.Home(r.Context(), effectiveClientAddr(r, deps.TrustedProxyCIDRs),
-			publicVisitorPrincipal(r, deps), slug, deliveryBaseURL(r))
+			publicVisitorPrincipal(r, deps), slug, deps.deliveryBaseURL(r))
 		if err != nil {
 			writeDeliveryError(w, r, service, err)
 			return
@@ -158,7 +166,7 @@ func deliverySitePosts(deps Dependencies) http.HandlerFunc {
 			return
 		}
 		page, err := service.Posts(r.Context(), effectiveClientAddr(r, deps.TrustedProxyCIDRs),
-			publicVisitorPrincipal(r, deps), slug, r.URL.Query().Get("cursor"), deliveryBaseURL(r))
+			publicVisitorPrincipal(r, deps), slug, r.URL.Query().Get("cursor"), deps.deliveryBaseURL(r))
 		if err != nil {
 			writeDeliveryError(w, r, service, err)
 			return
@@ -185,9 +193,16 @@ func deliverySitePost(deps Dependencies) http.HandlerFunc {
 			return
 		}
 		displayPath := r.PathValue("displayPath")
+		// The canonical post URL carries no trailing slash (sitemap, postHref
+		// and rel=canonical all use the bare path); the slashed variant 301s
+		// so crawlers settle on one indexable form.
+		if trimmed := strings.TrimSuffix(displayPath, "/"); trimmed != "" && trimmed != displayPath {
+			http.Redirect(w, r, "/sites/"+slug+"/posts/"+trimmed, http.StatusMovedPermanently)
+			return
+		}
 		if displayPath == "" {
 			page, err := service.Posts(r.Context(), effectiveClientAddr(r, deps.TrustedProxyCIDRs),
-				publicVisitorPrincipal(r, deps), slug, r.URL.Query().Get("cursor"), deliveryBaseURL(r))
+				publicVisitorPrincipal(r, deps), slug, r.URL.Query().Get("cursor"), deps.deliveryBaseURL(r))
 			if err != nil {
 				writeDeliveryError(w, r, service, err)
 				return
@@ -196,7 +211,7 @@ func deliverySitePost(deps Dependencies) http.HandlerFunc {
 			return
 		}
 		page, err := service.Post(r.Context(), effectiveClientAddr(r, deps.TrustedProxyCIDRs),
-			publicVisitorPrincipal(r, deps), slug, displayPath, deliveryBaseURL(r))
+			publicVisitorPrincipal(r, deps), slug, displayPath, deps.deliveryBaseURL(r))
 		if err != nil {
 			writeDeliveryError(w, r, service, err)
 			return
@@ -223,7 +238,7 @@ func deliverySiteSection(deps Dependencies) http.HandlerFunc {
 		}
 		page, err := service.Section(r.Context(), effectiveClientAddr(r, deps.TrustedProxyCIDRs),
 			publicVisitorPrincipal(r, deps), slug, r.PathValue("sectionSlug"),
-			r.URL.Query().Get("model_key"), deliveryBaseURL(r))
+			r.URL.Query().Get("model_key"), deps.deliveryBaseURL(r))
 		if err != nil {
 			writeDeliveryError(w, r, service, err)
 			return
@@ -249,7 +264,7 @@ func deliverySiteTags(deps Dependencies) http.HandlerFunc {
 			return
 		}
 		page, err := service.Tags(r.Context(), effectiveClientAddr(r, deps.TrustedProxyCIDRs),
-			publicVisitorPrincipal(r, deps), slug, deliveryBaseURL(r))
+			publicVisitorPrincipal(r, deps), slug, deps.deliveryBaseURL(r))
 		if err != nil {
 			writeDeliveryError(w, r, service, err)
 			return
@@ -275,7 +290,7 @@ func deliverySiteTagPage(deps Dependencies) http.HandlerFunc {
 			return
 		}
 		page, err := service.TagPage(r.Context(), effectiveClientAddr(r, deps.TrustedProxyCIDRs),
-			publicVisitorPrincipal(r, deps), slug, r.PathValue("key"), r.URL.Query().Get("cursor"), deliveryBaseURL(r))
+			publicVisitorPrincipal(r, deps), slug, r.PathValue("key"), r.URL.Query().Get("cursor"), deps.deliveryBaseURL(r))
 		if err != nil {
 			writeDeliveryError(w, r, service, err)
 			return
@@ -301,7 +316,7 @@ func deliverySiteSearch(deps Dependencies) http.HandlerFunc {
 			return
 		}
 		page, err := service.Search(r.Context(), effectiveClientAddr(r, deps.TrustedProxyCIDRs),
-			publicVisitorPrincipal(r, deps), slug, r.URL.Query().Get("q"), deliveryBaseURL(r))
+			publicVisitorPrincipal(r, deps), slug, r.URL.Query().Get("q"), deps.deliveryBaseURL(r))
 		if err != nil {
 			writeDeliveryError(w, r, service, err)
 			return
@@ -332,13 +347,13 @@ func deliverySiteFeed(kind string) func(deps Dependencies) http.HandlerFunc {
 			switch kind {
 			case "rss":
 				page, err = service.RSS(r.Context(), effectiveClientAddr(r, deps.TrustedProxyCIDRs),
-					publicVisitorPrincipal(r, deps), slug, deliveryBaseURL(r))
+					publicVisitorPrincipal(r, deps), slug, deps.deliveryBaseURL(r))
 			case "sitemap":
 				page, err = service.Sitemap(r.Context(), effectiveClientAddr(r, deps.TrustedProxyCIDRs),
-					publicVisitorPrincipal(r, deps), slug, deliveryBaseURL(r))
+					publicVisitorPrincipal(r, deps), slug, deps.deliveryBaseURL(r))
 			default:
 				page, err = service.Robots(r.Context(), effectiveClientAddr(r, deps.TrustedProxyCIDRs),
-					publicVisitorPrincipal(r, deps), slug, deliveryBaseURL(r))
+					publicVisitorPrincipal(r, deps), slug, deps.deliveryBaseURL(r))
 			}
 			if err != nil {
 				writeDeliveryError(w, r, service, err)
@@ -386,7 +401,7 @@ func deliverySiteAbout(deps Dependencies) http.HandlerFunc {
 			return
 		}
 		page, err := service.About(r.Context(), effectiveClientAddr(r, deps.TrustedProxyCIDRs),
-			publicVisitorPrincipal(r, deps), slug, deliveryBaseURL(r))
+			publicVisitorPrincipal(r, deps), slug, deps.deliveryBaseURL(r))
 		if err != nil {
 			writeDeliveryError(w, r, service, err)
 			return
@@ -412,7 +427,7 @@ func deliverySiteArchive(deps Dependencies) http.HandlerFunc {
 			return
 		}
 		page, err := service.Archive(r.Context(), effectiveClientAddr(r, deps.TrustedProxyCIDRs),
-			publicVisitorPrincipal(r, deps), slug, deliveryBaseURL(r))
+			publicVisitorPrincipal(r, deps), slug, deps.deliveryBaseURL(r))
 		if err != nil {
 			writeDeliveryError(w, r, service, err)
 			return
@@ -516,5 +531,51 @@ func deliveryCarouselScript(deps Dependencies) http.HandlerFunc {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(delivery.CarouselScript())
+	}
+}
+
+// renderRobotsTxt builds the domain-level robots.txt: one Sitemap line per
+// active, released public site on this deployment. robots.txt is a
+// domain-scoped file while sites are a workspace-level resource, so the
+// answer must aggregate every site the domain serves.
+func renderRobotsTxt(baseURL string, slugs []string) string {
+	var builder strings.Builder
+	builder.WriteString("User-agent: *\nAllow: /\n")
+	for _, slug := range slugs {
+		builder.WriteString("Sitemap: " + baseURL + "/sites/" + slug + "/sitemap.xml\n")
+	}
+	return builder.String()
+}
+
+// robotsTxt serves the domain-level /robots.txt. nginx routes this path to
+// the API (the console front end owns "/" otherwise); listing the active
+// released sites gives crawlers the sitemap discovery entry point.
+func robotsTxt(deps Dependencies) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
+			return
+		}
+		slugs := []string{}
+		if deps.Store != nil && deps.Store.Pool != nil {
+			rows, err := deps.Store.Pool.Query(r.Context(), `
+				SELECT slug FROM site.public_sites
+				WHERE status = 'active' AND published_release_id IS NOT NULL
+				ORDER BY created_at, slug
+			`)
+			if err == nil {
+				defer rows.Close()
+				for rows.Next() {
+					var slug string
+					if err := rows.Scan(&slug); err == nil {
+						slugs = append(slugs, slug)
+					}
+				}
+			}
+		}
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("Cache-Control", "public, max-age=300")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(renderRobotsTxt(deps.deliveryBaseURL(r), slugs)))
 	}
 }

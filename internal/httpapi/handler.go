@@ -85,6 +85,13 @@ type Dependencies struct {
 	// SSR delivery face: the /sites/{slug}/... HTML pages, the page cache
 	// and the real-render preview (公开站点SSR投递与样式参数空间设计方案).
 	Delivery *delivery.Service
+	// DeliveryPublicBaseURL pins the canonical absolute origin of the public
+	// delivery face (from PUBLIC_APP_BASE_URL). Rendered pages are cached
+	// process-locally under a Host-agnostic key, so absolute URLs must never
+	// come from the request Host: an internal probe hitting localhost would
+	// otherwise poison every visitor's canonical/og:url/sitemap for one TTL.
+	// Empty falls back to the request-derived origin (development).
+	DeliveryPublicBaseURL string
 	// Phase 4 member suggestion review surface (queue, accept/reject, batch).
 	SuggestionReviews *assetservice.SuggestionReviewService
 	// Phase 3 retrieval operations services (projection profiles and rebuilds).

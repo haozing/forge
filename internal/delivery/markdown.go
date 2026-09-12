@@ -107,6 +107,12 @@ func RenderSiteMarkdown(source, slug string, authorized map[string]bool) Markdow
 		if !entering {
 			return ast.WalkContinue, nil
 		}
+		// The chrome already renders the post title as the page's single h1;
+		// a level-1 heading inside the body would produce a second h1, so
+		// the delivery face demotes body headings by one level.
+		if heading, ok := node.(*ast.Heading); ok && heading.Level == 1 {
+			heading.Level = 2
+		}
 		image, ok := node.(*ast.Image)
 		if !ok {
 			return ast.WalkContinue, nil
@@ -159,4 +165,35 @@ func headingID(heading *ast.Heading) string {
 	default:
 		return ""
 	}
+}
+
+// PlainTextExcerpt flattens one markdown source to readable plain text
+// (link labels and emphasis text survive; images and structure are dropped),
+// collapses whitespace and truncates to limit runes with an ellipsis. Used
+// as the meta-description fallback when a post carries no summary.
+func PlainTextExcerpt(source string, limit int) string {
+	if strings.TrimSpace(source) == "" {
+		return ""
+	}
+	document := markdownEngine.Parser().Parse(text.NewReader([]byte(source)))
+	var builder strings.Builder
+	ast.Walk(document, func(node ast.Node, entering bool) (ast.WalkStatus, error) {
+		if !entering {
+			return ast.WalkContinue, nil
+		}
+		if _, isImage := node.(*ast.Image); isImage {
+			return ast.WalkSkipChildren, nil
+		}
+		if textNode, ok := node.(*ast.Text); ok {
+			builder.Write(textNode.Segment.Value([]byte(source)))
+			builder.WriteString(" ")
+		}
+		return ast.WalkContinue, nil
+	})
+	collapsed := strings.Join(strings.Fields(builder.String()), " ")
+	runes := []rune(collapsed)
+	if len(runes) > limit {
+		return strings.TrimSpace(string(runes[:limit])) + "…"
+	}
+	return collapsed
 }

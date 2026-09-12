@@ -51,6 +51,7 @@ func registerSystemRoutes(deps Dependencies, mux *http.ServeMux) {
 // this table instead. The trailing-slash subtree registration doubles as the
 // site-scoped 404 catch-all.
 func registerDeliveryRoutes(deps Dependencies, mux *http.ServeMux) {
+	mux.HandleFunc("/robots.txt", robotsTxt(deps))
 	mux.HandleFunc("/sites/{slug}", deliverySiteHome(deps))
 	mux.HandleFunc("/sites/{slug}/", deliverySiteHome(deps))
 	mux.HandleFunc("/sites/{slug}/posts", deliverySitePosts(deps))

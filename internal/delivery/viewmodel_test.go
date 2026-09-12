@@ -152,3 +152,21 @@ func TestResolveHomeKeepsComponentOrderForGenericBuckets(t *testing.T) {
 		t.Fatalf("model slot should append: %+v", vm.Sections[1])
 	}
 }
+
+// TestResolveDetailDescriptionFallsBackToExcerpt pins the meta-description
+// fallback: a post without a summary derives its description from the body
+// plain text instead of shipping an empty meta tag.
+func TestResolveDetailDescriptionFallsBackToExcerpt(t *testing.T) {
+	withSummary := ResolveDetail("demo", site.PublicPostContent{
+		Title: "T", Summary: "编辑写的摘要", Markdown: "很长的正文",
+	}, nil)
+	if withSummary.Description != "编辑写的摘要" {
+		t.Fatalf("summary must win, got %q", withSummary.Description)
+	}
+	without := ResolveDetail("demo", site.PublicPostContent{
+		Title: "T", Markdown: "正文第一段，足够作为摘要使用。",
+	}, nil)
+	if without.Description == "" || without.Description == "很长的正文" {
+		t.Fatalf("expected plain-text excerpt fallback, got %q", without.Description)
+	}
+}
