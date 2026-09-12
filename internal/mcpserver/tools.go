@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -124,8 +125,11 @@ type insertRecordArgs struct {
 }
 
 type updateDocumentArgs struct {
-	AssetID       string `json:"asset_id" jsonschema:"资产 UUID"`
-	BaseVersionID string `json:"base_version_id" jsonschema:"当前工作版本 UUID（乐观锁，来自 create_document 或 get_asset）"`
+	AssetID string `json:"asset_id" jsonschema:"资产 UUID"`
+	// 乐观锁是资产的数字 draft_revision（服务层 validDraftRevision 只认数字），
+	// 不是版本 UUID——get_asset / create_document 的输出里可取。
+	DraftRevision int    `json:"draft_revision" jsonschema:"乐观锁：资产当前 draft_revision（整数，来自 get_asset 输出）"`
+	BaseVersionID string `json:"base_version_id,omitempty" jsonschema:"兼容旧客户端：若填必须为数字 draft_revision"`
 	Title         string `json:"title,omitempty" jsonschema:"新标题（可选）"`
 	Markdown      string `json:"markdown,omitempty" jsonschema:"新 Markdown 正文（可选）"`
 }
@@ -311,8 +315,12 @@ func createAssetCommon(ctx context.Context, deps Deps, principal auth.Principal,
 }
 
 func updateDocument(ctx context.Context, deps Deps, principal auth.Principal, args updateDocumentArgs) (*mcp.CallToolResult, any, error) {
-	if args.BaseVersionID == "" {
-		return toolError(fmt.Errorf("base_version_id 必填（乐观锁）：请先 get_asset 或使用 create_document 的输出"))
+	revision := args.DraftRevision
+	if revision <= 0 && args.BaseVersionID != "" && isAllDigits(args.BaseVersionID) {
+		revision = atoiSafe(args.BaseVersionID)
+	}
+	if revision <= 0 {
+		return toolError(fmt.Errorf("draft_revision 必填（数字乐观锁）：请先 get_asset 获取当前 draft_revision"))
 	}
 	allowedModels, err := deps.ScopeResolver.AllowedModelIDs(ctx, principal, "asset.edit")
 	if err != nil {
@@ -325,7 +333,7 @@ func updateDocument(ctx context.Context, deps Deps, principal auth.Principal, ar
 	if args.Markdown != "" {
 		markdown = &args.Markdown
 	}
-	result, err := deps.AssetService.Update(ctx, principal, allowedModels, newIdempotencyKey(), args.AssetID, args.BaseVersionID, asset.UpdateInput{
+	result, err := deps.AssetService.Update(ctx, principal, allowedModels, newIdempotencyKey(), args.AssetID, strconv.Itoa(revision), asset.UpdateInput{
 		Title:    title,
 		Markdown: markdown,
 	})
@@ -438,4 +446,24 @@ func ptrOrNil(value string) *string {
 		return nil
 	}
 	return &value
+}
+
+func isAllDigits(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, r := range value {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func atoiSafe(value string) int {
+	n, err := strconv.Atoi(value)
+	if err != nil {
+		return 0
+	}
+	return n
 }

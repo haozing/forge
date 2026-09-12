@@ -312,7 +312,10 @@ func allowedAgentCapability(value string) bool {
 	// publication.submit gates the open publication-request surface — it was
 	// missing here, which made that endpoint unreachable for every key
 	// (latent defect surfaced by the p10b acceptance).
-	case "query.execute", "reference.read", "publication.submit", "agent.run":
+	// asset.confirm gates the MCP/open confirm chain (MemberService.require
+	// checks the key capability first); without it the confirm tool was
+	// unreachable for console-issued keys.
+	case "query.execute", "reference.read", "publication.submit", "agent.run", "asset.confirm":
 		return true
 	default:
 		return false
