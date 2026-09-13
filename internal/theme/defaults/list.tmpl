@@ -1,0 +1,7 @@
+{{define "content"}}
+<div class="list-page">
+  <h1>{{.Heading}}</h1>
+  <div class="cards">{{range .Items}}{{template "card" .}}{{end}}</div>
+  {{template "pager" .}}
+</div>
+{{end}}

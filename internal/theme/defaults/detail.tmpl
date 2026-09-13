@@ -1,0 +1,22 @@
+{{define "content"}}
+<article class="article">
+  <h1 class="article-title">{{.Title}}</h1>
+  <footer class="article-meta">
+    {{if gt .VersionNo 0}}<span class="article-version">v{{.VersionNo}}</span>{{end}}
+    {{with .PublishedOn}}<time datetime="{{$.UpdatedISO}}">{{i18n "published"}} {{.}}</time>{{end}}
+  </footer>
+  {{with .TOC}}{{if gt (len .) 1}}<nav class="toc"><h2>目录</h2><ul>{{range .}}<li><a href="#{{.ID}}">{{.Text}}</a></li>{{end}}</ul></nav>{{end}}{{end}}
+  <div class="article-body">{{.ContentHTML}}</div>
+  {{if .Fields}}<section class="article-fields"><h2>结构化字段</h2>
+    <dl>{{range .Fields}}<div class="field-row"><dt>{{if .Label}}{{.Label}}{{else}}{{.Key}}{{end}}</dt><dd>{{.Value}}</dd></div>{{end}}</dl>
+  </section>{{end}}
+  {{if ge (len .Publications) 2}}<details class="article-history"><summary>更新记录（{{len .Publications}}）</summary>
+    <ol>{{range .Publications}}<li>v{{.VersionNo}} <time>{{.PublishedOn}}</time>{{with .ChangeNote}} &mdash; {{.}}{{end}}</li>{{end}}</ol>
+  </details>{{end}}
+  {{template "tag_chips" .Tags}}
+  {{if or .Prev .Next}}<nav class="neighbors">
+    {{with .Prev}}<a rel="prev" href="{{.Href}}">&larr; {{.Title}}</a>{{end}}
+    {{with .Next}}<a rel="next" href="{{.Href}}">{{.Title}} &rarr;</a>{{end}}
+  </nav>{{end}}
+</article>
+{{end}}

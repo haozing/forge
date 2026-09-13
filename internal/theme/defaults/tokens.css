@@ -1,0 +1,11 @@
+:root{
+  --c-primary:#b91c1c;
+  --c-surface:#FBF9F6;
+  --c-bg:#F6F4F1;
+  --c-text:#231F20;
+  --c-muted:#6b7280;
+  --c-border:#E2E0DD;
+  --font-heading:Georgia, "Songti SC", "Noto Serif CJK SC", serif;
+  --font-body:system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  --reading:760px;
+}

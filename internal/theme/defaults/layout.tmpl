@@ -1,0 +1,37 @@
+{{define "layout"}}<!DOCTYPE html>
+<html lang="{{.Site.SiteLang}}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.Title}}</title>
+<meta name="description" content="{{.Description}}">
+{{with .Canonical}}<link rel="canonical" href="{{.}}">{{end}}
+{{if .NoIndex}}<meta name="robots" content="noindex, nofollow">{{end}}
+{{with .Site.FaviconURL}}<link rel="icon" href="{{.}}">{{end}}
+<style>{{themeCSS}}</style>
+</head>
+<body>
+<header class="site-header">
+  <a class="site-name" href="{{.Site.HomeHref}}">{{.Site.Name}}</a>
+  <nav class="site-nav">
+    {{range .Site.Nav}}<a href="{{.Href}}">{{.Label}}</a>{{end}}
+    {{range .Site.Languages}}<a href="{{.Href}}" hreflang="{{.Hreflang}}">{{.Label}}</a>{{end}}
+  </nav>
+  <form class="search-form" action="{{.Site.SearchHref}}" method="get">
+    <input type="search" name="q" placeholder="{{i18n "search"}}" aria-label="{{i18n "search"}}">
+  </form>
+</header>
+<main class="site-main">
+{{template "content" .}}
+</main>
+<footer class="site-footer">
+  <span>&copy; {{dateFmt "2006" now}} {{.Site.Name}}</span>
+  <nav>
+    <a href="{{.Site.HomeHref}}">{{i18n "home"}}</a>
+    <a href="{{.Site.PostsHref}}">{{i18n "posts"}}</a>
+    <a href="{{.Site.TagsHref}}">{{i18n "tags"}}</a>
+    {{with .Site.RSSHref}}<a href="{{.}}">RSS</a>{{end}}
+  </nav>
+</footer>
+</body>
+</html>{{end}}

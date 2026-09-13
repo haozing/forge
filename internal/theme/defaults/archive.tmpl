@@ -1,0 +1,9 @@
+{{define "content"}}
+<div class="archive-page">
+  <h1>{{i18n "archive"}}</h1>
+  {{range .Years}}<section><h2>{{.Year}}</h2>
+    <ul>{{range .Months}}<li>{{range .Items}}<a href="{{.Href}}">{{.Title}}</a>{{end}}</li>{{end}}
+    </ul>
+  </section>{{end}}
+</div>
+{{end}}

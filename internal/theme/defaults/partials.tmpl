@@ -1,0 +1,18 @@
+{{define "card"}}
+<article class="card">
+  <h3><a href="{{.Href}}">{{.Title}}</a></h3>
+  {{with .Summary}}<p class="card-summary">{{.}}</p>{{end}}
+  <footer class="card-meta">
+    {{with .PublishedOn}}<time>{{.}}</time>{{end}}
+    {{template "tag_chips" .Tags}}
+  </footer>
+</article>
+{{end}}
+
+{{define "tag_chips"}}
+{{range .}}<a class="tag-chip" href="/{{.Href}}">{{.DisplayName}}</a>{{end}}
+{{end}}
+
+{{define "pager"}}
+{{with .NextHref}}<a class="pager-next" href="{{.}}">{{i18n "next"}} &rarr;</a>{{end}}
+{{end}}

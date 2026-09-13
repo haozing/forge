@@ -63,6 +63,10 @@ type Site struct {
 	// PagesConfig is the v2 page/document configuration (C1)：home blocks、
 	// 自定义页、集合页参数与导航。空文档渲染默认首页。
 	PagesConfig json.RawMessage `json:"pages_config"`
+	// 主题修订版指针（站点主题化与 AI 设计重构）：draft = 工作台副本，
+	// published = 对外渲染所用文件集。0040 起 UI 设计面的唯一事实源。
+	DraftThemeRevisionID     string `json:"-"`
+	PublishedThemeRevisionID string `json:"-"`
 	// PublishedReleaseID points at the live immutable config snapshot; NULL
 	// means the public render falls back to the working columns above.
 	PublishedReleaseID *string   `json:"published_release_id"`
@@ -164,7 +168,8 @@ const siteColumns = `id::text, organization_id::text, workspace_id::text, slug, 
 	homepage_config, navigation_config, style_config, custom_css, comments_mode,
 	pages_config, published_release_id::text, created_at, updated_at,
 	COALESCE(logo_attachment_id::text, ''), COALESCE(favicon_attachment_id::text, ''),
-	COALESCE(social_image_attachment_id::text, '')`
+	COALESCE(social_image_attachment_id::text, ''),
+	COALESCE(draft_theme_revision_id::text, ''), COALESCE(published_theme_revision_id::text, '')`
 
 func scanSiteRow(row interface{ Scan(...any) error }) (Site, error) {
 	var item Site
@@ -173,7 +178,8 @@ func scanSiteRow(row interface{ Scan(...any) error }) (Site, error) {
 		&item.DefaultLocale, &item.EnabledLocales, &item.FallbackToDefault,
 		&item.HomepageConfig, &item.NavigationConfig, &item.StyleConfig, &item.CustomCss,
 		&item.CommentsMode, &item.PagesConfig, &item.PublishedReleaseID, &item.CreatedAt, &item.UpdatedAt,
-		&item.LogoAttachmentID, &item.FaviconAttachmentID, &item.SocialImageAttachmentID)
+		&item.LogoAttachmentID, &item.FaviconAttachmentID, &item.SocialImageAttachmentID,
+		&item.DraftThemeRevisionID, &item.PublishedThemeRevisionID)
 	if err != nil {
 		return Site{}, err
 	}

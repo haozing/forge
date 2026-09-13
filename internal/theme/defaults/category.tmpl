@@ -1,0 +1,10 @@
+{{define "content"}}
+<div class="category-page">
+  {{with .Crumb}}<nav class="crumbs">{{range .}}<a href="{{.Href}}">{{.Name}}</a> / {{end}}</nav>{{end}}
+  <h1>{{.Title}}</h1>
+  {{if .Children}}<section class="subcategories"><h2>子分类</h2>
+    <ul>{{range .Children}}<li><a href="{{.Href}}">{{.Name}}</a> <span class="count">{{.Count}}</span></li>{{end}}</ul>
+  </section>{{end}}
+  <div class="cards">{{range .Items}}{{template "card" .}}{{end}}</div>
+</div>
+{{end}}
