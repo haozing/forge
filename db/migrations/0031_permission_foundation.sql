@@ -61,8 +61,15 @@ DELETE FROM site.site_content_bindings b USING doomed_sites d
     WHERE b.organization_id = d.organization_id AND b.site_id = d.id;
 DELETE FROM site.path_redirects r USING doomed_sites d
     WHERE r.organization_id = d.organization_id AND r.site_id = d.id;
+-- 已发布的 doomed 站点自身指着 release，先摘指针再删 release，否则 FK 违约。
+UPDATE site.public_sites s SET published_release_id = NULL
+    FROM doomed_sites d
+    WHERE s.organization_id = d.organization_id AND s.id = d.id;
 DELETE FROM site.site_releases rel USING doomed_sites d
     WHERE rel.organization_id = d.organization_id AND rel.site_id = d.id;
+-- 缓存失效队列同样外键指着站点，随站点一起清理。
+DELETE FROM delivery.cache_invalidations ci USING doomed_sites d
+    WHERE ci.organization_id = d.organization_id AND ci.site_id = d.id;
 DELETE FROM site.public_sites s USING doomed_sites d
     WHERE s.organization_id = d.organization_id AND s.id = d.id;
 

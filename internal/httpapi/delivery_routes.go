@@ -116,6 +116,9 @@ func writeDeliveryError(w http.ResponseWriter, r *http.Request, service *deliver
 	if errors.As(err, &apiErr) && status == http.StatusInternalServerError {
 		status, _ = agentquery.HTTPStatus(err)
 	}
+	if status == http.StatusInternalServerError {
+		log.Printf("delivery internal error path=%s err=%v", r.URL.Path, err)
+	}
 	writeDeliveryPage(w, r, service, service.ErrorPage(status))
 }
 

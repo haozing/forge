@@ -81,6 +81,25 @@ func TestRenderPagesSmoke(t *testing.T) {
 		t.Fatal("no-cover detail must not emit og:image")
 	}
 
+	// 回归：发布时间非空时 with 块把点绑到 PublishedOn 字符串上，datetime
+	// 必须走根 VM 的 UpdatedISO（线上曾因 {{.UpdatedISO}} 落在 string 上下文
+	// 而整页 500）。有发布时间 + 无发布时间两种形态都要渲染成功。
+	dated := DetailVM{Page: Page{Kind: "detail", Site: chrome, Title: "Dated · Demo", Canonical: "http://x/sites/demo/posts/dated"}}
+	dated.ContentHTML = "<p>body</p>"
+	dated.PublishedOn = "2026-09-13"
+	dated.UpdatedISO = "2026-09-13T08:00:00Z"
+	dated.VersionNo = 3
+	dated.Publications = []PublicationVM{{VersionNo: 3, PublishedOn: "2026-09-13", ChangeNote: "first", AILabel: ""}}
+	body, err = renderer.RenderPage("detail", dated)
+	if err != nil {
+		t.Fatalf("dated detail render: %v", err)
+	}
+	for _, marker := range []string{`datetime="2026-09-13T08:00:00Z"`, "发布于 2026-09-13", `v3`} {
+		if !strings.Contains(string(body), marker) {
+			t.Fatalf("dated detail output missing %q", marker)
+		}
+	}
+
 	// The markdown sanitizer pipeline output is marked safe by noescape —
 	// verify a raw <script> can never reach it via the VM either (defense in
 	// depth documented in design doc §10).

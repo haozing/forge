@@ -3,7 +3,7 @@
 {{range .Blocks}}
 <section class="home-block {{.StyleClass}}">
   {{if eq .Type "hero"}}
-  <div class="block-hero">{{if .Title}}<h1>{{.Title}}</h1>{{end}}{{with .Subtitle}}<p>{{.}}</p>{{end}}{{with .Href}}{{if $.Items}}<a class="block-cta" href="{{(index $.Items 0).Href}}">{{$.Subtitle}}</a>{{end}}{{end}}</div>
+  <div class="block-hero">{{if .Title}}<h2>{{.Title}}</h2>{{end}}{{with .Subtitle}}<p>{{.}}</p>{{end}}{{with .Href}}{{if $.Items}}<a class="block-cta" href="{{(index $.Items 0).Href}}">{{$.Subtitle}}</a>{{end}}{{end}}</div>
   {{else if eq .Type "text"}}
   <div class="block-text">{{if .Title}}<h2>{{.Title}}</h2>{{end}}{{with .BodyHTML}}{{noescape .}}{{end}}</div>
   {{else if eq .Type "links"}}
@@ -19,7 +19,7 @@
 </section>
 {{end}}
 {{else}}
-{{with .HeroTitle}}<section class="hero"><h1>{{.}}</h1>{{with $.HeroSummary}}<p>{{.}}</p>{{end}}</section>{{end}}
+{{with .HeroTitle}}<section class="hero"><h2>{{.}}</h2>{{with $.HeroSummary}}<p>{{.}}</p>{{end}}</section>{{end}}
 {{$showTags := .ShowTagCloud}}
 {{range .Sections}}
 <section class="home-section home-{{.Type}}">
