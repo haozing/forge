@@ -4,7 +4,6 @@
   <form action="{{.Site.SearchHref}}" method="get">
     <input type="search" name="q" value="{{.Query}}" aria-label="{{i18n "search"}}">
   </form>
-  <div class="cards">{{range .Items}}{{template "card" .}}{{end}}</div>
   {{searchIsland}}
 </div>
 {{end}}

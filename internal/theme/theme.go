@@ -165,6 +165,14 @@ func Compile(files map[string]string, opts Options) (*Theme, error) {
 		},
 		"json":  marshalJSON,
 		"i18n":  func(key string) string { return i18nText(key) },
+		"dict": func(pairs ...any) map[string]any {
+			out := make(map[string]any, len(pairs)/2)
+			for i := 0; i+1 < len(pairs); i += 2 {
+				key, _ := pairs[i].(string)
+				out[key] = pairs[i+1]
+			}
+			return out
+		},
 		"query": opts.Query,
 		SearchIslandFn: func() string {
 			return `<script src="/static/delivery-search.js" defer></script>`

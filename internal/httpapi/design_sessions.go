@@ -11,6 +11,7 @@ package httpapi
 
 import (
 	crand "crypto/rand"
+	"log"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -95,6 +96,7 @@ func designSessionEndpoints(deps Dependencies) (start, get, patch, apply func(w 
 			}
 			updated, err := deps.Sites.ApplyDesignSession(r.Context(), principal, workspaceID, siteID, r.PathValue("sessionId"))
 			if err != nil {
+				log.Printf("design session apply failed: %v", err)
 				SiteError(w, err, "design_session_apply_failed")
 				return
 			}

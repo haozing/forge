@@ -141,6 +141,13 @@ func (s *Service) SaveThemeDraft(ctx context.Context, principal auth.Principal, 
 		if err != nil {
 			return ThemeRevision{}, fmt.Errorf("create theme draft: %w", err)
 		}
+		// 站点 draft 指针必须同步（PublishThemeRevision 依赖它匹配修订版）。
+		if _, err := tx.Exec(ctx, `
+			UPDATE site.public_sites SET draft_theme_revision_id = $3::uuid
+			WHERE organization_id = $1::uuid AND id = $2::uuid
+		`, principal.OrganizationID, siteID, draft.ID); err != nil {
+			return ThemeRevision{}, err
+		}
 	} else if err != nil {
 		return ThemeRevision{}, err
 	} else {

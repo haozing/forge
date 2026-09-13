@@ -14,5 +14,5 @@
 {{end}}
 
 {{define "pager"}}
-{{with .NextHref}}<a class="pager-next" href="{{.}}">{{i18n "next"}} &rarr;</a>{{end}}
+{{with .Pagination.NextHref}}<a class="pager-next" href="{{.}}">{{i18n "next"}} &rarr;</a>{{end}}
 {{end}}
