@@ -152,9 +152,9 @@ func (s *Service) SaveThemeDraft(ctx context.Context, principal auth.Principal, 
 		return ThemeRevision{}, err
 	} else {
 		if _, err := tx.Exec(ctx, `
-			UPDATE site.site_theme_revisions SET files = $3::jsonb, updated_at = now()
-			WHERE id = $4::uuid
-		`, principal.OrganizationID, siteID, files, draft.ID); err != nil {
+			UPDATE site.site_theme_revisions SET files = $2::jsonb, updated_at = now()
+			WHERE organization_id = $1::uuid AND id = $3::uuid
+		`, principal.OrganizationID, files, draft.ID); err != nil {
 			return ThemeRevision{}, fmt.Errorf("update theme draft: %w", err)
 		}
 	}
