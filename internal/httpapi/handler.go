@@ -121,7 +121,7 @@ func NewHandler() http.Handler {
 }
 
 func NewHandlerWithDeps(deps Dependencies) http.Handler {
-	var handler http.Handler = httpIdempotency(deps, newRouter(deps))
+	var handler http.Handler = httpIdempotency(deps, withLocalePrefix(newRouter(deps)))
 	handler = rateLimitMiddleware(handler)
 	if len(deps.AllowedOrigins) > 0 {
 		handler = withOriginPolicy(deps.AllowedOrigins, handler)

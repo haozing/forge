@@ -282,6 +282,10 @@ func ValidatePagesConfig(ctx context.Context, tx pgx.Tx, organizationID, workspa
 
 func validateRankedSortField(ctx context.Context, tx pgx.Tx, organizationID, workspaceID, modelKey, sortField string) error {
 	var count int
+	// nil tx（纯解析路径/测试）无法做模型准入查询，按校验失败处理而非 panic。
+	if tx == nil {
+		return fmt.Errorf("%w: ranked.sort_field 需要数据库校验", ErrInvalidInput)
+	}
 	err := tx.QueryRow(ctx, `
 		SELECT count(*)
 		FROM model.resource_models rm

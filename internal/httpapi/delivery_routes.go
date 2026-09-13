@@ -127,7 +127,13 @@ func writeDeliveryError(w http.ResponseWriter, r *http.Request, service *deliver
 // deliveryLocale extracts and shape-validates the optional locale prefix
 // (D11/E)。空串 = 默认语言（无前缀访问）；非法形态一律空串（兜底路由吞掉）。
 func deliveryLocale(r *http.Request) string {
-	locale := strings.ToLower(strings.TrimSpace(r.PathValue("locale")))
+	return localeCodeShape(r.PathValue("locale"))
+}
+
+// localeCodeShape normalizes a two-letter language code, or answers "" for
+// any other shape.
+func localeCodeShape(value string) string {
+	locale := strings.ToLower(strings.TrimSpace(value))
 	if len(locale) != 2 {
 		return ""
 	}
@@ -137,6 +143,31 @@ func deliveryLocale(r *http.Request) string {
 		}
 	}
 	return locale
+}
+
+// withLocalePrefix rewrites the optional /{locale}/ prefix of the public-site
+// tree (D11/E): /sites/{slug}/{locale}/… → /sites/{slug}/…, exposing the
+// locale to handlers via r.SetPathValue. Only strict two-letter codes are
+// consumed — fixed route segments (posts/tags/media/c/…) never match, and
+// content slugs equal to a language code are refused at write time (K7
+// reserved slugs), so no ambiguity exists.
+func withLocalePrefix(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if rest, ok := strings.CutPrefix(r.URL.Path, "/sites/"); ok {
+			parts := strings.SplitN(rest, "/", 3)
+			if len(parts) >= 2 && site.ValidSlug(parts[0]) {
+				if code := localeCodeShape(parts[1]); code != "" {
+					trailing := ""
+					if len(parts) == 3 {
+						trailing = parts[2]
+					}
+					r.URL.Path = "/sites/" + parts[0] + "/" + trailing
+					r.SetPathValue("locale", code)
+				}
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func deliverySiteHome(deps Dependencies) http.HandlerFunc {

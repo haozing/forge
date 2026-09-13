@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -63,7 +64,10 @@ func Capture(ctx context.Context, enabled bool, html string, viewports []Viewpor
 
 func captureOne(ctx context.Context, html string, vp Viewport, timeout time.Duration) ([]byte, error) {
 	// data: URL 承载完整 HTML——不落盘、不出网（与容器禁网策略双保险）。
-	dataURL := "data:text/html;charset=utf-8," + html
+	// HTML 必须整体 percent 编码：原文的 '#'（如 CSS 颜色）会被 data URL
+	// 解析为 fragment 起点；QueryEscape 的空格 '+' 在 data: 下不解码，会把
+	// <style> 里所有空格变 '+' 使样式全坏——统一还原为 %20。
+	dataURL := "data:text/html;charset=utf-8," + strings.ReplaceAll(url.QueryEscape(html), "+", "%20")
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
 		chromedp.Flag("headless", true),
 		chromedp.Flag("no-sandbox", true), // 容器内 root 必需

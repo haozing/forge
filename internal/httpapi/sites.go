@@ -77,6 +77,9 @@ type UpdateSiteRequest struct {
 	Name                    *string          `json:"name"`
 	Domain                  *string          `json:"domain"`
 	DefaultContentScope     *string          `json:"default_content_scope"`
+	DefaultLocale           *string          `json:"default_locale"`
+	EnabledLocales          *[]string        `json:"enabled_locales"`
+	FallbackToDefault       *bool            `json:"fallback_to_default"`
 	HomepageConfig          *json.RawMessage `json:"homepage_config"`
 	PagesConfig             *json.RawMessage `json:"pages_config"`
 	NavigationConfig        *json.RawMessage `json:"navigation_config"`
@@ -177,6 +180,9 @@ func SiteResource(deps Dependencies) http.HandlerFunc {
 					Name:                    input.Name,
 					Domain:                  input.Domain,
 					DefaultContentScope:     input.DefaultContentScope,
+					DefaultLocale:           input.DefaultLocale,
+					EnabledLocales:          input.EnabledLocales,
+					FallbackToDefault:       input.FallbackToDefault,
 					HomepageConfig:          input.HomepageConfig,
 					PagesConfig:             input.PagesConfig,
 					NavigationConfig:        input.NavigationConfig,

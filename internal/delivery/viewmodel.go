@@ -23,6 +23,8 @@ import (
 type NavItem struct {
 	Label string
 	Href  string
+	// Hreflang 是语言切换器条目的语言码（小写 BCP47）；普通导航项为空。
+	Hreflang string
 }
 
 // Chrome is the per-site page furniture every template receives.

@@ -122,13 +122,13 @@ func SetPublishedPointerTx(ctx context.Context, tx pgx.Tx, row LifecycleRow, ver
 	}
 	// D16：发布历史行（更新记录块的数据源）。
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO asset.asset_publications
-			(organization_id, workspace_id, asset_id, asset_version_id, version_no,
-			 origin, confirmation_status, change_note, published_by)
-		SELECT $1::uuid, $2::uuid, $4::uuid, v.id, v.version_no, v.origin,
-		       v.confirmation_status, NULLIF($6, ''), now(), $5::uuid
-		FROM asset.asset_versions v
-		WHERE v.organization_id = $1::uuid AND v.id = $3::uuid
+	INSERT INTO asset.asset_publications
+		(organization_id, workspace_id, asset_id, asset_version_id, version_no,
+		 origin, confirmation_status, change_note, published_by)
+	SELECT $1::uuid, $2::uuid, $4::uuid, v.id, v.version_no, v.origin,
+	       v.confirmation_status, NULLIF($6, ''), $5::uuid
+	FROM asset.asset_versions v
+	WHERE v.organization_id = $1::uuid AND v.id = $3::uuid
 	`, row.OrganizationID, row.WorkspaceID, versionID, row.ID, actorUserID, changeNote); err != nil {
 		return next, fmt.Errorf("record asset publication history: %w", err)
 	}

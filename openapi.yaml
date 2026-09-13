@@ -6391,6 +6391,9 @@ components:
         name: { type: string, maxLength: 200 }
         domain: { type: string }
         default_content_scope: { type: string, enum: [public, organization, workspace] }
+        default_locale: { type: string, description: '默认语言（ISO 639-1 两字母，E1/D11）；无前缀路由' }
+        enabled_locales: { type: array, items: { type: string }, description: '启用语言集合（须含 default_locale，D11）' }
+        fallback_to_default: { type: boolean, description: '未启用语言访问时回退默认语言（E 系列）' }
         homepage_config: { type: object, description: '首页栏目（旧版，被 pages_config 取代时忽略）' }
         pages_config: { type: object, description: '页面配置 v2（C1）：{version:2, home:{content_width, blocks:[hero|latest|ranked|featured|categories|text|links]}, pages:[自定义页 ≤20], collections:{model_key:{sort_field,order,page_size}}, nav:{order,hidden,extra}}' }
         navigation_config: { type: object }

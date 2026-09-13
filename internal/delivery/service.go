@@ -157,7 +157,7 @@ func chrome(facts site.SiteFacts, style site.StyleConfig, pageKind string) Chrom
 			if locale != facts.Site.DefaultLocale {
 				href += "/" + locale
 			}
-			languages = append(languages, NavItem{Label: strings.ToUpper(locale), Href: href})
+			languages = append(languages, NavItem{Label: strings.ToUpper(locale), Href: href, Hreflang: locale})
 		}
 	}
 	return Chrome{

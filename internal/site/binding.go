@@ -200,28 +200,37 @@ func (s Service) SetExcluded(ctx context.Context, principal auth.Principal, work
 	if err := s.require(ctx, principal, workspaceID, authz.ActionSiteDesign); err != nil {
 		return err
 	}
-	if _, err := s.GetSite(ctx, principal, workspaceID, siteID); err != nil {
+	site, err := s.GetSite(ctx, principal, workspaceID, siteID)
+	if err != nil {
 		return err
 	}
+	tx, err := s.Store.Pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("exclude tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	action := "inclusion_restored"
 	if active {
-		_, err := s.Store.Pool.Exec(ctx, `
+		action = "inclusion_excluded"
+		if _, err := tx.Exec(ctx, `
 			INSERT INTO site.site_exclusions (site_id, asset_id, organization_id, excluded_by)
 			VALUES ($2::uuid, $3::uuid, $1::uuid, $4::uuid)
 			ON CONFLICT (site_id, asset_id) DO NOTHING
-		`, principal.OrganizationID, siteID, assetID, principal.UserID)
-		if err != nil {
+		`, principal.OrganizationID, siteID, assetID, principal.UserID); err != nil {
 			return fmt.Errorf("exclude asset: %w", err)
 		}
-		return nil
-	}
-	_, err := s.Store.Pool.Exec(ctx, `
+	} else if _, err := tx.Exec(ctx, `
 		DELETE FROM site.site_exclusions
 		WHERE organization_id = $1::uuid AND site_id = $2::uuid AND asset_id = $3::uuid
-	`, principal.OrganizationID, siteID, assetID)
-	if err != nil {
+	`, principal.OrganizationID, siteID, assetID); err != nil {
 		return fmt.Errorf("restore asset: %w", err)
 	}
-	return nil
+	// 排除/恢复即时改变派生收录视图的行集，必须失效页面缓存，
+	// 否则已下线内容在缓存 TTL 内仍可访问。
+	if err := appendSiteEvent(ctx, tx, s.Events, principal, workspaceID, site, action); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 // SetFeatured marks (active=true) or clears (active=false) the featured flag
@@ -233,26 +242,34 @@ func (s Service) SetFeatured(ctx context.Context, principal auth.Principal, work
 	if err := s.require(ctx, principal, workspaceID, authz.ActionSiteDesign); err != nil {
 		return err
 	}
-	if _, err := s.GetSite(ctx, principal, workspaceID, siteID); err != nil {
+	site, err := s.GetSite(ctx, principal, workspaceID, siteID)
+	if err != nil {
 		return err
 	}
+	tx, err := s.Store.Pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("feature tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	action := "feature_cleared"
 	if active {
-		_, err := s.Store.Pool.Exec(ctx, `
+		action = "featured"
+		if _, err := tx.Exec(ctx, `
 			INSERT INTO site.site_featured (site_id, asset_id, organization_id, marked_by)
 			VALUES ($2::uuid, $3::uuid, $1::uuid, $4::uuid)
 			ON CONFLICT (site_id, asset_id) DO NOTHING
-		`, principal.OrganizationID, siteID, assetID, principal.UserID)
-		if err != nil {
+		`, principal.OrganizationID, siteID, assetID, principal.UserID); err != nil {
 			return fmt.Errorf("feature asset: %w", err)
 		}
-		return nil
-	}
-	_, err := s.Store.Pool.Exec(ctx, `
+	} else if _, err := tx.Exec(ctx, `
 		DELETE FROM site.site_featured
 		WHERE organization_id = $1::uuid AND site_id = $2::uuid AND asset_id = $3::uuid
-	`, principal.OrganizationID, siteID, assetID)
-	if err != nil {
+	`, principal.OrganizationID, siteID, assetID); err != nil {
 		return fmt.Errorf("unfeature asset: %w", err)
 	}
-	return nil
+	// 首页 featured 模块消费精选位，与排除同理需要页面缓存失效。
+	if err := appendSiteEvent(ctx, tx, s.Events, principal, workspaceID, site, action); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
