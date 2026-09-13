@@ -6,10 +6,13 @@ package delivery
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"sync"
 
+	"agentchunzhi/internal/auth"
+	"agentchunzhi/internal/site"
 	"agentchunzhi/internal/theme"
 )
 
@@ -72,4 +75,16 @@ func renderThemed(files json.RawMessage, cacheKey, siteSlug, kind string, vm any
 		return nil, fmt.Errorf("delivery: render themed page %s: %w", kind, err)
 	}
 	return buffer.Bytes(), nil
+}
+
+// themeQueryFn 构造绑定一次渲染的 query 原语实现。
+func (s *Service) themeQueryFn(ctx context.Context, principal auth.Principal, siteRow site.Site) func(map[string]any) (*theme.QueryResult, error) {
+	if s.Sites == nil {
+		return nil
+	}
+	fn, err := s.Sites.ThemeQuery(ctx, principal, siteRow.WorkspaceID, siteRow.ID, s.Reader)
+	if err != nil {
+		return nil
+	}
+	return fn
 }

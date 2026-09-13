@@ -45,13 +45,13 @@ const MaxQueryLimit = 20
 // Queries 是一次渲染的 query 执行环境：绑定站点与预算，模板经
 // {{.Query (dict …)}} 调用（Page.Query 委托到这里）。
 type Queries struct {
-	impl   func(params QueryParams) (*QueryResult, error)
+	impl   QueryFunc
 	budget atomic.Int32
 }
 
 // NewQueries 构造一次渲染的查询环境。impl 为 nil 时 query 返回空结果
 //（引擎以默认主题渲染、且调用方未接数据面的场景）。
-func NewQueries(impl func(params QueryParams) (*QueryResult, error)) *Queries {
+func NewQueries(impl QueryFunc) *Queries {
 	return &Queries{impl: impl}
 }
 
@@ -106,11 +106,7 @@ func (q *Queries) Run(raw map[string]any) (*QueryResult, error) {
 	if q.impl == nil {
 		return &QueryResult{}, nil
 	}
-	params, err := ParseParams(raw)
-	if err != nil {
-		return nil, err
-	}
-	return q.impl(params)
+	return q.impl(raw)
 }
 
 // QueryFor 是模板引擎 FuncMap 注入形态（无接收者），委托到本环境。

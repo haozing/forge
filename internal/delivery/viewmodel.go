@@ -13,6 +13,7 @@ import (
 
 	"agentchunzhi/internal/query"
 	"agentchunzhi/internal/site"
+	"agentchunzhi/internal/theme"
 	"agentchunzhi/internal/tag"
 
 	"html/template"
@@ -70,6 +71,8 @@ type Page struct {
 	// JSONLD carries pre-marshaled structured data (json.Marshal escapes
 	// < > & so the script context cannot be broken out of).
 	JSONLD template.JS
+	// Queries 是本次渲染的公开内容查询环境（主题 query 原语）。
+	Queries *theme.Queries
 	// Kind names the page template (content block).
 	Kind string
 }
@@ -584,4 +587,12 @@ type CustomPageVM struct {
 	Site        Chrome
 	Heading     string
 	ContentHTML template.HTML
+}
+
+// Query 是模板内的公开内容查询原语（§4.5）：nil 环境返回空结果。
+func (p Page) Query(params map[string]any) (*theme.QueryResult, error) {
+	if p.Queries == nil {
+		return &theme.QueryResult{}, nil
+	}
+	return p.Queries.Run(params)
 }

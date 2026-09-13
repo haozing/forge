@@ -157,6 +157,13 @@ func (s *Service) SaveThemeDraft(ctx context.Context, principal auth.Principal, 
 		`, principal.OrganizationID, files, draft.ID); err != nil {
 			return ThemeRevision{}, fmt.Errorf("update theme draft: %w", err)
 		}
+		// UPDATE 分支同样保持站点 draft 指针一致。
+		if _, err := tx.Exec(ctx, `
+			UPDATE site.public_sites SET draft_theme_revision_id = $3::uuid
+			WHERE organization_id = $1::uuid AND id = $2::uuid
+		`, principal.OrganizationID, siteID, draft.ID); err != nil {
+			return ThemeRevision{}, err
+		}
 	}
 
 	if err := appendSiteEvent(ctx, tx, s.Events, principal, workspaceID, site, "theme_draft_saved"); err != nil {
@@ -282,7 +289,7 @@ func (s *Service) PublishThemeRevision(ctx context.Context, principal auth.Princ
 		return ThemeRevision{}, err
 	}
 
-	// release 快照钉住主题修订版。
+	// release 快照钉住主题修订版，并成为站点的当前发布指针。
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO site.site_releases (organization_id, workspace_id, site_id, revision, config, published_by)
 		SELECT organization_id, workspace_id, id,
@@ -293,6 +300,18 @@ func (s *Service) PublishThemeRevision(ctx context.Context, principal auth.Princ
 		WHERE organization_id = $1::uuid AND id = $2::uuid
 	`, principal.OrganizationID, siteID, newRevID, principal.UserID); err != nil {
 		return ThemeRevision{}, fmt.Errorf("create theme release: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE site.public_sites s
+		SET published_release_id = (
+			SELECT r.id FROM site.site_releases r
+			WHERE r.organization_id = s.organization_id AND r.site_id = s.id
+			  AND r.revision = (SELECT COALESCE(MAX(revision), 0) FROM site.site_releases r2
+			                    WHERE r2.organization_id = s.organization_id AND r2.site_id = s.id)
+		)
+		WHERE s.organization_id = $1::uuid AND s.id = $2::uuid
+	`, principal.OrganizationID, siteID); err != nil {
+		return ThemeRevision{}, fmt.Errorf("point published release: %w", err)
 	}
 
 	updated, err := s.GetSite(ctx, principal, workspaceID, siteID)

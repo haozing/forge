@@ -15,12 +15,13 @@ import (
 	"agentchunzhi/internal/auth"
 	agentquery "agentchunzhi/internal/query"
 	"agentchunzhi/internal/site"
+	"agentchunzhi/internal/theme"
 )
 
 // About serves the about page (content_type='about' binding).
 func (s *Service) About(ctx context.Context, addr string, principal auth.Principal, slug, baseURL string) (*Response, error) {
 	routePath := "/sites/" + slug + "/about/"
-	return s.pipeline(ctx, addr, principal, slug, routePath, baseURL, func(ctx context.Context, facts site.SiteFacts, band string) (renderOutput, error) {
+	return s.pipeline(ctx, addr, principal, slug, routePath, baseURL, func(ctx context.Context, facts site.SiteFacts, band string, queries *theme.Queries) (renderOutput, error) {
 		if gated(facts, band) {
 			return s.gateOutput(facts)
 		}
@@ -31,6 +32,7 @@ func (s *Service) About(ctx context.Context, addr string, principal auth.Princip
 		vm := ResolveDetail(slug, content, s.authorizedBodyImages(ctx, facts, content.Markdown))
 		vm.Kind = "about"
 		vm.Site = chrome(facts, "about")
+		vm.Queries = queries
 		vm.Title = content.Title + " · " + facts.Site.Name
 		// Keep ResolveDetail's description (summary -> excerpt -> title).
 		vm.Canonical = baseURL + routePath
@@ -43,7 +45,7 @@ func (s *Service) About(ctx context.Context, addr string, principal auth.Princip
 // entries link to details; no client pagination).
 func (s *Service) Archive(ctx context.Context, addr string, principal auth.Principal, slug, baseURL string) (*Response, error) {
 	routePath := "/sites/" + slug + "/archive/"
-	return s.pipeline(ctx, addr, principal, slug, routePath, baseURL, func(ctx context.Context, facts site.SiteFacts, band string) (renderOutput, error) {
+	return s.pipeline(ctx, addr, principal, slug, routePath, baseURL, func(ctx context.Context, facts site.SiteFacts, band string, queries *theme.Queries) (renderOutput, error) {
 		if gated(facts, band) {
 			return s.gateOutput(facts)
 		}
@@ -67,6 +69,7 @@ func (s *Service) Archive(ctx context.Context, addr string, principal auth.Princ
 		}{Page: Page{Kind: "archive"}}
 		vm.Years = groupArchive(slug, items, 160)
 		vm.Site = chrome(facts, "archive")
+		vm.Queries = queries
 		vm.Title = "归档 · " + facts.Site.Name
 		vm.Canonical = baseURL + routePath
 		vm.NoIndex = !vm.Site.ScopePublic
@@ -383,7 +386,7 @@ func (s *Service) postNeighbors(ctx context.Context, facts site.SiteFacts, asset
 // structured data and category-level SEO title/description.
 func (s *Service) Category(ctx context.Context, addr string, principal auth.Principal, siteSlug, path, baseURL string, locale string) (*Response, error) {
 	routePath := "/sites/" + siteSlug + "/c/" + strings.Trim(path, "/")
-	return s.pipeline(ctx, addr, principal, siteSlug, routePath, baseURL, func(ctx context.Context, facts site.SiteFacts, band string) (renderOutput, error) {
+	return s.pipeline(ctx, addr, principal, siteSlug, routePath, baseURL, func(ctx context.Context, facts site.SiteFacts, band string, queries *theme.Queries) (renderOutput, error) {
 		if gated(facts, band) {
 			return s.gateOutput(facts)
 		}
@@ -436,7 +439,7 @@ func (s *Service) Category(ctx context.Context, addr string, principal auth.Prin
 // 页的全模块渲染。canonical 与缓存走同一 pipeline（发布快照冻结）。
 func (s *Service) CustomPage(ctx context.Context, addr string, principal auth.Principal, siteSlug, pageSlug, baseURL string, locale string) (*Response, error) {
 	routePath := "/sites/" + siteSlug + "/p/" + strings.Trim(pageSlug, "/")
-	return s.pipeline(ctx, addr, principal, siteSlug, routePath, baseURL, func(ctx context.Context, facts site.SiteFacts, band string) (renderOutput, error) {
+	return s.pipeline(ctx, addr, principal, siteSlug, routePath, baseURL, func(ctx context.Context, facts site.SiteFacts, band string, queries *theme.Queries) (renderOutput, error) {
 		if gated(facts, band) {
 			return s.gateOutput(facts)
 		}

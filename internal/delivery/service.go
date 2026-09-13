@@ -24,6 +24,7 @@ import (
 	"agentchunzhi/internal/auth"
 	"agentchunzhi/internal/objectstore"
 	"agentchunzhi/internal/site"
+	"agentchunzhi/internal/theme"
 	"agentchunzhi/internal/store"
 	"agentchunzhi/internal/tag"
 
@@ -103,7 +104,7 @@ type renderOutput struct {
 }
 
 // buildFunc builds one page against already-loaded facts and visitor band.
-type buildFunc func(ctx context.Context, facts site.SiteFacts, band string) (renderOutput, error)
+type buildFunc func(ctx context.Context, facts site.SiteFacts, band string, queries *theme.Queries) (renderOutput, error)
 
 // tier resolves the visitor band of one request against the site row (the
 // reader applies the authoritative per-read re-verification; this only picks
@@ -200,8 +201,9 @@ func (s *Service) pipeline(ctx context.Context, addr string, principal auth.Prin
 			CacheControl: entry.CacheControl, NoIndex: entry.NoIndex, Status: 200,
 		}, nil
 	}
+	queries := theme.NewQueries(s.themeQueryFn(ctx, principal, facts.Site))
 	result, err, _ := s.group.Do(key, func() (any, error) {
-		output, err := build(ctx, facts, band)
+		output, err := build(ctx, facts, band, queries)
 		if err != nil {
 			return nil, err
 		}
@@ -227,7 +229,7 @@ func (s *Service) pipeline(ctx context.Context, addr string, principal auth.Prin
 		} else {
 			body, rerr = renderThemed(facts.ThemeFiles,
 				revision(facts)+"-"+facts.Site.PublishedThemeRevisionID,
-				facts.Site.Slug, output.kind, output.vm, nil, baseURL)
+				facts.Site.Slug, output.kind, output.vm, queries, baseURL)
 		}
 		if rerr != nil {
 			return nil, rerr
@@ -323,7 +325,7 @@ func (s *Service) ErrorPage(status int) *Response {
 // Home serves the site homepage.
 func (s *Service) Home(ctx context.Context, addr string, principal auth.Principal, slug, baseURL string, locale string) (*Response, error) {
 	routePath := "/sites/" + slug + "/" + locale
-	return s.pipeline(ctx, addr, principal, slug, routePath, baseURL, func(ctx context.Context, facts site.SiteFacts, band string) (renderOutput, error) {
+	return s.pipeline(ctx, addr, principal, slug, routePath, baseURL, func(ctx context.Context, facts site.SiteFacts, band string, queries *theme.Queries) (renderOutput, error) {
 		if gated(facts, band) {
 			return s.gateOutput(facts)
 		}
@@ -348,6 +350,7 @@ func (s *Service) Home(ctx context.Context, addr string, principal auth.Principa
 		}
 		vm := ResolveHome(view, facets)
 		vm.Site = chrome(facts, "home")
+		vm.Queries = queries
 		vm.Title = facts.Site.Name
 		vm.Description = facts.Site.Name
 		vm.Canonical = baseURL + routePath
@@ -362,7 +365,7 @@ func (s *Service) Posts(ctx context.Context, addr string, principal auth.Princip
 	if cursor != "" {
 		routePath += "?cursor=" + cursor
 	}
-	return s.pipeline(ctx, addr, principal, slug, routePath, baseURL, func(ctx context.Context, facts site.SiteFacts, band string) (renderOutput, error) {
+	return s.pipeline(ctx, addr, principal, slug, routePath, baseURL, func(ctx context.Context, facts site.SiteFacts, band string, queries *theme.Queries) (renderOutput, error) {
 		if gated(facts, band) {
 			return s.gateOutput(facts)
 		}
@@ -372,6 +375,7 @@ func (s *Service) Posts(ctx context.Context, addr string, principal auth.Princip
 		}
 		vm := ResolveList(slug, "文章", "/sites/"+slug+"/posts/", page, page.NextCursor)
 		vm.Site = chrome(facts, "list")
+		vm.Queries = queries
 		vm.Title = "文章 · " + facts.Site.Name
 		vm.Canonical = baseURL + routePath
 		vm.NoIndex = !vm.Site.ScopePublic
@@ -382,7 +386,7 @@ func (s *Service) Posts(ctx context.Context, addr string, principal auth.Princip
 // Post serves one post detail page.
 func (s *Service) Post(ctx context.Context, addr string, principal auth.Principal, slug, displayPath, baseURL string, locale string) (*Response, error) {
 	routePath := "/sites/" + slug + "/posts/" + displayPath
-	return s.pipeline(ctx, addr, principal, slug, routePath, baseURL, func(ctx context.Context, facts site.SiteFacts, band string) (renderOutput, error) {
+	return s.pipeline(ctx, addr, principal, slug, routePath, baseURL, func(ctx context.Context, facts site.SiteFacts, band string, queries *theme.Queries) (renderOutput, error) {
 		if gated(facts, band) {
 			return s.gateOutput(facts)
 		}
@@ -407,6 +411,7 @@ func (s *Service) Post(ctx context.Context, addr string, principal auth.Principa
 		}
 		vm := ResolveDetailWithRefs(slug, content, s.authorizedBodyImages(ctx, facts, content.Markdown), refs)
 		vm.Site = chrome(facts, "detail")
+		vm.Queries = queries
 		vm.Title = content.Title + " · " + facts.Site.Name
 		// Description comes from ResolveDetail (summary -> body excerpt ->
 		// title); overwriting it with the raw summary would drop the
@@ -440,7 +445,7 @@ func (s *Service) Post(ctx context.Context, addr string, principal auth.Principa
 // Section serves one section page.
 func (s *Service) Section(ctx context.Context, addr string, principal auth.Principal, slug, sectionSlug, modelKey, baseURL string) (*Response, error) {
 	routePath := "/sites/" + slug + "/sections/" + sectionSlug + "/"
-	return s.pipeline(ctx, addr, principal, slug, routePath, baseURL, func(ctx context.Context, facts site.SiteFacts, band string) (renderOutput, error) {
+	return s.pipeline(ctx, addr, principal, slug, routePath, baseURL, func(ctx context.Context, facts site.SiteFacts, band string, queries *theme.Queries) (renderOutput, error) {
 		if gated(facts, band) {
 			return s.gateOutput(facts)
 		}
@@ -450,6 +455,7 @@ func (s *Service) Section(ctx context.Context, addr string, principal auth.Princ
 		}
 		vm := ResolveList(slug, sectionSlug, "/sites/"+slug+"/sections/"+sectionSlug+"/", page, "")
 		vm.Site = chrome(facts, "list")
+		vm.Queries = queries
 		vm.Title = sectionSlug + " · " + facts.Site.Name
 		vm.Canonical = baseURL + routePath
 		vm.NoIndex = !vm.Site.ScopePublic
@@ -460,7 +466,7 @@ func (s *Service) Section(ctx context.Context, addr string, principal auth.Princ
 // Tags serves the tag index.
 func (s *Service) Tags(ctx context.Context, addr string, principal auth.Principal, slug, baseURL string) (*Response, error) {
 	routePath := "/sites/" + slug + "/tags/"
-	return s.pipeline(ctx, addr, principal, slug, routePath, baseURL, func(ctx context.Context, facts site.SiteFacts, band string) (renderOutput, error) {
+	return s.pipeline(ctx, addr, principal, slug, routePath, baseURL, func(ctx context.Context, facts site.SiteFacts, band string, queries *theme.Queries) (renderOutput, error) {
 		if gated(facts, band) {
 			return s.gateOutput(facts)
 		}
@@ -470,6 +476,7 @@ func (s *Service) Tags(ctx context.Context, addr string, principal auth.Principa
 		}
 		vm := ResolveTags(slug, items)
 		vm.Site = chrome(facts, "tags")
+		vm.Queries = queries
 		vm.Title = "标签 · " + facts.Site.Name
 		vm.Canonical = baseURL + routePath
 		vm.NoIndex = !vm.Site.ScopePublic
@@ -483,7 +490,7 @@ func (s *Service) TagPage(ctx context.Context, addr string, principal auth.Princ
 	if cursor != "" {
 		routePath += "?cursor=" + cursor
 	}
-	return s.pipeline(ctx, addr, principal, slug, routePath, baseURL, func(ctx context.Context, facts site.SiteFacts, band string) (renderOutput, error) {
+	return s.pipeline(ctx, addr, principal, slug, routePath, baseURL, func(ctx context.Context, facts site.SiteFacts, band string, queries *theme.Queries) (renderOutput, error) {
 		if gated(facts, band) {
 			return s.gateOutput(facts)
 		}
@@ -494,6 +501,7 @@ func (s *Service) TagPage(ctx context.Context, addr string, principal auth.Princ
 		vm := TagPageVM{Page: Page{Kind: "tag_page"}, TagKey: key, TagName: key,
 			Items: []CardVM{}, Pagination: PaginationVM{}}
 		vm.Site = chrome(facts, "list")
+		vm.Queries = queries
 		for _, post := range page.Items {
 			vm.Items = append(vm.Items, cardVM(slug, post, 160))
 		}
@@ -510,12 +518,13 @@ func (s *Service) TagPage(ctx context.Context, addr string, principal auth.Princ
 // Search serves the search shell (results arrive via the JS island).
 func (s *Service) Search(ctx context.Context, addr string, principal auth.Principal, slug, query, baseURL string) (*Response, error) {
 	routePath := "/sites/" + slug + "/search"
-	return s.pipeline(ctx, addr, principal, slug, routePath, baseURL, func(ctx context.Context, facts site.SiteFacts, band string) (renderOutput, error) {
+	return s.pipeline(ctx, addr, principal, slug, routePath, baseURL, func(ctx context.Context, facts site.SiteFacts, band string, queries *theme.Queries) (renderOutput, error) {
 		if gated(facts, band) {
 			return s.gateOutput(facts)
 		}
 		vm := SearchVM{Page: Page{Kind: "search", Title: "搜索 · " + facts.Site.Name, NoIndex: true}, Query: query}
 		vm.Site = chrome(facts, "search")
+		vm.Queries = queries
 		vm.Canonical = baseURL + routePath
 		return renderOutput{kind: "search", vm: vm, noIndex: true}, nil
 	})
@@ -533,7 +542,7 @@ var ErrFeedDisabled = fmt.Errorf("delivery: feed disabled for site scope")
 // RSS serves the site feed: the latest 50 published bindings.
 func (s *Service) RSS(ctx context.Context, addr string, principal auth.Principal, slug, baseURL string) (*Response, error) {
 	routePath := "/sites/" + slug + "/rss.xml"
-	return s.pipeline(ctx, addr, principal, slug, routePath, baseURL, func(ctx context.Context, facts site.SiteFacts, band string) (renderOutput, error) {
+	return s.pipeline(ctx, addr, principal, slug, routePath, baseURL, func(ctx context.Context, facts site.SiteFacts, band string, queries *theme.Queries) (renderOutput, error) {
 		if facts.Site.DefaultContentScope != site.ScopePublic {
 			return renderOutput{}, ErrFeedDisabled
 		}
@@ -563,7 +572,7 @@ func (s *Service) RSS(ctx context.Context, addr string, principal auth.Principal
 // post (paginated reads through the reader, capped at 10 pages).
 func (s *Service) Sitemap(ctx context.Context, addr string, principal auth.Principal, slug, baseURL string) (*Response, error) {
 	routePath := "/sites/" + slug + "/sitemap.xml"
-	return s.pipeline(ctx, addr, principal, slug, routePath, baseURL, func(ctx context.Context, facts site.SiteFacts, band string) (renderOutput, error) {
+	return s.pipeline(ctx, addr, principal, slug, routePath, baseURL, func(ctx context.Context, facts site.SiteFacts, band string, queries *theme.Queries) (renderOutput, error) {
 		if facts.Site.DefaultContentScope != site.ScopePublic {
 			return renderOutput{}, ErrFeedDisabled
 		}
@@ -622,7 +631,7 @@ func (s *Service) Sitemap(ctx context.Context, addr string, principal auth.Princ
 // sites disallow everything, design doc §4.1).
 func (s *Service) Robots(ctx context.Context, addr string, principal auth.Principal, slug, baseURL string) (*Response, error) {
 	routePath := "/sites/" + slug + "/robots.txt"
-	return s.pipeline(ctx, addr, principal, slug, routePath, baseURL, func(ctx context.Context, facts site.SiteFacts, band string) (renderOutput, error) {
+	return s.pipeline(ctx, addr, principal, slug, routePath, baseURL, func(ctx context.Context, facts site.SiteFacts, band string, queries *theme.Queries) (renderOutput, error) {
 		vm := struct{ ScopePublic bool }{ScopePublic: facts.Site.DefaultContentScope == site.ScopePublic}
 		body, err := s.Render.RenderXML("robots", vm)
 		if err != nil {
