@@ -1,171 +1,170 @@
 package site
 
-// design_session.go — AI 设计会话沙盒（站点方案 D/§10，2026-09-13）。
-// 语义：Start 把站点工作配置 fork 成 session_config；agent 的 apply_patch
-// 只改沙盒（过模块目录校验），全程不写站点行；"应用"是人审 diff 后把沙盒
-// 一次性写回站点（site.design）——与《成员与 Agent 权限统一方案》J
-// （agent 无 site.publish / 不写站点行）一致。观察（observe）在
-// RENDERER_ENABLED 未开时降级为结构化观察（token/块统计/校验问题清单）。
+// design_session.go v2 — AI 设计会话沙盒（主题化重构）。
+// 会话持有主题文件集快照（fork 自站点 draft/published 修订版）；
+// write_theme 落在会话 files；apply 把通过编译+扫描的文件集写入
+// 站点 draft 修订版；discard 零残留。
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"agentchunzhi/internal/auth"
 	"agentchunzhi/internal/authz"
+	"agentchunzhi/internal/theme"
 
 	"github.com/jackc/pgx/v5"
 )
 
-// DesignSession is one forked design sandbox.
+// DesignSession 是一次设计会话的沙盒。
 type DesignSession struct {
-	ID             string          `json:"id"`
-	OrganizationID string          `json:"organization_id"`
-	WorkspaceID    string          `json:"workspace_id"`
-	SiteID         string          `json:"site_id"`
-	SessionConfig  json.RawMessage `json:"session_config"`
-	Status         string          `json:"status"`
-	CreatedAt      time.Time       `json:"created_at"`
-	UpdatedAt      time.Time       `json:"updated_at"`
+	ID        string          `json:"id"`
+	SiteID    string          `json:"site_id"`
+	Status    string          `json:"status"`
+	Files     json.RawMessage `json:"files"`
+	BaseRevID string          `json:"base_theme_revision_id,omitempty"`
+	CreatedBy string          `json:"created_by"`
+	CreatedAt time.Time       `json:"created_at"`
+	UpdatedAt time.Time       `json:"updated_at"`
+	Issues    []string        `json:"issues,omitempty"`
 }
 
-// StartDesignSession forks the site's working design config into a sandbox
-// session. 权限：site.read + 可用 agent 应用（成员本人即满足；agent 身份
-// 不直接建会话——会话由成员发起）。
+const sessionColumns = `id::text, site_id::text, status, files,
+	COALESCE(base_theme_revision_id::text, ''), created_by::text, created_at, updated_at`
+
+func scanSession(row pgx.Row) (DesignSession, error) {
+	var s DesignSession
+	err := row.Scan(&s.ID, &s.SiteID, &s.Status, &s.Files,
+		&s.BaseRevID, &s.CreatedBy, &s.CreatedAt, &s.UpdatedAt)
+	return s, err
+}
+
+// StartDesignSession fork 站点 draft（否则 published）文件集开一个新会话。
 func (s Service) StartDesignSession(ctx context.Context, principal auth.Principal, workspaceID, siteID string) (DesignSession, error) {
-	if err := s.require(ctx, principal, workspaceID, authz.ActionSiteRead); err != nil {
+	if err := s.require(ctx, principal, workspaceID, authz.ActionSiteDesign); err != nil {
 		return DesignSession{}, err
 	}
-	current, err := s.GetSite(ctx, principal, workspaceID, siteID)
+	site, err := s.GetSite(ctx, principal, workspaceID, siteID)
 	if err != nil {
 		return DesignSession{}, err
 	}
-	var id string
-	err = s.Store.Pool.QueryRow(ctx, `
-		INSERT INTO site.design_sessions
-			(organization_id, workspace_id, site_id, session_config, base_pages_config, base_style_config, created_by)
-		VALUES ($1::uuid, $2::uuid, $3::uuid,
-		        CASE WHEN jsonb_typeof($4::jsonb->'home'->'blocks') = 'array' THEN $4::jsonb
-		             ELSE jsonb_set($4::jsonb, '{home}', '{"blocks":[]}'::jsonb, true) END,
-		        $5::jsonb, $6::jsonb, $7::uuid)
-		RETURNING id::text
-	`, principal.OrganizationID, workspaceID, siteID,
-		mustMarshalJSON(PagesConfigFork(current.PagesConfig, current.HomepageConfig)),
-		current.PagesConfig, current.StyleConfig, principal.UserID).Scan(&id)
-	if err != nil {
+	files := json.RawMessage("{}")
+	var base any
+	if site.DraftThemeRevisionID != "" {
+		err = s.Store.Pool.QueryRow(ctx, `SELECT files FROM site.site_theme_revisions WHERE id = $1::uuid`, site.DraftThemeRevisionID).Scan(&files)
+		if err == nil {
+			base = site.DraftThemeRevisionID
+		}
+	} else if site.PublishedThemeRevisionID != "" {
+		err = s.Store.Pool.QueryRow(ctx, `SELECT files FROM site.site_theme_revisions WHERE id = $1::uuid`, site.PublishedThemeRevisionID).Scan(&files)
+		if err == nil {
+			base = site.PublishedThemeRevisionID
+		}
+	}
+	if _, err := s.Store.Pool.Exec(ctx, `
+		INSERT INTO site.design_sessions (organization_id, workspace_id, site_id, files, base_theme_revision_id, created_by)
+		SELECT $1::uuid, $2::uuid, $3::uuid, $4::jsonb, $5::uuid, $6::uuid
+		WHERE NOT EXISTS (
+			SELECT 1 FROM site.design_sessions
+			WHERE organization_id = $1::uuid AND site_id = $3::uuid AND status = 'open'
+		)
+	`, principal.OrganizationID, workspaceID, siteID, files, base, principal.UserID); err != nil {
 		return DesignSession{}, fmt.Errorf("start design session: %w", err)
 	}
-	return s.GetDesignSession(ctx, principal, workspaceID, id)
+	var session DesignSession
+	err = s.Store.Pool.QueryRow(ctx, `
+		SELECT `+sessionColumns+` FROM site.design_sessions
+		WHERE organization_id = $1::uuid AND site_id = $2::uuid AND status = 'open'
+	`, principal.OrganizationID, siteID).Scan(&session.ID, &session.SiteID, &session.Status,
+		&session.Files, &session.BaseRevID, &session.CreatedBy, &session.CreatedAt, &session.UpdatedAt)
+	return session, err
 }
 
-// GetDesignSession reads one active sandbox session.
+// GetDesignSession 读会话（含 files 与主题校验 issues）。
 func (s Service) GetDesignSession(ctx context.Context, principal auth.Principal, workspaceID, sessionID string) (DesignSession, error) {
-	if err := s.require(ctx, principal, workspaceID, authz.ActionSiteRead); err != nil {
+	if err := s.require(ctx, principal, workspaceID, authz.ActionSiteDesign); err != nil {
 		return DesignSession{}, err
 	}
-	var item DesignSession
-	err := s.Store.Pool.QueryRow(ctx, `
-		SELECT id::text, organization_id::text, workspace_id::text, site_id::text,
-		       session_config, status, created_at, updated_at
-		FROM site.design_sessions
-		WHERE organization_id = $1::uuid AND workspace_id = $2::uuid AND id = $3::uuid
-	`, principal.OrganizationID, workspaceID, sessionID).Scan(
-		&item.ID, &item.OrganizationID, &item.WorkspaceID, &item.SiteID,
-		&item.SessionConfig, &item.Status, &item.CreatedAt, &item.UpdatedAt)
+	row := s.Store.Pool.QueryRow(ctx, `
+		SELECT `+sessionColumns+` FROM site.design_sessions
+		WHERE organization_id = $1::uuid AND id = $2::uuid
+	`, principal.OrganizationID, sessionID)
+	session, err := scanSession(row)
 	if err != nil {
-		if err == pgx.ErrNoRows {
-			return DesignSession{}, ErrSiteNotFound
-		}
-		return DesignSession{}, fmt.Errorf("load design session: %w", err)
+		return DesignSession{}, err
 	}
-	return item, nil
+	session.Issues = s.themeIssues(session.Files)
+	return session, nil
 }
 
-// ApplyDesignPatch mutates the sandbox config (NOT the site row). The patch
-// is a full pages_config document; it passes the same closed-catalog
-// validation as the site write path.
-func (s Service) ApplyDesignPatch(ctx context.Context, principal auth.Principal, workspaceID, sessionID string, patch json.RawMessage) (DesignSession, error) {
-	if err := s.require(ctx, principal, workspaceID, authz.ActionSiteRead); err != nil {
+// SaveDesignSessionFiles 整体替换会话文件集（write_theme 的落点）。
+func (s Service) SaveDesignSessionFiles(ctx context.Context, principal auth.Principal, workspaceID, sessionID string, files json.RawMessage) (DesignSession, error) {
+	if err := s.require(ctx, principal, workspaceID, authz.ActionSiteDesign); err != nil {
 		return DesignSession{}, err
 	}
-	var config PagesConfig
-	if err := json.Unmarshal(patch, &config); err != nil {
+	if !json.Valid(files) {
 		return DesignSession{}, ErrInvalidInput
 	}
-	tx, err := s.Store.Pool.Begin(ctx)
+	tag, err := s.Store.Pool.Exec(ctx, `
+		UPDATE site.design_sessions SET files = $3::jsonb, updated_at = now()
+		WHERE organization_id = $1::uuid AND id = $2::uuid AND status = 'open'
+	`, principal.OrganizationID, sessionID, files)
 	if err != nil {
-		return DesignSession{}, fmt.Errorf("begin design patch: %w", err)
-	}
-	defer tx.Rollback(ctx)
-	if err := ValidatePagesConfig(ctx, tx, principal.OrganizationID, workspaceID, config); err != nil {
 		return DesignSession{}, err
 	}
-	var status string
-	err = tx.QueryRow(ctx, `
-		UPDATE site.design_sessions
-		SET session_config = $3::jsonb, updated_at = now()
-		WHERE organization_id = $1::uuid AND id = $2::uuid AND status = 'active'
-		RETURNING status
-	`, principal.OrganizationID, sessionID, string(patch)).Scan(&status)
-	if err != nil {
-		if err == pgx.ErrNoRows {
-			return DesignSession{}, ErrSiteNotFound
-		}
-		return DesignSession{}, fmt.Errorf("apply design patch: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return DesignSession{}, err
+	if tag.RowsAffected() == 0 {
+		return DesignSession{}, ErrSiteNotFound
 	}
 	return s.GetDesignSession(ctx, principal, workspaceID, sessionID)
 }
 
-// ApplyDesignSession is the HUMAN step: 写回站点工作配置（site.design）。
-// agent 永远不调用本方法；发布仍走既有 release 流程。
+// ApplyDesignSession 把会话文件集经编译+扫描校验后写入站点 draft 修订版。
 func (s Service) ApplyDesignSession(ctx context.Context, principal auth.Principal, workspaceID, siteID, sessionID string) (Site, error) {
-	if err := s.require(ctx, principal, workspaceID, authz.ActionSiteDesign); err != nil {
-		return Site{}, err
-	}
 	session, err := s.GetDesignSession(ctx, principal, workspaceID, sessionID)
 	if err != nil {
 		return Site{}, err
 	}
-	if session.Status != "active" {
-		return Site{}, ErrConflict
+	if session.Status != "open" {
+		return Site{}, ErrInvalidInput
 	}
-	current, err := s.GetSite(ctx, principal, workspaceID, siteID)
-	if err != nil {
+	var files map[string]string
+	if err := json.Unmarshal(session.Files, &files); err != nil {
+		return Site{}, ErrInvalidInput
+	}
+	// 编译 + 扫描门禁（fail-closed；问题清单随 GetDesignSession.issues 暴露）。
+	if _, cerr := theme.Compile(files, theme.Options{}); cerr != nil {
+		return Site{}, ErrInvalidInput
+	}
+	if _, err := s.SaveThemeDraft(ctx, principal, workspaceID, siteID, session.Files); err != nil {
 		return Site{}, err
 	}
-	rawPages := json.RawMessage(session.SessionConfig)
-	updated, err := s.UpdateSite(ctx, principal, workspaceID, siteID, current.ETag, UpdateSiteInput{
-		PagesConfig: &rawPages,
-	})
-	if err != nil {
-		return Site{}, err
-	}
-	if _, err := s.Store.Pool.Exec(ctx, `
+	tag, err := s.Store.Pool.Exec(ctx, `
 		UPDATE site.design_sessions SET status = 'applied', updated_at = now()
 		WHERE organization_id = $1::uuid AND id = $2::uuid
-	`, principal.OrganizationID, sessionID); err != nil {
-		return Site{}, fmt.Errorf("close design session: %w", err)
+	`, principal.OrganizationID, sessionID)
+	if err != nil {
+		return Site{}, err
 	}
-	return updated, nil
+	if tag.RowsAffected() == 0 {
+		return Site{}, ErrSiteNotFound
+	}
+	return s.GetSite(ctx, principal, workspaceID, siteID)
 }
 
-// DiscardDesignSession drops the sandbox (放弃迭代零残留).
+// DiscardDesignSession 放弃会话（status=discarded，零残留）。
 func (s Service) DiscardDesignSession(ctx context.Context, principal auth.Principal, workspaceID, sessionID string) error {
-	if err := s.require(ctx, principal, workspaceID, authz.ActionSiteRead); err != nil {
+	if err := s.require(ctx, principal, workspaceID, authz.ActionSiteDesign); err != nil {
 		return err
 	}
 	tag, err := s.Store.Pool.Exec(ctx, `
 		UPDATE site.design_sessions SET status = 'discarded', updated_at = now()
-		WHERE organization_id = $1::uuid AND id = $2::uuid AND status = 'active'
+		WHERE organization_id = $1::uuid AND id = $2::uuid AND status <> 'discarded'
 	`, principal.OrganizationID, sessionID)
 	if err != nil {
-		return fmt.Errorf("discard design session: %w", err)
+		return err
 	}
 	if tag.RowsAffected() == 0 {
 		return ErrSiteNotFound
@@ -173,16 +172,23 @@ func (s Service) DiscardDesignSession(ctx context.Context, principal auth.Princi
 	return nil
 }
 
-// PagesConfigFork 归一会话 fork 文档：v2 优先；旧站（无 v2 文档）以默认
-// 配置起步，hero 文案取站点名。
-func PagesConfigFork(pagesConfig, legacyHomepage json.RawMessage) json.RawMessage {
-	if len(strings.TrimSpace(string(pagesConfig))) > 0 {
-		return pagesConfig
+// themeIssues 对文件集跑编译+扫描，返回可读问题清单（空 = 通过）。
+func (s Service) themeIssues(files json.RawMessage) []string {
+	var m map[string]string
+	if err := json.Unmarshal(files, &m); err != nil {
+		return []string{"files 不是合法的 JSON 对象"}
 	}
-	raw, err := json.Marshal(DefaultPagesConfig())
-	if err != nil {
-		return []byte("{}")
+	_, cerr := theme.Compile(m, theme.Options{})
+	if cerr == nil {
+		return nil
 	}
-	_ = legacyHomepage
-	return raw
+	var ce *theme.CompileError
+	if errors.As(cerr, &ce) {
+		out := make([]string, 0, len(ce.Problems))
+		for _, p := range ce.Problems {
+			out = append(out, fmt.Sprintf("%s:%d [%s] %s", p.File, p.Line, p.Rule, p.Detail))
+		}
+		return out
+	}
+	return []string{cerr.Error()}
 }

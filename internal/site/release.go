@@ -42,12 +42,9 @@ type ReleasePage struct {
 // CommentsMode ride the snapshot (二期: the whole user-adjustable surface is
 // versioned together).
 type ReleaseConfig struct {
-	HomepageConfig   json.RawMessage `json:"homepage_config"`
-	PagesConfig      json.RawMessage `json:"pages_config,omitempty"`
-	NavigationConfig json.RawMessage `json:"navigation_config"`
-	StyleConfig      json.RawMessage `json:"style_config"`
-	CustomCss        string          `json:"custom_css"`
-	CommentsMode     string          `json:"comments_mode"`
+	// ThemeRevisionID 是本 release 钉住的主题修订版（外观唯一事实源）。
+	ThemeRevisionID string `json:"theme_revision_id"`
+	CommentsMode    string `json:"comments_mode"`
 }
 
 const releaseColumns = `id::text, site_id::text, revision, config, published_by::text, created_at`
@@ -163,22 +160,9 @@ func (s Service) PublishRelease(ctx context.Context, principal auth.Principal, w
 		action = "rolled_back"
 	} else {
 		snapshot = ReleaseConfig{
-			HomepageConfig:   current.HomepageConfig,
-			PagesConfig:      current.PagesConfig,
-			NavigationConfig: current.NavigationConfig,
-			StyleConfig:      current.StyleConfig,
-			CustomCss:        current.CustomCss,
-			CommentsMode:     current.CommentsMode,
+			ThemeRevisionID: current.PublishedThemeRevisionID,
+			CommentsMode:    current.CommentsMode,
 		}
-	}
-	// The field whitelist is pruned (not rejected) against the models'
-	// current field_schema: a model version moved between write and publish
-	// shrinks the snapshot instead of failing the release. The pruned count
-	// C4: model_views 快照与剪枝已随白名单下沉到模型版本而移除。
-	// Render-side re-validation of the snapshot style document (design doc
-	// §7.2: both write and render reject invalid values).
-	if _, err := ParseStyleConfig(snapshot.StyleConfig); err != nil {
-		return Release{}, err
 	}
 	config, err := json.Marshal(snapshot)
 	if err != nil {

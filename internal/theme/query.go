@@ -112,3 +112,8 @@ func (q *Queries) Run(raw map[string]any) (*QueryResult, error) {
 	}
 	return q.impl(params)
 }
+
+// QueryFor 是模板引擎 FuncMap 注入形态（无接收者），委托到本环境。
+func (q *Queries) QueryFor(raw map[string]any) (*QueryResult, error) {
+	return q.Run(raw)
+}

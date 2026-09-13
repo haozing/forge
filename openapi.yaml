@@ -2952,6 +2952,97 @@ paths:
       responses:
         '200': { description: 已取消精选, content: { application/json: { schema: { $ref: '#/components/schemas/Envelope' } } } }
         '403': { $ref: '#/components/responses/Error' }
+  /api/workspaces/{workspaceId}/sites/{siteId}/theme/draft:
+    get:
+      tags: [sites]
+      operationId: getSiteThemeDraft
+      summary: 读站点主题草稿文件集（无草稿回退已发布主题）
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/SiteId'
+      responses:
+        '200':
+          description: 主题修订版（含 files）
+    put:
+      tags: [sites]
+      operationId: putSiteThemeDraft
+      summary: 整体替换草稿文件集（过主题编译 + 安全扫描，fail-closed）
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/SiteId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [files]
+              properties:
+                files: { type: object, description: '槽位 → 模板源码；layout 必须含 content 挂载点' }
+      responses:
+        '200': { description: 已保存 }
+  /api/workspaces/{workspaceId}/sites/{siteId}/theme/revisions:
+    get:
+      tags: [sites]
+      operationId: listSiteThemeRevisions
+      summary: 主题修订版历史（published/archived，含当前 draft）
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/SiteId'
+      responses:
+        '200': { description: 修订版列表 }
+  /api/workspaces/{workspaceId}/sites/{siteId}/theme/revisions/{revisionId}/publish:
+    post:
+      tags: [sites]
+      operationId: publishSiteThemeRevision
+      summary: 发布 / 回滚主题修订版（site.lifecycle，人类；agent 不可达）
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/SiteId'
+        - name: revisionId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200': { description: 已发布 }
+  /api/workspaces/{workspaceId}/sites/{siteId}/pages:
+    get:
+      tags: [sites]
+      operationId: listSitePages
+      summary: 自定义页清单
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/SiteId'
+      responses:
+        '200': { description: 页面清单 }
+    post:
+      tags: [sites]
+      operationId: createSitePage
+      summary: 新建自定义页
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/SiteId'
+      responses:
+        '201': { description: 已创建 }
+  /api/workspaces/{workspaceId}/sites/{siteId}/pages/{pageId}:
+    patch:
+      tags: [sites]
+      operationId: updateSitePage
+      summary: 更新自定义页
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/SiteId'
+      responses:
+        '200': { description: 已更新 }
+    delete:
+      tags: [sites]
+      operationId: deleteSitePage
+      summary: 删除自定义页
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/SiteId'
+      responses:
+        '200': { description: 已删除 }
   /api/workspaces/{workspaceId}/sites/{siteId}/design-sessions:
     post:
       tags: [sites]
@@ -3009,11 +3100,37 @@ paths:
           schema: { type: string, format: uuid }
       responses:
         '200': { description: 已放弃, content: { application/json: { schema: { $ref: '#/components/schemas/Envelope' } } } }
-  /api/workspaces/{workspaceId}/sites/{siteId}/design-sessions/{sessionId}/observe:
+  /api/workspaces/{workspaceId}/sites/{siteId}/design-sessions/{sessionId}/preview:
+    get:
+      tags: [sites]
+      operationId: previewDesignSession
+      summary: 沙盒主题渲染 HTML 直出（一次性 token；预览 CSP 允许 iframe）
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/SiteId'
+        - name: sessionId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: slot
+          in: query
+          schema: { type: string, default: home }
+        - name: token
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: 完整 HTML 页面
+          content:
+            text/html:
+              schema: { type: string }
+        '401': { description: token 无效/过期 }
+  /api/workspaces/{workspaceId}/sites/{siteId}/design-sessions/{sessionId}/preview-link:
     post:
       tags: [sites]
-      operationId: observeDesignSession
-      summary: 观察当前沙盒（截图或结构化降级）
+      operationId: previewLinkDesignSession
+      summary: 签发一次性预览 token（60s TTL，绑定会话+站点+成员）
       parameters:
         - $ref: '#/components/parameters/WorkspaceId'
         - $ref: '#/components/parameters/SiteId'
@@ -3023,11 +3140,14 @@ paths:
           schema: { type: string, format: uuid }
       responses:
         '200':
-          description: 观察结果（RENDERER_ENABLED 时含 base64 截图）
+          description: 已签发
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/Envelope' }
-        '403': { $ref: '#/components/responses/Error' }
+              schema:
+                type: object
+                properties:
+                  token: { type: string }
+                  slot: { type: string }
   /api/workspaces/{workspaceId}/sites/{siteId}/design-sessions/{sessionId}/apply:
     post:
       tags: [sites]
@@ -3141,45 +3261,6 @@ paths:
       responses:
         '201': { description: 已发布, content: { application/json: { schema: { $ref: '#/components/schemas/Envelope' } } } }
         '404': { description: base_release_id 不存在（release_not_found） }
-  /api/organization/style-presets:
-    get:
-      tags: [sites]
-      operationId: listOrgStylePresets
-      description: 组织级自定义样式预设目录（二期 §5；另存为预设/套用走拷贝语义）
-      responses:
-        '200': { description: 预设列表, content: { application/json: { schema: { $ref: '#/components/schemas/Envelope' } } } }
-    post:
-      tags: [sites]
-      operationId: createOrgStylePreset
-      description: 另存为组织预设（style_config 必须锚定内置 preset；custom_css 经白名单清理）
-      parameters:
-        - $ref: '#/components/parameters/IdempotencyKey'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [name]
-              properties:
-                name: { type: string }
-                style_config: { type: object }
-                custom_css: { type: string }
-      responses:
-        '201': { description: 已保存, content: { application/json: { schema: { $ref: '#/components/schemas/Envelope' } } } }
-        '422': { description: 文档非法（validation_failed） }
-  /api/organization/style-presets/{presetId}:
-    delete:
-      tags: [sites]
-      operationId: deleteOrgStylePreset
-      description: 删除组织预设（创建者或组织 admin；站点悬挂引用渲染侧回退内置默认）
-      parameters:
-        - name: presetId
-          in: path
-          required: true
-          schema: { type: string, format: uuid }
-      responses:
-        '200': { description: 已删除, content: { application/json: { schema: { $ref: '#/components/schemas/Envelope' } } } }
   /api/workspaces/{workspaceId}/sites/{siteId}/comments:
     get:
       tags: [sites]
@@ -6355,14 +6436,9 @@ components:
         name: { type: string }
         domain: { type: string }
         default_content_scope: { type: string, enum: [public, organization, workspace] }
-        homepage_config: { type: object, description: '首页栏目（旧版，被 pages_config 取代时忽略）' }
-        pages_config: { type: object, description: '页面配置 v2（C1）：{version:2, home:{content_width, blocks:[hero|latest|ranked|featured|categories|text|links]}, pages:[自定义页 ≤20], collections:{model_key:{sort_field,order,page_size}}, nav:{order,hidden,extra}}' }
-        navigation_config: { type: object }
-        style_config: { type: object }
         logo_attachment_id: { type: string, format: uuid, nullable: true, description: '站点 Logo 图片附件（image/*）' }
         favicon_attachment_id: { type: string, format: uuid, nullable: true, description: '站点 Favicon 图片附件' }
         social_image_attachment_id: { type: string, format: uuid, nullable: true, description: '社交分享图附件（og:image）' }
-        custom_css: { type: string }
         comments_mode: { type: string, enum: [off, moderated, open] }
         default_locale: { type: string, description: '默认语言（BCP-47 主子标签，zh）' }
         enabled_locales: { type: array, items: { type: string }, description: '对外启用的语言集合（仅默认语言 = 多语言链路不激活）' }
@@ -6380,11 +6456,7 @@ components:
         slug: { type: string, pattern: '^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$' }
         name: { type: string, maxLength: 200 }
         domain: { type: string }
-        style_config: { type: object, description: L1 样式参数空间（写入时完整校验） }
         default_content_scope: { type: string, enum: [public, organization, workspace] }
-        homepage_config: { type: object, description: '首页栏目（旧版，被 pages_config 取代时忽略）' }
-        pages_config: { type: object, description: '页面配置 v2（C1）：{version:2, home:{content_width, blocks:[hero|latest|ranked|featured|categories|text|links]}, pages:[自定义页 ≤20], collections:{model_key:{sort_field,order,page_size}}, nav:{order,hidden,extra}}' }
-        navigation_config: { type: object }
     SitePatch:
       type: object
       properties:
@@ -6394,11 +6466,6 @@ components:
         default_locale: { type: string, description: '默认语言（ISO 639-1 两字母，E1/D11）；无前缀路由' }
         enabled_locales: { type: array, items: { type: string }, description: '启用语言集合（须含 default_locale，D11）' }
         fallback_to_default: { type: boolean, description: '未启用语言访问时回退默认语言（E 系列）' }
-        homepage_config: { type: object, description: '首页栏目（旧版，被 pages_config 取代时忽略）' }
-        pages_config: { type: object, description: '页面配置 v2（C1）：{version:2, home:{content_width, blocks:[hero|latest|ranked|featured|categories|text|links]}, pages:[自定义页 ≤20], collections:{model_key:{sort_field,order,page_size}}, nav:{order,hidden,extra}}' }
-        navigation_config: { type: object }
-        style_config: { type: object, description: patch 语义，深合并到工作样式 }
-        custom_css: { type: string, description: L2 自定义 CSS（服务端白名单清洗） }
         comments_mode: { type: string, enum: [off, moderated, open] }
         status: { type: string, enum: [active, disabled] }
     SiteBinding:
@@ -6452,7 +6519,6 @@ components:
       properties:
         slug: { type: string }
         name: { type: string }
-        navigation_config: { type: object }
     PublicSection:
       type: object
       properties:

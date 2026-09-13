@@ -92,3 +92,14 @@ ALTER TABLE site.public_sites
     DROP COLUMN IF EXISTS style_config,
     DROP COLUMN IF EXISTS navigation_config,
     DROP COLUMN IF EXISTS custom_css;
+
+-- 预览一次性 token（iframe 实时预览）：HMAC 摘要单次消费，60s TTL。
+CREATE TABLE site.preview_tokens (
+    digest bytea PRIMARY KEY,
+    organization_id uuid NOT NULL,
+    session_id uuid NOT NULL,
+    site_id uuid NOT NULL,
+    slot text NOT NULL DEFAULT 'home',
+    expires_at timestamptz NOT NULL,
+    consumed_at timestamptz
+);

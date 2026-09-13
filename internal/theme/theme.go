@@ -213,7 +213,7 @@ func Compile(files map[string]string, opts Options) (*Theme, error) {
 }
 
 // Render 执行槽位模板（经 layout 包裹）。
-func (t *Theme) Render(sb *strings.Builder, slot string, vm any) error {
+func (t *Theme) Render(sb interface{ Write([]byte) (int, error) }, slot string, vm any) error {
 	t.mu.RLock()
 	page := t.slots[slot]
 	t.mu.RUnlock()

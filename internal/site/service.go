@@ -43,12 +43,6 @@ type Site struct {
 	Domain              string          `json:"domain"`
 	DefaultContentScope string          `json:"default_content_scope"`
 	Status              string          `json:"status"`
-	HomepageConfig      json.RawMessage `json:"homepage_config"`
-	NavigationConfig    json.RawMessage `json:"navigation_config"`
-	StyleConfig         json.RawMessage `json:"style_config"`
-	// CustomCss is the sanitized L2 layer (二期 §4), rendered after the
-	// base stylesheet so the cascade overrides it.
-	CustomCss string `json:"custom_css"`
 	// CommentsMode gates the comment section (二期 §8).
 	CommentsMode string `json:"comments_mode"`
 	// 品牌媒体（CMS §10.7）：站点 Logo、Favicon 与社交分享图，引用
@@ -60,9 +54,6 @@ type Site struct {
 	DefaultLocale     string   `json:"default_locale"`
 	EnabledLocales    []string `json:"enabled_locales"`
 	FallbackToDefault bool     `json:"fallback_to_default"`
-	// PagesConfig is the v2 page/document configuration (C1)：home blocks、
-	// 自定义页、集合页参数与导航。空文档渲染默认首页。
-	PagesConfig json.RawMessage `json:"pages_config"`
 	// 主题修订版指针（站点主题化与 AI 设计重构）：draft = 工作台副本，
 	// published = 对外渲染所用文件集。0040 起 UI 设计面的唯一事实源。
 	DraftThemeRevisionID     string `json:"-"`
@@ -94,7 +85,6 @@ type CreateSiteInput struct {
 // UpdateSiteInput carries the PATCH /sites/{siteId} body; nil pointers stay
 // unchanged. Slug is identity and never updatable. StyleConfig is a partial
 // document deep-merged over the stored one (null leaves reset to preset).
-// CustomCss replaces the L2 layer wholesale (CSS has no merge semantics).
 type UpdateSiteInput struct {
 	Name                *string
 	Domain              *string
@@ -104,9 +94,7 @@ type UpdateSiteInput struct {
 	DefaultLocale       *string
 	EnabledLocales      *[]string
 	FallbackToDefault   *bool
-	PagesConfig         *json.RawMessage
 	StyleConfig         *json.RawMessage
-	CustomCss           *string
 	CommentsMode        *string
 	Status              *string
 	// 品牌媒体附件（image/*）：整体更新语义（nil = 不动；空串 = 清除）。
@@ -164,9 +152,8 @@ func (s Service) require(ctx context.Context, principal auth.Principal, workspac
 
 const siteColumns = `id::text, organization_id::text, workspace_id::text, slug, name,
 	COALESCE(domain, ''), default_content_scope, status, revision,
-	default_locale, enabled_locales, fallback_to_default,
-	homepage_config, navigation_config, style_config, custom_css, comments_mode,
-	pages_config, published_release_id::text, created_at, updated_at,
+	default_locale, enabled_locales, fallback_to_default, comments_mode,
+	published_release_id::text, created_at, updated_at,
 	COALESCE(logo_attachment_id::text, ''), COALESCE(favicon_attachment_id::text, ''),
 	COALESCE(social_image_attachment_id::text, ''),
 	COALESCE(draft_theme_revision_id::text, ''), COALESCE(published_theme_revision_id::text, '')`
@@ -176,8 +163,7 @@ func scanSiteRow(row interface{ Scan(...any) error }) (Site, error) {
 	err := row.Scan(&item.ID, &item.OrganizationID, &item.WorkspaceID, &item.Slug, &item.Name,
 		&item.Domain, &item.DefaultContentScope, &item.Status, &item.Revision,
 		&item.DefaultLocale, &item.EnabledLocales, &item.FallbackToDefault,
-		&item.HomepageConfig, &item.NavigationConfig, &item.StyleConfig, &item.CustomCss,
-		&item.CommentsMode, &item.PagesConfig, &item.PublishedReleaseID, &item.CreatedAt, &item.UpdatedAt,
+		&item.CommentsMode, &item.PublishedReleaseID, &item.CreatedAt, &item.UpdatedAt,
 		&item.LogoAttachmentID, &item.FaviconAttachmentID, &item.SocialImageAttachmentID,
 		&item.DraftThemeRevisionID, &item.PublishedThemeRevisionID)
 	if err != nil {
@@ -318,22 +304,6 @@ func (s Service) CreateSite(ctx context.Context, principal auth.Principal, works
 	if !ValidScope(scope) {
 		return Site{}, ErrInvalidInput
 	}
-	homepage, err := defaultConfig(input.HomepageConfig)
-	if err != nil {
-		return Site{}, err
-	}
-	navigation, err := defaultConfig(input.NavigationConfig)
-	if err != nil {
-		return Site{}, err
-	}
-	style, err := defaultStyleConfig(input.StyleConfig)
-	if err != nil {
-		return Site{}, err
-	}
-	pagesConfig, err := defaultPagesConfigOr(input.PagesConfig)
-	if err != nil {
-		return Site{}, err
-	}
 	if s.Events == nil {
 		return Site{}, errors.New("event store is not initialized")
 	}
@@ -353,9 +323,6 @@ func (s Service) CreateSite(ctx context.Context, principal auth.Principal, works
 	if exists {
 		return Site{}, ErrConflict
 	}
-	if err := ValidatePagesConfig(ctx, tx, principal.OrganizationID, workspaceID, pagesConfig); err != nil {
-		return Site{}, ErrInvalidInput
-	}
 	if domain != "" {
 		if err := tx.QueryRow(ctx, `
 			SELECT EXISTS (SELECT 1 FROM site.public_sites WHERE domain = $1)
@@ -369,12 +336,11 @@ func (s Service) CreateSite(ctx context.Context, principal auth.Principal, works
 	item, err := scanSiteRow(tx.QueryRow(ctx, `
 		INSERT INTO site.public_sites
 			(organization_id, workspace_id, slug, name, domain,
-			 default_content_scope, homepage_config, navigation_config, style_config,
-			 pages_config, status, revision, created_by)
-		VALUES ($1::uuid, $2::uuid, $3, $4, NULLIF($5, ''), $6, $7::jsonb, $8::jsonb, $9::jsonb, $10::jsonb, 'active', 1, $11::uuid)
+			 default_content_scope, status, revision, created_by)
+		VALUES ($1::uuid, $2::uuid, $3, $4, NULLIF($5, ''), $6, 'active', 1, $7::uuid)
 		RETURNING `+siteColumns+`
 	`, principal.OrganizationID, workspaceID, slug, name, domain,
-		scope, []byte(homepage), []byte(navigation), []byte(style), mustMarshalJSON(pagesConfig), principal.UserID))
+		scope, principal.UserID))
 	if err != nil {
 		if uniqueViolation(err) {
 			return Site{}, ErrConflict
@@ -441,30 +407,10 @@ func (s Service) UpdateSite(ctx context.Context, principal auth.Principal, works
 	if input.Status != nil && *input.Status != StatusActive && *input.Status != StatusDisabled {
 		return Site{}, ErrInvalidInput
 	}
-	var homepage, navigation json.RawMessage
-	if input.HomepageConfig != nil {
-		if !validConfigObject(*input.HomepageConfig) {
-			return Site{}, ErrInvalidInput
-		}
-		homepage = *input.HomepageConfig
-	}
 	if input.DefaultLocale != nil || input.EnabledLocales != nil {
 		if err := validLocalePair(deref(input.DefaultLocale), derefStringSlice(input.EnabledLocales)); err != nil {
 			return Site{}, err
 		}
-	}
-	if input.PagesConfig != nil {
-		var pages PagesConfig
-		if err := json.Unmarshal(*input.PagesConfig, &pages); err != nil {
-			return Site{}, ErrInvalidInput
-		}
-	}
-
-	if input.NavigationConfig != nil {
-		if !validConfigObject(*input.NavigationConfig) {
-			return Site{}, ErrInvalidInput
-		}
-		navigation = *input.NavigationConfig
 	}
 	if s.Events == nil {
 		return Site{}, errors.New("event store is not initialized")
@@ -480,39 +426,6 @@ func (s Service) UpdateSite(ctx context.Context, principal auth.Principal, works
 	}
 	if !revisionMatches(current.Revision, expectedRevision) {
 		return Site{}, ErrConflict
-	}
-	// style_config is a partial document deep-merged over the locked row's
-	// stored value; the merged result is re-validated (unknown keys, enums,
-	// ranges and the WCAG contrast gate all reject here). An org preset
-	// reference (uuid) expands to the preset's document first — copy
-	// semantics (二期 §5).
-	var style json.RawMessage
-	if input.StyleConfig != nil {
-		overlay, presetCSS, err := s.ExpandStylePreset(ctx, principal.OrganizationID, *input.StyleConfig)
-		if err != nil {
-			return Site{}, err
-		}
-		merged, err := MergeStylePatch(current.StyleConfig, overlay)
-		if err != nil {
-			return Site{}, err
-		}
-		style = merged
-		// Applying a preset copies its custom_css too — unless this PATCH
-		// carries an explicit custom_css (that wins over the bundle).
-		if input.CustomCss == nil && strings.TrimSpace(presetCSS) != "" {
-			copied, _ := SanitizeCSS(presetCSS)
-			input.CustomCss = &copied
-		}
-	}
-	// The L2 layer is sanitized at write; the stored form is the canonical
-	// output (rendering sanitizes again for defense in depth).
-	var customCss string
-	if input.CustomCss != nil {
-		clean, stripped := SanitizeCSS(*input.CustomCss)
-		if len(stripped) > 0 && strings.TrimSpace(clean) == "" && strings.TrimSpace(*input.CustomCss) != "" {
-			return Site{}, fmt.Errorf("%w: custom_css was entirely removed by the sanitizer", ErrInvalidInput)
-		}
-		customCss = clean
 	}
 	if input.CommentsMode != nil && !ValidCommentsMode(*input.CommentsMode) {
 		return Site{}, ErrInvalidInput
@@ -531,7 +444,7 @@ func (s Service) UpdateSite(ctx context.Context, principal auth.Principal, works
 			return Site{}, ErrConflict
 		}
 	}
-	item, err := applySiteUpdate(ctx, tx, principal, workspaceID, siteID, input, name, domain, homepage, navigation, style, customCss)
+	item, err := applySiteUpdate(ctx, tx, principal, workspaceID, siteID, input, name, domain)
 	if err != nil {
 		return Site{}, err
 	}
@@ -592,7 +505,7 @@ func (s Service) validateBrandingAttachments(ctx context.Context, organizationID
 
 // applySiteUpdate renders the dynamic SET clause from the non-nil pointers
 // and bumps the revision inside the caller's transaction.
-func applySiteUpdate(ctx context.Context, tx pgx.Tx, principal auth.Principal, workspaceID, siteID string, input UpdateSiteInput, name, domain string, homepage, navigation, style json.RawMessage, customCss string) (Site, error) {
+func applySiteUpdate(ctx context.Context, tx pgx.Tx, principal auth.Principal, workspaceID, siteID string, input UpdateSiteInput, name, domain string) (Site, error) {
 	sets := []string{"revision = site.public_sites.revision + 1", "updated_at = now()"}
 	args := []any{principal.OrganizationID, workspaceID, siteID}
 	arg := func(value any) string {
@@ -608,22 +521,6 @@ func applySiteUpdate(ctx context.Context, tx pgx.Tx, principal auth.Principal, w
 	if input.DefaultContentScope != nil {
 		sets = append(sets, "default_content_scope = "+arg(*input.DefaultContentScope))
 	}
-	if input.HomepageConfig != nil {
-		sets = append(sets, "homepage_config = "+arg(string(homepage))+"::jsonb")
-	}
-	if input.NavigationConfig != nil {
-		sets = append(sets, "navigation_config = "+arg(string(navigation))+"::jsonb")
-	}
-	if input.PagesConfig != nil {
-		var pages PagesConfig
-		if err := json.Unmarshal(*input.PagesConfig, &pages); err != nil {
-			return Site{}, ErrInvalidInput
-		}
-		if err := ValidatePagesConfig(ctx, tx, principal.OrganizationID, workspaceID, pages); err != nil {
-			return Site{}, err
-		}
-		sets = append(sets, "pages_config = "+arg(string(*input.PagesConfig))+"::jsonb")
-	}
 	if input.DefaultLocale != nil {
 		sets = append(sets, "default_locale = "+arg(strings.ToLower(strings.TrimSpace(*input.DefaultLocale))))
 	}
@@ -632,12 +529,6 @@ func applySiteUpdate(ctx context.Context, tx pgx.Tx, principal auth.Principal, w
 	}
 	if input.FallbackToDefault != nil {
 		sets = append(sets, "fallback_to_default = "+arg(*input.FallbackToDefault))
-	}
-	if input.StyleConfig != nil {
-		sets = append(sets, "style_config = "+arg(string(style))+"::jsonb")
-	}
-	if input.CustomCss != nil {
-		sets = append(sets, "custom_css = "+arg(customCss))
 	}
 	if input.CommentsMode != nil {
 		sets = append(sets, "comments_mode = "+arg(*input.CommentsMode))
@@ -702,18 +593,6 @@ func defaultConfig(raw json.RawMessage) (json.RawMessage, error) {
 	}
 	if len(strings.TrimSpace(string(raw))) == 0 {
 		return json.RawMessage("{}"), nil
-	}
-	return raw, nil
-}
-
-// defaultStyleConfig validates one optional style document: empty stays {},
-// anything else must pass the full L1 validation (write-side gate).
-func defaultStyleConfig(raw json.RawMessage) (json.RawMessage, error) {
-	if len(strings.TrimSpace(string(raw))) == 0 {
-		return json.RawMessage("{}"), nil
-	}
-	if _, err := ParseStyleConfig(raw); err != nil {
-		return nil, err
 	}
 	return raw, nil
 }

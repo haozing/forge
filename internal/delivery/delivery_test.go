@@ -5,7 +5,6 @@ import (
 	"testing"
 	"time"
 
-	"agentchunzhi/internal/site"
 )
 
 func TestPageCacheTTLAndEviction(t *testing.T) {
@@ -64,6 +63,7 @@ func TestPageCacheInvalidatePrefix(t *testing.T) {
 	}
 }
 
+
 func TestRenderMarkdownSanitizes(t *testing.T) {
 	source := "# Title\n\n<script>alert(1)</script>\n\n<img src=x onerror=alert(2)>\n\n[link](javascript:alert(3))\n\n<style>body{}</style>\n\n## Section A\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\n~~gone~~\n\n- [ ] task"
 	result := RenderMarkdown(source)
@@ -86,50 +86,4 @@ func TestRenderMarkdownSanitizes(t *testing.T) {
 	if !found {
 		t.Fatalf("TOC heading not extracted: %+v", result.Headings)
 	}
-}
-
-func TestStyleEngineCSS(t *testing.T) {
-	config := mustStyleConfig(t, `{"preset":"magazine","tokens":{"color":{"primary":"#1B4F91","mode":"dark"}},"layout":{"home_style":"hero","list_style":"grid","card_ratio":"16:9"}}`)
-	css := StyleCSS(config)
-	for _, required := range []string{"--c-primary:#1B4F91", "--reading:760px", "[data-mode=dark]", "@media (prefers-color-scheme:dark)"} {
-		if !strings.Contains(css, required) {
-			t.Fatalf("css missing %q:\n%s", required, css)
-		}
-	}
-	if ColorModeAttribute(config) != "dark" {
-		t.Fatal("mode attribute wrong for dark")
-	}
-	classes := LayoutClasses(config, "home")
-	if !strings.Contains(classes, "home--hero") || !strings.Contains(classes, "list--grid") || !strings.Contains(classes, "ratio--16-9") {
-		t.Fatalf("layout classes wrong: %s", classes)
-	}
-	auto := mustStyleConfig(t, `{"tokens":{"color":{"mode":"auto"}}}`)
-	if ColorModeAttribute(auto) != "" {
-		t.Fatal("auto must emit no attribute")
-	}
-	if !strings.Contains(StyleCSS(auto), ":root:not([data-mode=light])") {
-		t.Fatal("auto dark mode media query missing")
-	}
-}
-
-func TestStyleEngineDarkPaletteContrast(t *testing.T) {
-	for _, primary := range []string{"#2E7D32", "#8C2F39", "#111111", "#B45309", "#2F5D74", "#1B4F91"} {
-		config := mustStyleConfig(t, `{"tokens":{"color":{"primary":"`+primary+`"}}}`)
-		css := StyleCSS(config)
-		// The derived dark primary must be light enough: extract it and
-		// verify it is a valid color token (the derivation loop guarantees
-		// ≥4.5:1 against the dark surface at runtime).
-		if !strings.Contains(css, "hsl(") {
-			t.Fatalf("derived dark palette missing for %s", primary)
-		}
-	}
-}
-
-func mustStyleConfig(t *testing.T, document string) site.StyleConfig {
-	t.Helper()
-	parsed, err := site.ParseStyleConfig([]byte(document))
-	if err != nil {
-		t.Fatalf("style parse: %v", err)
-	}
-	return parsed
 }

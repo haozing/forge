@@ -134,7 +134,7 @@ func sanitizedCustomCSS(raw string) string {
 // L2 custom CSS is sanitized again on every render (defense in depth; the
 // write side already stores the canonical output) and lands last in the
 // cascade so it overrides the base stylesheet (二期 §4.4).
-func chrome(facts site.SiteFacts, style site.StyleConfig, pageKind string) Chrome {
+func chrome(facts site.SiteFacts, pageKind string) Chrome {
 	slug := facts.Site.Slug
 	logoURL, faviconURL, socialURL := "", "", ""
 	if facts.Site.LogoAttachmentID != "" {
@@ -175,53 +175,9 @@ func chrome(facts site.SiteFacts, style site.StyleConfig, pageKind string) Chrom
 		TagsHref:       "/sites/" + slug + "/tags/",
 		SearchHref:     "/sites/" + slug + "/search",
 		RSSHref:        "/sites/" + slug + "/rss.xml",
-		Style:          style,
-		StyleCSSVars:   template.CSS(StyleCSS(style) + baseStyleSheet + sanitizedCustomCSS(facts.CustomCss)),
-		ModeAttribute:  ColorModeAttribute(style),
-		LayoutClasses:  LayoutClasses(style, pageKind),
 	}
 }
 
-// parseNavigation projects navigation_config {items:[{label,href}]} tolerantly.
-func parseNavigation(raw json.RawMessage, slug string) []NavItem {
-	if len(strings.TrimSpace(string(raw))) == 0 {
-		return nil
-	}
-	var config struct {
-		Items []struct {
-			Label string `json:"label"`
-			Href  string `json:"href"`
-		} `json:"items"`
-	}
-	if err := json.Unmarshal(raw, &config); err != nil {
-		return nil
-	}
-	items := make([]NavItem, 0, len(config.Items))
-	for _, item := range config.Items {
-		label := strings.TrimSpace(item.Label)
-		href := strings.TrimSpace(item.Href)
-		if label == "" || href == "" {
-			continue
-		}
-		if strings.HasPrefix(href, "/") && !strings.HasPrefix(href, "/sites/") {
-			href = "/sites/" + slug + href
-		}
-		items = append(items, NavItem{Label: label, Href: href})
-	}
-	return items
-}
-
-// style resolves the effective style document. Documents are validated at
-// write time; a corrupt stored row degrades to the preset defaults instead
-// of failing every page of the site.
-func style(facts site.SiteFacts) site.StyleConfig {
-	config, err := site.ParseStyleConfig(facts.StyleConfig)
-	if err != nil {
-		fallback, _ := site.ParseStyleConfig(nil)
-		return fallback
-	}
-	return config
-}
 
 // pipeline runs the shared budget/cache/ETag flow around one page build.
 func (s *Service) pipeline(ctx context.Context, addr string, principal auth.Principal, slug, routePath, baseURL string, build buildFunc) (*Response, error) {
@@ -264,9 +220,17 @@ func (s *Service) pipeline(ctx context.Context, addr string, principal auth.Prin
 			s.storeEntry(key, revision(facts), band, routePath, output.page)
 			return output.page, nil
 		}
-		body, err := s.Render.RenderPage(output.kind, output.vm)
-		if err != nil {
-			return nil, err
+		var body []byte
+		var rerr error
+		if output.kind == "gate" || output.kind == "error" {
+			body, rerr = s.Render.RenderSystemPage(output.kind, output.vm)
+		} else {
+			body, rerr = renderThemed(facts.ThemeFiles,
+				revision(facts)+"-"+facts.Site.PublishedThemeRevisionID,
+				facts.Site.Slug, output.kind, output.vm, nil, baseURL)
+		}
+		if rerr != nil {
+			return nil, rerr
 		}
 		// D11/E：多语言站点为每个页面注入 hreflang 备选（单语言为空）。
 		if alts := s.alternates(facts, routePath); len(alts) > 0 {
@@ -322,12 +286,11 @@ func gated(facts site.SiteFacts, band string) bool {
 
 // gatePage renders the member login gate as a private, noindex page.
 func (s *Service) gatePage(facts site.SiteFacts) (*Response, error) {
-	config := style(facts)
 	vm := GateVM{Page: Page{Kind: "gate", Title: facts.Site.Name, NoIndex: true,
 		Description: "该站点仅对成员开放"}}
-	vm.Site = chrome(facts, config, "gate")
+	vm.Site = chrome(facts, "gate")
 	vm.Canonical = vm.Site.HomeHref
-	body, err := s.Render.RenderPage("gate", vm)
+	body, err := s.Render.RenderSystemPage("gate", vm)
 	if err != nil {
 		return nil, err
 	}
@@ -345,17 +308,12 @@ func (s *Service) gateOutput(facts site.SiteFacts) (renderOutput, error) {
 
 // ErrorPage renders one error page with default chrome.
 func (s *Service) ErrorPage(status int) *Response {
-	config, _ := site.ParseStyleConfig(nil)
 	vm := ErrorVM{Page: Page{Kind: "error", Title: fmt.Sprintf("%d", status), NoIndex: true}, Status: status}
 	vm.Site = Chrome{
 		Name:          "站点",
-		Style:         config,
-		StyleCSSVars:  template.CSS(StyleCSS(config) + baseStyleSheet),
-		ModeAttribute: ColorModeAttribute(config),
-		LayoutClasses: LayoutClasses(config, "error"),
 		HomeHref:      "/",
 	}
-	body, err := s.Render.RenderPage("error", vm)
+	body, err := s.Render.RenderSystemPage("error", vm)
 	if err != nil {
 		body = []byte(fmt.Sprintf("<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>%d</title></head><body><h1>%d</h1></body></html>", status, status))
 	}
@@ -369,8 +327,7 @@ func (s *Service) Home(ctx context.Context, addr string, principal auth.Principa
 		if gated(facts, band) {
 			return s.gateOutput(facts)
 		}
-		config := style(facts)
-		view, err := s.Reader.HomeWithConfig(ctx, addr, principal, slug, facts.HomepageConfig, facts.PagesConfig, locale)
+		view, err := s.Reader.HomeWithConfig(ctx, addr, principal, slug, locale)
 		if err != nil {
 			return renderOutput{}, err
 		}
@@ -389,8 +346,8 @@ func (s *Service) Home(ctx context.Context, addr string, principal auth.Principa
 		} else {
 			s.Logf("delivery: home tag cloud degraded slug=%s err=%v", slug, err)
 		}
-		vm := ResolveHome(view, config, facets)
-		vm.Site = chrome(facts, config, "home")
+		vm := ResolveHome(view, facets)
+		vm.Site = chrome(facts, "home")
 		vm.Title = facts.Site.Name
 		vm.Description = facts.Site.Name
 		vm.Canonical = baseURL + routePath
@@ -409,13 +366,12 @@ func (s *Service) Posts(ctx context.Context, addr string, principal auth.Princip
 		if gated(facts, band) {
 			return s.gateOutput(facts)
 		}
-		config := style(facts)
-		page, err := s.Reader.Posts(ctx, addr, principal, slug, site.PublicPostQuery{Cursor: cursor, Limit: config.PostsPerPage})
+		page, err := s.Reader.Posts(ctx, addr, principal, slug, site.PublicPostQuery{Cursor: cursor, Limit: 12})
 		if err != nil {
 			return renderOutput{}, err
 		}
-		vm := ResolveList(slug, "文章", "/sites/"+slug+"/posts/", page, config, page.NextCursor)
-		vm.Site = chrome(facts, config, "list")
+		vm := ResolveList(slug, "文章", "/sites/"+slug+"/posts/", page, page.NextCursor)
+		vm.Site = chrome(facts, "list")
 		vm.Title = "文章 · " + facts.Site.Name
 		vm.Canonical = baseURL + routePath
 		vm.NoIndex = !vm.Site.ScopePublic
@@ -430,7 +386,6 @@ func (s *Service) Post(ctx context.Context, addr string, principal auth.Principa
 		if gated(facts, band) {
 			return s.gateOutput(facts)
 		}
-		config := style(facts)
 		content, err := s.Reader.Post(ctx, addr, principal, slug, displayPath, locale)
 		if err != nil {
 			// A path with no live binding may have been renamed: answer one
@@ -451,7 +406,7 @@ func (s *Service) Post(ctx context.Context, addr string, principal auth.Principa
 			}
 		}
 		vm := ResolveDetailWithRefs(slug, content, s.authorizedBodyImages(ctx, facts, content.Markdown), refs)
-		vm.Site = chrome(facts, config, "detail")
+		vm.Site = chrome(facts, "detail")
 		vm.Title = content.Title + " · " + facts.Site.Name
 		// Description comes from ResolveDetail (summary -> body excerpt ->
 		// title); overwriting it with the raw summary would drop the
@@ -489,13 +444,12 @@ func (s *Service) Section(ctx context.Context, addr string, principal auth.Princ
 		if gated(facts, band) {
 			return s.gateOutput(facts)
 		}
-		config := style(facts)
-		page, err := s.Reader.Section(ctx, addr, principal, slug, sectionSlug, modelKey, config.PostsPerPage, "")
+		page, err := s.Reader.Section(ctx, addr, principal, slug, sectionSlug, modelKey, 12, "")
 		if err != nil {
 			return renderOutput{}, err
 		}
-		vm := ResolveList(slug, sectionSlug, "/sites/"+slug+"/sections/"+sectionSlug+"/", page, config, "")
-		vm.Site = chrome(facts, config, "list")
+		vm := ResolveList(slug, sectionSlug, "/sites/"+slug+"/sections/"+sectionSlug+"/", page, "")
+		vm.Site = chrome(facts, "list")
 		vm.Title = sectionSlug + " · " + facts.Site.Name
 		vm.Canonical = baseURL + routePath
 		vm.NoIndex = !vm.Site.ScopePublic
@@ -510,13 +464,12 @@ func (s *Service) Tags(ctx context.Context, addr string, principal auth.Principa
 		if gated(facts, band) {
 			return s.gateOutput(facts)
 		}
-		config := style(facts)
 		items, err := s.Reader.Tags(ctx, addr, principal, slug, 50)
 		if err != nil {
 			return renderOutput{}, err
 		}
 		vm := ResolveTags(slug, items)
-		vm.Site = chrome(facts, config, "tags")
+		vm.Site = chrome(facts, "tags")
 		vm.Title = "标签 · " + facts.Site.Name
 		vm.Canonical = baseURL + routePath
 		vm.NoIndex = !vm.Site.ScopePublic
@@ -534,16 +487,15 @@ func (s *Service) TagPage(ctx context.Context, addr string, principal auth.Princ
 		if gated(facts, band) {
 			return s.gateOutput(facts)
 		}
-		config := style(facts)
-		page, err := s.Reader.TagPage(ctx, addr, principal, slug, key, site.PublicPostQuery{Cursor: cursor, Limit: config.PostsPerPage})
+		page, err := s.Reader.TagPage(ctx, addr, principal, slug, key, site.PublicPostQuery{Cursor: cursor, Limit: 12})
 		if err != nil {
 			return renderOutput{}, err
 		}
 		vm := TagPageVM{Page: Page{Kind: "tag_page"}, TagKey: key, TagName: key,
 			Items: []CardVM{}, Pagination: PaginationVM{}}
-		vm.Site = chrome(facts, config, "list")
+		vm.Site = chrome(facts, "list")
 		for _, post := range page.Items {
-			vm.Items = append(vm.Items, cardVM(slug, post, config.SummaryLength))
+			vm.Items = append(vm.Items, cardVM(slug, post, 160))
 		}
 		if page.HasMore && page.NextCursor != "" {
 			vm.Pagination.NextHref = "/sites/" + slug + "/tags/" + key + "/?cursor=" + page.NextCursor
@@ -562,9 +514,8 @@ func (s *Service) Search(ctx context.Context, addr string, principal auth.Princi
 		if gated(facts, band) {
 			return s.gateOutput(facts)
 		}
-		config := style(facts)
 		vm := SearchVM{Page: Page{Kind: "search", Title: "搜索 · " + facts.Site.Name, NoIndex: true}, Query: query}
-		vm.Site = chrome(facts, config, "search")
+		vm.Site = chrome(facts, "search")
 		vm.Canonical = baseURL + routePath
 		return renderOutput{kind: "search", vm: vm, noIndex: true}, nil
 	})
@@ -590,8 +541,7 @@ func (s *Service) RSS(ctx context.Context, addr string, principal auth.Principal
 		if err != nil {
 			return renderOutput{}, err
 		}
-		config := style(facts)
-		vm := RSSVM{Site: chrome(facts, config, "rss"), Items: []RSSItem{}}
+		vm := RSSVM{Site: chrome(facts, "rss"), Items: []RSSItem{}}
 		for _, post := range page.Items {
 			vm.Items = append(vm.Items, RSSItem{
 				Title:       post.Title,
@@ -617,8 +567,7 @@ func (s *Service) Sitemap(ctx context.Context, addr string, principal auth.Princ
 		if facts.Site.DefaultContentScope != site.ScopePublic {
 			return renderOutput{}, ErrFeedDisabled
 		}
-		config := style(facts)
-		vm := SitemapVM{Site: chrome(facts, config, "sitemap"), URLs: []SitemapURL{
+		vm := SitemapVM{Site: chrome(facts, "sitemap"), URLs: []SitemapURL{
 			{Loc: baseURL + "/sites/" + slug + "/"},
 			{Loc: baseURL + "/sites/" + slug + "/posts/"},
 		}}
@@ -736,14 +685,11 @@ func articleJSONLD(facts site.SiteFacts, content site.PublicPostContent, canonic
 // navFor prefers the pages_config v2 auto-enumerated navigation (C1) and
 // falls back to the legacy navigation_config parse when absent.
 func navFor(facts site.SiteFacts, slug string) []NavItem {
-	if len(facts.NavV2) > 0 {
-		items := make([]NavItem, 0, len(facts.NavV2))
-		for _, entry := range facts.NavV2 {
-			items = append(items, NavItem{Label: entry.Name, Href: entry.Href})
-		}
-		return items
+	items := make([]NavItem, 0, len(facts.Nav))
+	for _, entry := range facts.Nav {
+		items = append(items, NavItem{Label: entry.Name, Href: entry.Href})
 	}
-	return parseNavigation(facts.NavigationConfig, slug)
+	return items
 }
 
 // hreflangAlternate is one resolved alternate entry.

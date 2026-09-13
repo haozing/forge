@@ -167,8 +167,6 @@ func registerOrganizationRoutes(deps Dependencies, mux *http.ServeMux) {
 		}
 		RevokeOrganizationWorkspaceMember(deps)(w, r)
 	})
-	mux.HandleFunc("/api/organization/style-presets", OrganizationStylePresets(deps))
-	mux.HandleFunc("/api/organization/style-presets/{presetId}", OrganizationStylePresetResource(deps))
 	mux.HandleFunc("/api/organization/query", OrganizationQuery(deps))
 	mux.HandleFunc("/api/organization/retrieval/profiles", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
@@ -314,7 +312,13 @@ func registerSiteRoutes(deps Dependencies, mux *http.ServeMux) {
 		}
 	})
 	mux.HandleFunc("/api/workspaces/{workspaceId}/sites/{siteId}/design-sessions/{sessionId}/apply", apply)
-	mux.HandleFunc("/api/workspaces/{workspaceId}/sites/{siteId}/design-sessions/{sessionId}/observe", observeDesignSession(deps))
+	mux.HandleFunc("/api/workspaces/{workspaceId}/sites/{siteId}/design-sessions/{sessionId}/preview-link", previewLinkDesignSession(deps))
+	mux.HandleFunc("/api/workspaces/{workspaceId}/sites/{siteId}/design-sessions/{sessionId}/preview", previewDesignSession(deps))
+	mux.HandleFunc("/api/workspaces/{workspaceId}/sites/{siteId}/theme/draft", SiteThemeDraft(deps))
+	mux.HandleFunc("/api/workspaces/{workspaceId}/sites/{siteId}/theme/revisions", SiteThemeRevisions(deps))
+	mux.HandleFunc("/api/workspaces/{workspaceId}/sites/{siteId}/theme/revisions/{revisionId}/publish", SiteThemePublish(deps))
+	mux.HandleFunc("/api/workspaces/{workspaceId}/sites/{siteId}/pages", SitePagesCollection(deps))
+	mux.HandleFunc("/api/workspaces/{workspaceId}/sites/{siteId}/pages/{pageId}", SitePageResource(deps))
 	mux.HandleFunc("/api/workspaces/{workspaceId}/sites/{siteId}/releases", SiteReleases(deps))
 	mux.HandleFunc("/api/workspaces/{workspaceId}/sites/{siteId}/comments", SiteComments(deps))
 	mux.HandleFunc("/api/workspaces/{workspaceId}/sites/{siteId}/comments/{commentId}", SiteCommentResource(deps))

@@ -1,9 +1,10 @@
 package delivery
 
-// renderer.go — template compilation and rendering (design doc §5.1). All
-// templates ship embedded in the binary; every page set is parsed with the
-// layout and partials at process start and a parse failure panics (a broken
-// template must never boot). Templates receive ViewModel structs only.
+// renderer.go — 双轨渲染设施：
+//   - 主题页面（home/detail/list/…）经 internal/theme 引擎按站点渲染，
+//     入口是 Service.renderThemed（service.go）；
+//   - 系统页（gate/error）与协议输出（rss/sitemap/robots）保持内置模板。
+// 内置模板只服务于系统页，agent 不可编辑；用户主题全部来自数据库。
 
 import (
 	"bufio"
@@ -18,17 +19,6 @@ import (
 
 //go:embed templates
 var templateFS embed.FS
-
-// baseStyleSheet is read once from the embedded FS.
-var baseStyleSheet = readBaseStyles()
-
-func readBaseStyles() string {
-	body, err := templateFS.ReadFile("templates/static/site.css")
-	if err != nil {
-		panic("delivery: base stylesheet missing: " + err.Error())
-	}
-	return string(body)
-}
 
 // CarouselScript serves the carousel enhancement script bytes.
 func CarouselScript() []byte {
@@ -48,58 +38,41 @@ func SearchJavaScript() []byte {
 	return body
 }
 
-var rendererFuncs = template.FuncMap{
-	// noescape marks server-sanitized HTML (markdown pipeline output).
-	"noescape": func(value string) template.HTML { return template.HTML(value) },
+// 系统页集合：gate（内容不足门）与 error。xml 三件套与 static 脚本同样内置。
+var systemPageSets = map[string]string{
+	"gate":  "templates/pages/gate.html",
+	"error": "templates/errors/error.html",
 }
 
-// pageSets enumerates every HTML page template with its content file.
-var pageSets = map[string]string{
-	"home":     "templates/pages/home.html",
-	"list":     "templates/pages/list.html",
-	"detail":   "templates/pages/detail.html",
-	"tags":     "templates/pages/tag_index.html",
-	"tag_page": "templates/pages/tag_page.html",
-	"search":   "templates/pages/search.html",
-	"gate":     "templates/pages/gate.html",
-	"about":    "templates/pages/about.html",
-	"archive":  "templates/pages/archive.html",
-	"error":    "templates/errors/error.html",
-}
-
-// xmlSets enumerates the non-HTML serializations.
 var xmlSets = map[string]string{
 	"rss":     "templates/xml/rss.xml",
 	"sitemap": "templates/xml/sitemap.xml",
 	"robots":  "templates/xml/robots.txt",
 }
 
-// Renderer holds the compiled template sets.
+// Renderer holds the compiled system template sets.
 type Renderer struct {
 	pages map[string]*template.Template
 	xml   map[string]*template.Template
 }
 
-// NewRenderer compiles every template set; a malformed template panics.
+// NewRenderer compiles every system template set; a malformed template panics.
 func NewRenderer() *Renderer {
 	renderer := &Renderer{pages: map[string]*template.Template{}, xml: map[string]*template.Template{}}
-	for kind, file := range pageSets {
-		set, err := template.New("layout").Funcs(rendererFuncs).ParseFS(templateFS,
+	for kind, file := range systemPageSets {
+		set, err := template.New("layout").ParseFS(templateFS,
 			"templates/layout.html",
 			"templates/partials/header.html",
 			"templates/partials/footer.html",
-			"templates/partials/card.html",
-			"templates/partials/pagination.html",
-			"templates/partials/tag_chips.html",
 			file,
 		)
 		if err != nil {
-			panic(fmt.Sprintf("delivery: parse page template %s: %v", kind, err))
+			panic(fmt.Sprintf("delivery: parse system template %s: %v", kind, err))
 		}
 		renderer.pages[kind] = set
 	}
 	for kind, file := range xmlSets {
-		set, err := template.New(kind).Funcs(rendererFuncs).ParseFS(templateFS, file)
+		set, err := template.New(kind).ParseFS(templateFS, file)
 		if err != nil {
 			panic(fmt.Sprintf("delivery: parse xml template %s: %v", kind, err))
 		}
@@ -108,16 +81,16 @@ func NewRenderer() *Renderer {
 	return renderer
 }
 
-// RenderPage executes one HTML page set.
-func (r *Renderer) RenderPage(kind string, vm any) ([]byte, error) {
+// RenderSystemPage executes one system page set (gate / error).
+func (r *Renderer) RenderSystemPage(kind string, vm any) ([]byte, error) {
 	set, ok := r.pages[kind]
 	if !ok {
-		return nil, fmt.Errorf("delivery: unknown page template %q", kind)
+		return nil, fmt.Errorf("delivery: unknown system template %q", kind)
 	}
 	var buffer bytes.Buffer
 	writer := bufio.NewWriter(&buffer)
 	if err := set.ExecuteTemplate(writer, "layout", vm); err != nil {
-		return nil, fmt.Errorf("delivery: render page %s: %w", kind, err)
+		return nil, fmt.Errorf("delivery: render system page %s: %w", kind, err)
 	}
 	if err := writer.Flush(); err != nil {
 		return nil, err
@@ -141,15 +114,6 @@ func (r *Renderer) RenderXML(kind string, vm any) ([]byte, error) {
 		return append([]byte(xml.Header), buffer.Bytes()...), nil
 	}
 	return buffer.Bytes(), nil
-}
-
-// PageKinds lists every registered HTML page kind (route table test truth).
-func (r *Renderer) PageKinds() []string {
-	kinds := make([]string, 0, len(r.pages))
-	for kind := range r.pages {
-		kinds = append(kinds, kind)
-	}
-	return kinds
 }
 
 // once guards the shared default renderer (handlers and the preview share it).

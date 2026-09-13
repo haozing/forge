@@ -80,11 +80,6 @@ type UpdateSiteRequest struct {
 	DefaultLocale           *string          `json:"default_locale"`
 	EnabledLocales          *[]string        `json:"enabled_locales"`
 	FallbackToDefault       *bool            `json:"fallback_to_default"`
-	HomepageConfig          *json.RawMessage `json:"homepage_config"`
-	PagesConfig             *json.RawMessage `json:"pages_config"`
-	NavigationConfig        *json.RawMessage `json:"navigation_config"`
-	StyleConfig             *json.RawMessage `json:"style_config"`
-	CustomCss               *string          `json:"custom_css"`
 	CommentsMode            *string          `json:"comments_mode"`
 	Status                  *string          `json:"status"`
 	LogoAttachmentID        *string          `json:"logo_attachment_id"`
@@ -183,11 +178,6 @@ func SiteResource(deps Dependencies) http.HandlerFunc {
 					DefaultLocale:           input.DefaultLocale,
 					EnabledLocales:          input.EnabledLocales,
 					FallbackToDefault:       input.FallbackToDefault,
-					HomepageConfig:          input.HomepageConfig,
-					PagesConfig:             input.PagesConfig,
-					NavigationConfig:        input.NavigationConfig,
-					StyleConfig:             input.StyleConfig,
-					CustomCss:               input.CustomCss,
 					CommentsMode:            input.CommentsMode,
 					Status:                  input.Status,
 					LogoAttachmentID:        input.LogoAttachmentID,

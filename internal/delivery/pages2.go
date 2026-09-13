@@ -24,14 +24,13 @@ func (s *Service) About(ctx context.Context, addr string, principal auth.Princip
 		if gated(facts, band) {
 			return s.gateOutput(facts)
 		}
-		config := style(facts)
 		content, err := s.Reader.About(ctx, addr, principal, slug)
 		if err != nil {
 			return renderOutput{}, err
 		}
 		vm := ResolveDetail(slug, content, s.authorizedBodyImages(ctx, facts, content.Markdown))
 		vm.Kind = "about"
-		vm.Site = chrome(facts, config, "about")
+		vm.Site = chrome(facts, "about")
 		vm.Title = content.Title + " · " + facts.Site.Name
 		// Keep ResolveDetail's description (summary -> excerpt -> title).
 		vm.Canonical = baseURL + routePath
@@ -48,7 +47,6 @@ func (s *Service) Archive(ctx context.Context, addr string, principal auth.Princ
 		if gated(facts, band) {
 			return s.gateOutput(facts)
 		}
-		config := style(facts)
 		page, err := s.Reader.Posts(ctx, addr, principal, slug, site.PublicPostQuery{Limit: 50})
 		if err != nil {
 			return renderOutput{}, err
@@ -67,8 +65,8 @@ func (s *Service) Archive(ctx context.Context, addr string, principal auth.Princ
 			Page
 			Years []ArchiveYearVM
 		}{Page: Page{Kind: "archive"}}
-		vm.Years = groupArchive(slug, items, config.SummaryLength)
-		vm.Site = chrome(facts, config, "archive")
+		vm.Years = groupArchive(slug, items, 160)
+		vm.Site = chrome(facts, "archive")
 		vm.Title = "归档 · " + facts.Site.Name
 		vm.Canonical = baseURL + routePath
 		vm.NoIndex = !vm.Site.ScopePublic
@@ -389,7 +387,6 @@ func (s *Service) Category(ctx context.Context, addr string, principal auth.Prin
 		if gated(facts, band) {
 			return s.gateOutput(facts)
 		}
-		config := style(facts)
 		category, err := s.Reader.PublicCategoryPath(ctx, addr, principal, siteSlug, path, locale)
 		if err != nil {
 			return renderOutput{}, err
@@ -406,7 +403,7 @@ func (s *Service) Category(ctx context.Context, addr string, principal auth.Prin
 				Canonical:   baseURL + routePath,
 				NoIndex:     facts.Site.DefaultContentScope != site.ScopePublic,
 			},
-			Site:          chrome(facts, config, "category"),
+			Site:          chrome(facts, "category"),
 			Heading:       category.Title,
 			Crumbs:        []CrumbVM{},
 			Subcategories: []SubcategoryVM{},
@@ -419,7 +416,7 @@ func (s *Service) Category(ctx context.Context, addr string, principal auth.Prin
 			vm.Subcategories = append(vm.Subcategories, SubcategoryVM{Name: sub.Name, Href: sub.Href, Count: sub.Count})
 		}
 		for _, post := range category.Posts {
-			vm.Items = append(vm.Items, cardVM(siteSlug, post, config.SummaryLength))
+			vm.Items = append(vm.Items, cardVM(siteSlug, post, 160))
 		}
 		breadcrumbs := map[string]any{
 			"@context":        "https://schema.org",
@@ -443,7 +440,6 @@ func (s *Service) CustomPage(ctx context.Context, addr string, principal auth.Pr
 		if gated(facts, band) {
 			return s.gateOutput(facts)
 		}
-		config := style(facts)
 		page, err := s.Reader.CustomPage(ctx, addr, principal, siteSlug, pageSlug)
 		if err != nil {
 			return renderOutput{}, err
@@ -452,34 +448,16 @@ func (s *Service) CustomPage(ctx context.Context, addr string, principal auth.Pr
 			Page: Page{
 				Kind:        "page",
 				Title:       page.Title + " · " + facts.Site.Name,
-				Description: page.Title,
+				Description: page.Description,
 				Canonical:   baseURL + routePath,
 				NoIndex:     facts.Site.DefaultContentScope != site.ScopePublic,
 			},
-			Site:    chrome(facts, config, "page"),
-			Heading: page.Title,
-			Blocks:  []BlockVM{},
+			Site:        chrome(facts, "page"),
+			Heading:     page.Title,
+			ContentHTML: template.HTML(page.Markdown), // 由 RenderSiteMarkdown 净化管线产出
 		}
-		for _, block := range page.Blocks {
-			bvm := BlockVM{
-				Type:       block.Type,
-				Title:      block.Title,
-				Subtitle:   block.Subtitle,
-				Href:       block.Href,
-				Layout:     block.Layout,
-				StyleClass: blockStyleClass(block),
-			}
-			for _, item := range block.Items {
-				bvm.Items = append(bvm.Items, cardVM(siteSlug, item, config.SummaryLength))
-			}
-			for _, link := range block.Links {
-				bvm.Links = append(bvm.Links, NavItem{Label: link.Label, Href: link.Href})
-			}
-			for _, cat := range block.Categories {
-				bvm.Categories = append(bvm.Categories, CategoryLinkVM{Name: cat.Name, Href: cat.Href, Count: cat.Count})
-			}
-			vm.Blocks = append(vm.Blocks, bvm)
-		}
+		// 正文经与资产同一净化管线（注入不可绕过）。
+		vm.ContentHTML = template.HTML(RenderSiteMarkdown(page.Markdown, siteSlug, s.authorizedBodyImages(ctx, facts, page.Markdown)).HTML)
 		return renderOutput{kind: "page", vm: vm, noIndex: vm.NoIndex}, nil
 	})
 }

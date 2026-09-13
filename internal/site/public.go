@@ -213,17 +213,11 @@ type SiteFacts struct {
 	Site            Site
 	ReleaseRevision int64
 	// Effective configuration the render consumes.
-	HomepageConfig   json.RawMessage
-	NavigationConfig json.RawMessage
-	StyleConfig      json.RawMessage
-	// CustomCss arrives pre-sanitized at write time; the render sanitizes
-	// again for defense in depth (二期 §4).
-	CustomCss    string
 	CommentsMode string
-	// PagesConfig v2（C1）：生效文档 = release 快照优先，否则工作列。
-	PagesConfig json.RawMessage
-	// NavV2 是导航 v2 自动枚举（pages_config 存在时非空）。
-	NavV2 []NavEntry
+	// ThemeFiles 是已发布主题的文件集；空对象 = 全槽位回退内置默认主题。
+	ThemeFiles json.RawMessage
+	// Nav 是数据化导航（固定路由 + 自定义页派生）。
+	Nav []NavEntry
 }
 
 // SiteFacts resolves the delivery chrome facts of one slug without touching
@@ -235,13 +229,9 @@ func (r *PublicReader) SiteFacts(ctx context.Context, slug string) (SiteFacts, e
 		return SiteFacts{}, err
 	}
 	facts := SiteFacts{
-		Site:             item,
-		HomepageConfig:   item.HomepageConfig,
-		NavigationConfig: item.NavigationConfig,
-		StyleConfig:      item.StyleConfig,
-		CustomCss:        item.CustomCss,
-		CommentsMode:     item.CommentsMode,
-		PagesConfig:      item.PagesConfig,
+		Site:         item,
+		CommentsMode: item.CommentsMode,
+		ThemeFiles:   json.RawMessage("{}"),
 	}
 	if item.PublishedReleaseID != nil && r.Store != nil && r.Store.Pool != nil {
 		var revision int64
@@ -252,40 +242,67 @@ func (r *PublicReader) SiteFacts(ctx context.Context, slug string) (SiteFacts, e
 			WHERE organization_id = $1::uuid AND id = $2::uuid
 		`, item.OrganizationID, *item.PublishedReleaseID).Scan(&revision, &config); err == nil && len(config) > 0 {
 			var snapshot struct {
-				HomepageConfig   json.RawMessage `json:"homepage_config"`
-				NavigationConfig json.RawMessage `json:"navigation_config"`
-				StyleConfig      json.RawMessage `json:"style_config"`
-				CustomCss        string          `json:"custom_css"`
-				CommentsMode     string          `json:"comments_mode"`
-				PagesConfig      json.RawMessage `json:"pages_config"`
+				CommentsMode    string `json:"comments_mode"`
+				ThemeRevisionID string `json:"theme_revision_id"`
 			}
 			if json.Unmarshal(config, &snapshot) == nil {
 				facts.ReleaseRevision = revision
-				if len(snapshot.HomepageConfig) > 0 {
-					facts.HomepageConfig = snapshot.HomepageConfig
-				}
-				if len(snapshot.NavigationConfig) > 0 {
-					facts.NavigationConfig = snapshot.NavigationConfig
-				}
-				if len(snapshot.StyleConfig) > 0 {
-					facts.StyleConfig = snapshot.StyleConfig
-				}
-				if snapshot.CustomCss != "" {
-					facts.CustomCss = snapshot.CustomCss
-				}
 				if snapshot.CommentsMode != "" {
 					facts.CommentsMode = snapshot.CommentsMode
 				}
-				if len(snapshot.PagesConfig) > 0 {
-					facts.PagesConfig = snapshot.PagesConfig
+				if snapshot.ThemeRevisionID != "" {
+					var files json.RawMessage
+					if err := r.Store.Pool.QueryRow(ctx, `
+						SELECT files FROM site.site_theme_revisions
+						WHERE organization_id = $1::uuid AND id = $2::uuid
+					`, item.OrganizationID, snapshot.ThemeRevisionID).Scan(&files); err == nil && len(files) > 0 {
+						facts.ThemeFiles = files
+					}
 				}
 			}
 		}
 	}
-	if cfg := ParsePagesConfig(facts.PagesConfig); cfg != nil {
-		facts.NavV2 = r.navV2(ctx, item, cfg)
+	if facts.ReleaseRevision == 0 && item.PublishedThemeRevisionID != "" && r.Store != nil && r.Store.Pool != nil {
+		var files json.RawMessage
+		if err := r.Store.Pool.QueryRow(ctx, `
+			SELECT files FROM site.site_theme_revisions
+			WHERE organization_id = $1::uuid AND id = $2::uuid
+		`, item.OrganizationID, item.PublishedThemeRevisionID).Scan(&files); err == nil && len(files) > 0 {
+			facts.ThemeFiles = files
+		}
 	}
+	facts.Nav = r.deriveNav(ctx, item)
 	return facts, nil
+}
+
+// deriveNav 构造数据化导航：固定路由 + 自定义页（nav_order）。
+func (r *PublicReader) deriveNav(ctx context.Context, item Site) []NavEntry {
+	nav := []NavEntry{
+		{ID: "home", Name: "首页", Href: "/sites/" + item.Slug + "/"},
+		{ID: "posts", Name: "文章", Href: "/sites/" + item.Slug + "/posts/"},
+		{ID: "tags", Name: "标签", Href: "/sites/" + item.Slug + "/tags/"},
+	}
+	if r.Store == nil || r.Store.Pool == nil {
+		return nav
+	}
+	rows, err := r.Store.Pool.Query(ctx, `
+		SELECT title, '/' || slug AS href, nav_order
+		FROM site.site_pages
+		WHERE organization_id = $1::uuid AND site_id = $2::uuid AND nav_hidden = false
+		ORDER BY nav_order, slug
+	`, item.OrganizationID, item.ID)
+	if err != nil {
+		return nav
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var title, href string
+		var order int
+		if err := rows.Scan(&title, &href, &order); err == nil {
+			nav = append(nav, NavEntry{ID: href, Name: title, Href: "/sites/" + item.Slug + href})
+		}
+	}
+	return nav
 }
 
 // AllowPublic runs only the shared public_site_ip budget check (the HTML
@@ -387,11 +404,6 @@ type PublicSiteInfo struct {
 type PublicHomeView struct {
 	Site     PublicSiteInfo  `json:"site"`
 	Sections []PublicSection `json:"sections"`
-	// Blocks 是 pages_config v2 的模块列表（C1）：非空时渲染走模块，
-	// 空 = 旧 sections 兼容路径。
-	Blocks []PublicBlock `json:"blocks,omitempty"`
-	// NavV2 是导航 v2 的自动枚举结果（C1）：非空时替代旧导航。
-	NavV2 []NavEntry `json:"nav_v2,omitempty"`
 	ETag  string     `json:"-"`
 }
 
@@ -407,23 +419,6 @@ type PublicCategoryRef struct {
 	Name  string `json:"name"`
 	Href  string `json:"href"`
 	Count int    `json:"count"`
-}
-
-// PublicBlock is one resolved module of pages_config v2: content is
-// pre-resolved server-side so the delivery template stays dumb.
-type PublicBlock struct {
-	Type       string
-	Title      string
-	Subtitle   string
-	ImageURL   string
-	BodyHTML   string
-	Href       string
-	Layout     string
-	Style      *BlockStyle
-	Columns    int
-	Items      []PublicPost
-	Links      []NavExtraLink
-	Categories []PublicCategoryRef
 }
 
 // PublicPostContent is the detail projection of plan §3.4: markdown travels
@@ -804,14 +799,14 @@ func (r *PublicReader) loadPostRow(ctx context.Context, item Site, displayPath s
 // content (latest → query face, featured/column → binding catalog with the
 // §3.3 re-check). Unknown section types are skipped.
 func (r *PublicReader) Home(ctx context.Context, visitorAddr string, principal auth.Principal, slug string) (PublicHomeView, error) {
-	return r.HomeWithConfig(ctx, visitorAddr, principal, slug, nil, nil, "")
+	return r.HomeWithConfig(ctx, visitorAddr, principal, slug, "")
 }
 
 // HomeWithConfig renders the homepage against one explicit homepage config
 // (the delivery face passes the effective release snapshot; nil falls back to
 // the working columns). pagesConfig v2 优先：非空文档走模块渲染（C1），
 // 空 = 旧 sections 路径。
-func (r *PublicReader) HomeWithConfig(ctx context.Context, visitorAddr string, principal auth.Principal, slug string, homepageConfig, pagesConfig json.RawMessage, locale string) (PublicHomeView, error) {
+func (r *PublicReader) HomeWithConfig(ctx context.Context, visitorAddr string, principal auth.Principal, slug string, locale string) (PublicHomeView, error) {
 	if err := r.allow(ctx, visitorAddr); err != nil {
 		return PublicHomeView{}, err
 	}
@@ -819,67 +814,18 @@ func (r *PublicReader) HomeWithConfig(ctx context.Context, visitorAddr string, p
 	if err != nil {
 		return PublicHomeView{}, err
 	}
-	if len(strings.TrimSpace(string(homepageConfig))) == 0 {
-		homepageConfig = item.HomepageConfig
-	}
-	effectivePages := pagesConfig
-	if len(strings.TrimSpace(string(effectivePages))) == 0 {
-		effectivePages = item.PagesConfig
-	}
 	visitor := r.visitor(ctx, item, principal)
 	view := PublicHomeView{
-		Site: PublicSiteInfo{
-			Slug:             item.Slug,
-			Name:             item.Name,
-			NavigationConfig: item.NavigationConfig,
-		},
+		Site:     PublicSiteInfo{Slug: item.Slug, Name: item.Name},
 		Sections: []PublicSection{},
 	}
-	if cfg := ParsePagesConfig(effectivePages); cfg != nil && cfg.Home != nil {
-		blocks, nav, all, err := r.resolveBlocks(ctx, item, visitor, cfg, locale)
-		if err != nil {
-			return PublicHomeView{}, err
-		}
-		view.Blocks = blocks
-		view.NavV2 = nav
-		view.ETag = ListETag(item.Revision, all)
-		return view, nil
+	rendered := PublicSection{Type: HomepageSectionLatest, Title: "最新内容", Items: []PublicPost{}}
+	rendered.Items, err = r.latestPosts(ctx, item, visitor, "", 10, locale)
+	if err != nil {
+		return PublicHomeView{}, err
 	}
-	all := []PublicPost{}
-	for _, section := range ParseHomepageConfig(homepageConfig) {
-		rendered := PublicSection{
-			Type:        section.Type,
-			Title:       section.Title,
-			SectionSlug: section.SectionSlug,
-			Items:       []PublicPost{},
-		}
-		var err error
-		rendered.ModelKey = section.ModelKey
-		switch section.Type {
-		case HomepageSectionLatest:
-			rendered.Items, err = r.latestPosts(ctx, item, visitor, section.ModelKey, section.Limit, locale)
-		case HomepageSectionFeatured:
-			rows, loadErr := r.boundVersionRows(ctx, item, "", section.ModelKey, true, section.Limit, locale)
-			if loadErr != nil {
-				return PublicHomeView{}, loadErr
-			}
-			rendered.Items, err = r.projectBoundRows(ctx, item, visitor, rows)
-		case HomepageSectionColumn:
-			rows, loadErr := r.boundVersionRows(ctx, item, section.SectionSlug, section.ModelKey, false, section.Limit, locale)
-			if loadErr != nil {
-				return PublicHomeView{}, loadErr
-			}
-			rendered.Items, err = r.projectBoundRows(ctx, item, visitor, rows)
-		default:
-			continue
-		}
-		if err != nil {
-			return PublicHomeView{}, err
-		}
-		all = append(all, rendered.Items...)
-		view.Sections = append(view.Sections, rendered)
-	}
-	view.ETag = ListETag(item.Revision, all)
+	view.Sections = append(view.Sections, rendered)
+	view.ETag = ListETag(item.Revision, rendered.Items)
 	return view, nil
 }
 
@@ -1746,220 +1692,6 @@ func (r *PublicReader) SameCategoryPosts(ctx context.Context, visitorAddr string
 // resolveBlocks expands the pages_config v2 home blocks against live content
 // (C1)：latest/ranked/featured/category 走真实查询，text/hero/links 直接
 // 投影。未知类型跳过；同时产出导航 v2 的自动枚举。
-func (r *PublicReader) resolveBlocks(ctx context.Context, item Site, visitor agentquery.VisitorIdentity, config *PagesConfig, locale string) ([]PublicBlock, []NavEntry, []PublicPost, error) {
-	blocks := []PublicBlock{}
-	all := []PublicPost{}
-	for _, block := range config.Home.Blocks {
-		resolved := PublicBlock{
-			Type:     block.Type,
-			Title:    block.Title,
-			Subtitle: block.Subtitle,
-			Layout:   block.Layout,
-			Style:    block.Style,
-			Columns:  block.Columns,
-			Links:    block.Links,
-			Href:     block.Href,
-		}
-		switch block.Type {
-		case BlockLatest:
-			items, err := r.latestPosts(ctx, item, visitor, block.ModelKey, normalizePublicLimit(block.Limit), locale)
-			if err != nil {
-				return nil, nil, nil, err
-			}
-			resolved.Items = items
-			all = append(all, items...)
-		case BlockRanked:
-			items, err := r.rankedPosts(ctx, item, visitor, block.ModelKey, block.SortField, strings.ToLower(block.Order), normalizePublicLimit(block.Limit), locale)
-			if err != nil {
-				return nil, nil, nil, err
-			}
-			resolved.Items = items
-			all = append(all, items...)
-		case BlockFeatured:
-			rows, err := r.boundVersionRows(ctx, item, "", block.ModelKey, false, normalizePublicLimit(block.Limit), locale)
-			if err != nil {
-				return nil, nil, nil, err
-			}
-			filtered := []boundVersionRow{}
-			for _, row := range rows {
-				var featured bool
-				_ = r.Store.Pool.QueryRow(ctx, `
-					SELECT EXISTS (SELECT 1 FROM site.site_featured
-						WHERE site_id = $1::uuid AND asset_id = $2::uuid)
-				`, item.ID, row.Binding.AssetID).Scan(&featured)
-				if featured {
-					filtered = append(filtered, row)
-				}
-			}
-			items, err := r.projectBoundRows(ctx, item, visitor, filtered)
-			if err != nil {
-				return nil, nil, nil, err
-			}
-			resolved.Items = items
-			all = append(all, items...)
-		case BlockCategories:
-			refs, err := r.topPublicCategories(ctx, item)
-			if err != nil {
-				return nil, nil, nil, err
-			}
-			resolved.Categories = refs
-		case BlockHero, BlockText, BlockLinks:
-			// 静态块：无需查询。
-		default:
-			continue
-		}
-		blocks = append(blocks, resolved)
-	}
-	return blocks, r.navV2(ctx, item, config), all, nil
-}
-
-// rankedPosts sorts included posts by a whitelisted numeric field of the
-// published version (D6 榜单；字段准入在配置校验时已限制为 integer/number)。
-func (r *PublicReader) rankedPosts(ctx context.Context, item Site, visitor agentquery.VisitorIdentity, modelKey, sortField, order string, limit int, locale string) ([]PublicPost, error) {
-	localeClause := item.localePredicate("a", locale)
-	modelID, err := r.modelIDByKey(ctx, item, modelKey)
-	if err != nil {
-		return nil, err
-	}
-	if modelID == "" {
-		return []PublicPost{}, nil
-	}
-	dir := "DESC"
-	if order == "asc" {
-		dir = "ASC"
-	}
-	if limit <= 0 {
-		limit = 10
-	}
-
-	rows, err := r.Store.Pool.Query(ctx, fmt.Sprintf(`
-		SELECT sl.slug, COALESCE(pv.title, ''), COALESCE(pv.summary, ''),
-		       COALESCE(a.updated_at, now()), a.published_at,
-		       COALESCE((pv.fields->>$4)::numeric, 0)
-		FROM site.site_slugs sl
-		JOIN asset.assets a
-		  ON a.organization_id = sl.organization_id AND a.id = sl.asset_id
-		 AND a.deleted_at IS NULL AND a.current_published_version_id IS NOT NULL
-		 AND a.resource_model_id = $5::uuid
-		LEFT JOIN asset.asset_versions pv
-		  ON pv.organization_id = a.organization_id AND pv.id = a.current_published_version_id
-		WHERE sl.organization_id = $1::uuid AND sl.site_id = $2::uuid AND sl.is_current
-		  AND a.visibility = 'public' AND `+localeClause+`
-		ORDER BY 6 %s, a.published_at DESC
-		LIMIT $3::int
-	`, dir), item.OrganizationID, item.ID, limit, sortField, modelID)
-	if err != nil {
-		return nil, fmt.Errorf("load ranked posts: %w", err)
-	}
-	defer rows.Close()
-	out := []PublicPost{}
-	for rows.Next() {
-		var slug, title, summary string
-		var updated time.Time
-		var published *time.Time
-		if err := rows.Scan(&slug, &title, &summary, &updated, &published, new(any)); err != nil {
-			continue
-		}
-		out = append(out, PublicPost{
-			DisplayPath: slug,
-			Title:       title,
-			Summary:     SafeSummary(summary, 120),
-			UpdatedAt:   &updated,
-			PublishedAt: published,
-		})
-	}
-	return out, rows.Err()
-}
-
-// topPublicCategories lists the top-level public categories of the site's
-// workspace with included-post counts (categories 模块 / 塔顶入口).
-func (r *PublicReader) topPublicCategories(ctx context.Context, item Site) ([]PublicCategoryRef, error) {
-	refs := []PublicCategoryRef{}
-	rows, err := r.Store.Pool.Query(ctx, `
-		SELECT COALESCE(NULLIF(c.public_title, ''), c.title), c.slug,
-		       (SELECT count(DISTINCT sl.asset_id)
-		          FROM content.containers sub
-		          JOIN asset.assets a2 ON a2.category_container_id = sub.id
-		          JOIN site.site_slugs sl
-		            ON sl.organization_id = a2.organization_id AND sl.asset_id = a2.id
-		           AND sl.site_id = $3::uuid AND sl.is_current
-		          WHERE sub.parent_id = c.id AND sub.public_flag = true) AS cnt
-		FROM content.containers c
-		WHERE c.organization_id = $1::uuid AND c.workspace_id = $2::uuid
-		  AND c.public_flag = true AND c.status = 'active' AND c.parent_id IS NULL
-		ORDER BY c.sort_key, c.title
-	`, item.OrganizationID, item.WorkspaceID, item.ID)
-	if err != nil {
-		return nil, fmt.Errorf("load top categories: %w", err)
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var ref PublicCategoryRef
-		var slug string
-		if err := rows.Scan(&ref.Name, &slug, &ref.Count); err == nil {
-			ref.Href = "/sites/" + item.Slug + "/c/" + slug
-			refs = append(refs, ref)
-		}
-	}
-	return refs, rows.Err()
-}
-
-// navV2 枚举导航：home + 各通道模型集合页 + 自定义页；order/hidden/extra。
-func (r *PublicReader) navV2(ctx context.Context, item Site, config *PagesConfig) []NavEntry {
-	entries := []NavEntry{{ID: "home", Name: "首页", Href: "/sites/" + item.Slug + "/"}}
-	rows, err := r.Store.Pool.Query(ctx, `
-		SELECT rm.model_key, COALESCE(rm.name, rm.model_key)
-		FROM model.resource_models rm
-		JOIN model.resource_model_versions mv ON mv.id = rm.current_version_id
-		WHERE rm.organization_id = $1::uuid AND rm.workspace_id = $2::uuid
-		  AND rm.status = 'active'
-		  AND COALESCE(NULLIF(mv.policy #>> ARRAY['channels', 'public_site', 'enabled'], '')::boolean, false)
-		ORDER BY rm.name, rm.model_key
-	`, item.OrganizationID, item.WorkspaceID)
-	if err == nil {
-		defer rows.Close()
-		for rows.Next() {
-			var key, name string
-			if rows.Scan(&key, &name) == nil {
-				entries = append(entries, NavEntry{ID: "collection:" + key, Name: name, Href: "/sites/" + item.Slug + "/sections/" + key})
-			}
-		}
-	}
-	if config != nil {
-		for _, page := range config.Pages {
-			entries = append(entries, NavEntry{ID: "page:" + page.Slug, Name: page.Title, Href: "/sites/" + item.Slug + "/p/" + page.Slug})
-		}
-		if config.Nav != nil {
-			for _, extra := range config.Nav.Extra {
-				entries = append(entries, NavEntry{Name: extra.Label, Href: extra.Href})
-			}
-		}
-		hidden := map[string]bool{}
-		for _, id := range config.Nav.Hidden {
-			hidden[id] = true
-		}
-		ranked := []NavEntry{}
-		ordered := map[string]bool{}
-		for _, id := range config.Nav.Order {
-			for _, entry := range entries {
-				if entry.ID == id && !hidden[id] && !ordered[id] {
-					ranked = append(ranked, entry)
-					ordered[id] = true
-				}
-			}
-		}
-		for _, entry := range entries {
-			if !ordered[entry.ID] && !hidden[entry.ID] {
-				ranked = append(ranked, entry)
-			}
-		}
-		return ranked
-	}
-	return entries
-}
-
-// CustomPageContent resolves one pages_config v2 custom page (C1)：blocks
-// 全量解析，供 /p/{pageSlug} 渲染。页面不存在回答 ErrSiteNotFound。
 func (r *PublicReader) CustomPage(ctx context.Context, visitorAddr string, principal auth.Principal, slug, pageSlug string) (PublicCustomPage, error) {
 	if err := r.allow(ctx, visitorAddr); err != nil {
 		return PublicCustomPage{}, err
@@ -1968,36 +1700,26 @@ func (r *PublicReader) CustomPage(ctx context.Context, visitorAddr string, princ
 	if err != nil {
 		return PublicCustomPage{}, err
 	}
-	config := ParsePagesConfig(item.PagesConfig)
-	if config == nil {
-		return PublicCustomPage{}, ErrSiteNotFound
-	}
-	var page *PageDef
-	for i := range config.Pages {
-		if config.Pages[i].Slug == strings.Trim(pageSlug, "/") {
-			page = &config.Pages[i]
-			break
-		}
-	}
-	if page == nil {
-		return PublicCustomPage{}, ErrSiteNotFound
-	}
-	visitor := r.visitor(ctx, item, principal)
-	blocks, _, _, err := r.resolveBlocks(ctx, item, visitor, &PagesConfig{
-		Version: config.Version,
-		Home:    &HomeConfig{Blocks: page.Blocks},
-	}, "")
+	pageSlug = strings.Trim(pageSlug, "/")
+	var title, bodyMD, seo string
+	err = r.Store.Pool.QueryRow(ctx, `
+		SELECT title, body_markdown, seo_description
+		FROM site.site_pages
+		WHERE organization_id = $1::uuid AND site_id = $2::uuid AND slug = $3
+	`, item.OrganizationID, item.ID, pageSlug).Scan(&title, &bodyMD, &seo)
 	if err != nil {
-		return PublicCustomPage{}, err
+		return PublicCustomPage{}, ErrSiteNotFound
 	}
-	return PublicCustomPage{Site: item, Title: page.Title, Blocks: blocks}, nil
+	// 净化管线在 delivery 层（RenderSiteMarkdown），此处返回原文。
+	return PublicCustomPage{Site: item, Title: title, Markdown: bodyMD, Description: seo}, nil
 }
 
 // PublicCustomPage is the /p/{pageSlug} payload.
 type PublicCustomPage struct {
-	Site   Site
-	Title  string
-	Blocks []PublicBlock
+	Site        Site
+	Title       string
+	Markdown    string
+	Description string
 }
 
 // localePredicate 内联语言过滤谓词（D11/E）。locale 已由路由按

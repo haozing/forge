@@ -19,7 +19,6 @@ import (
 	"agentchunzhi/internal/authz"
 	"agentchunzhi/internal/automation"
 	"agentchunzhi/internal/config"
-	"agentchunzhi/internal/content"
 	"agentchunzhi/internal/deletion"
 	"agentchunzhi/internal/delivery"
 	"agentchunzhi/internal/eventing"
@@ -29,7 +28,6 @@ import (
 	"agentchunzhi/internal/query"
 	"agentchunzhi/internal/retrieval"
 	"agentchunzhi/internal/review"
-	"agentchunzhi/internal/site"
 	"agentchunzhi/internal/store"
 	"agentchunzhi/internal/tag"
 	"agentchunzhi/internal/transcription"
@@ -164,14 +162,11 @@ func main() {
 		SessionTTL:      cfg.RetrievalSessionTTL,
 		QueryTimeout:    cfg.RetrievalQueryTimeout,
 	}
-	var siteServiceForTools = site.Service{Store: db, Events: &events, Policy: authz.WorkspacePolicyService{Store: db}}
 	reviewService := review.Service{Store: db, Events: &events, Policy: authz.WorkspacePolicyService{Store: db}}
-	contentServiceForTools := content.Service{Store: db, Events: events}
 	reactProcessor := &agentruntime.PersistentReActService{
 		Store: db, Cipher: checkpointCipher, Models: modelRegistry,
 		ToolFactory: agentruntime.DomainToolFactory{
 			Store: db, Events: events, Query: queryService, Models: modelRegistry,
-			Sites: &siteServiceForTools, Reviews: &reviewService, Contents: &contentServiceForTools,
 		},
 		Coordinator: agentruntime.Coordinator{Store: db},
 	}

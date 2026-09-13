@@ -1,12 +1,12 @@
 package delivery
 
-// preview.go — the real-render preview of the management face (design doc
-// §8.2): one member-authenticated POST renders the requested page through
-// the exact Renderer + StyleEngine the live face uses, with a candidate
-// style patch merged over the working style. Preview output is never cached
-// and always noindex + no-store.
+// preview.go — 沙盒主题的实时预览渲染（主题化与 AI 设计重构）。
+// 输入 = 沙盒主题文件集（agent 会话），输出 = 指定槽位的完整 HTML。
+// 预览不进页缓存、一律 noindex + no-store；跨源 iframe 由 base_url 重写
+// 根相对引用。安全：渲染走主题引擎（编译门禁 + 扫描已在上游完成）。
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -16,14 +16,14 @@ import (
 	"agentchunzhi/internal/auth"
 	"agentchunzhi/internal/site"
 	"agentchunzhi/internal/tag"
+	"agentchunzhi/internal/theme"
 )
 
-// PreviewInput carries the preview request body.
+// PreviewInput carries the preview request body: the candidate theme file
+// set plus the page to render.
 type PreviewInput struct {
-	StyleConfig json.RawMessage `json:"style_config"`
-	PagesConfig json.RawMessage `json:"pages_config"`
-	CustomCss   string          `json:"custom_css"`
-	Page        string          `json:"page"`
+	Files       json.RawMessage `json:"files"`
+	Slot        string          `json:"slot"`
 	DisplayPath string          `json:"display_path"`
 	// BaseURL optionally rewrites the rendered site's root-relative links
 	// (href/src/action starting with "/") to this origin, so the management
@@ -32,9 +32,9 @@ type PreviewInput struct {
 	BaseURL string `json:"base_url"`
 }
 
-// RenderPreview renders one candidate page. The site service call enforces
-// site.read; style patch validation failures return the wrapped site error so
-// the handler answers 422.
+// RenderPreview renders one candidate page from the sandbox files. The site
+// service call enforces site.read; theme compile failures return a structured
+// error the agent can consume.
 func (s *Service) RenderPreview(ctx context.Context, principal auth.Principal, workspaceID, siteID string, input PreviewInput) (*Response, error) {
 	if s.Sites == nil || s.Reader == nil {
 		return nil, fmt.Errorf("delivery preview is not wired")
@@ -43,34 +43,20 @@ func (s *Service) RenderPreview(ctx context.Context, principal auth.Principal, w
 	if err != nil {
 		return nil, err
 	}
-	// Candidate style = working style ⊕ patch, fully re-validated.
-	styleDocument := row.StyleConfig
-	if len(input.StyleConfig) > 0 {
-		merged, err := site.MergeStylePatch(styleDocument, input.StyleConfig)
-		if err != nil {
-			return nil, err
+	files := parseThemeFiles(input.Files)
+	if len(files) == 0 {
+		// 空沙盒 = 当前 published 主题。
+		published, ferr := s.Sites.ThemePublishedFiles(ctx, principal, workspaceID, siteID)
+		if ferr != nil {
+			return nil, ferr
 		}
-		styleDocument = merged
+		files = parseThemeFiles(published)
 	}
-	config, err := site.ParseStyleConfig(styleDocument)
-	if err != nil {
-		return nil, err
+	slot := input.Slot
+	if slot == "" {
+		slot = theme.SlotHome
 	}
-	customCss := row.CustomCss
-	if strings.TrimSpace(input.CustomCss) != "" {
-		clean, stripped := site.SanitizeCSS(input.CustomCss)
-		if len(stripped) > 0 && strings.TrimSpace(clean) == "" {
-			return nil, fmt.Errorf("%w: custom_css was entirely removed by the sanitizer", site.ErrInvalidInput)
-		}
-		customCss = clean
-	}
-	facts := site.SiteFacts{
-		Site:             row,
-		HomepageConfig:   row.HomepageConfig,
-		NavigationConfig: row.NavigationConfig,
-		StyleConfig:      styleDocument,
-		CustomCss:        customCss,
-	}
+
 	// The base URL must validate before any rendering happens; the closure
 	// below rewrites root-relative references so cross-origin iframe
 	// previews resolve media and script references.
@@ -82,24 +68,31 @@ func (s *Service) RenderPreview(ctx context.Context, principal auth.Principal, w
 		}
 		baseURL = parsed.Scheme + "://" + parsed.Host
 	}
+
 	// Previews bypass the page cache by construction (no pipeline).
 	render := func(kind string, vm any) (*Response, error) {
-		body, err := s.Render.RenderPage(kind, vm)
+		queryFn, qerr := s.Sites.ThemeQuery(ctx, principal, workspaceID, siteID, s.Reader)
+		if qerr != nil {
+			return nil, qerr
+		}
+		compiled, err := theme.Compile(files, theme.Options{SiteSlug: row.Slug, BaseAbsURL: baseURL, Query: queryFn})
 		if err != nil {
 			return nil, err
 		}
+		var buffer bytes.Buffer
+		if err := compiled.Render(&buffer, kind, vm); err != nil {
+			return nil, err
+		}
+		body := buffer.Bytes()
 		if baseURL != "" {
 			body = []byte(absolutizePreviewBody(string(body), baseURL))
 		}
 		return &Response{Body: body, ContentType: contentHTML, CacheControl: noStorePolicy, NoIndex: true, Status: 200}, nil
 	}
-	switch input.Page {
-	case "", "home":
-		pagesConfig := facts.PagesConfig
-		if len(input.PagesConfig) > 0 {
-			pagesConfig = input.PagesConfig
-		}
-		view, err := s.Reader.HomeWithConfig(ctx, previewAddr, principal, row.Slug, facts.HomepageConfig, pagesConfig, "")
+
+	switch slot {
+	case "", theme.SlotHome:
+		view, err := s.Reader.HomeWithConfig(ctx, previewAddr, principal, row.Slug, "")
 		if err != nil {
 			return nil, err
 		}
@@ -114,23 +107,23 @@ func (s *Service) RenderPreview(ctx context.Context, principal auth.Principal, w
 		if tags, err := s.Reader.Tags(ctx, previewAddr, principal, row.Slug, 24); err == nil {
 			facets = tags
 		}
-		vm := ResolveHome(view, config, facets)
-		vm.Site = chrome(facts, config, "home")
-		vm.Title = facts.Site.Name + "（预览）"
+		vm := ResolveHome(view, facets)
+		vm.Site = chrome(factsFrom(row), "home")
+		vm.Title = row.Name + "（预览）"
 		vm.Canonical = vm.Site.HomeHref
 		vm.NoIndex = true
-		return render("home", vm)
-	case "posts":
-		page, err := s.Reader.Posts(ctx, previewAddr, principal, row.Slug, site.PublicPostQuery{Limit: config.PostsPerPage})
+		return render(theme.SlotHome, vm)
+	case theme.SlotList:
+		page, err := s.Reader.Posts(ctx, previewAddr, principal, row.Slug, site.PublicPostQuery{Limit: 10})
 		if err != nil {
 			return nil, err
 		}
-		vm := ResolveList(row.Slug, "文章（预览）", "/sites/"+row.Slug+"/posts/", page, config, page.NextCursor)
-		vm.Site = chrome(facts, config, "list")
+		vm := ResolveList(row.Slug, "文章（预览）", "/sites/"+row.Slug+"/posts/", page, page.NextCursor)
+		vm.Site = chrome(factsFrom(row), "list")
 		vm.Title = "文章 · " + row.Name + "（预览）"
 		vm.NoIndex = true
-		return render("list", vm)
-	case "detail":
+		return render(theme.SlotList, vm)
+	case theme.SlotDetail:
 		if input.DisplayPath == "" {
 			return nil, site.ErrPathInvalid
 		}
@@ -138,15 +131,19 @@ func (s *Service) RenderPreview(ctx context.Context, principal auth.Principal, w
 		if err != nil {
 			return nil, err
 		}
-		vm := ResolveDetail(row.Slug, content, s.authorizedBodyImages(ctx, facts, content.Markdown))
-		vm.Site = chrome(facts, config, "detail")
+		vm := ResolveDetail(row.Slug, content, s.authorizedBodyImages(ctx, factsFrom(row), content.Markdown))
+		vm.Site = chrome(factsFrom(row), "detail")
 		vm.Title = content.Title + " · " + row.Name + "（预览）"
 		vm.NoIndex = true
-		s.attachDetailRelated(ctx, previewAddr, principal, row.Slug, content, &vm)
-		return render("detail", vm)
+		return render(theme.SlotDetail, vm)
 	default:
 		return nil, site.ErrInvalidInput
 	}
+}
+
+// factsFrom 把站点行包装为渲染所需的 facts（预览路径：无 release 快照）。
+func factsFrom(row site.Site) site.SiteFacts {
+	return site.SiteFacts{Site: row, CommentsMode: row.CommentsMode, ThemeFiles: json.RawMessage("{}")}
 }
 
 // previewAddr is the synthetic client address of preview reads (the preview

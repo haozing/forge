@@ -7,7 +7,6 @@ package delivery
 
 import (
 	"encoding/json"
-	"fmt"
 	"strings"
 
 	"time"
@@ -45,8 +44,6 @@ type Chrome struct {
 	TagsHref       string
 	SearchHref     string
 	RSSHref        string
-	// Style carries the resolved style document.
-	Style site.StyleConfig
 	// StyleCSSVars is the generated CSS custom-properties block plus the
 	// static base stylesheet (inline, no external requests).
 	StyleCSSVars template.CSS
@@ -123,11 +120,8 @@ type PaginationVM struct {
 // HomeVM renders the homepage: optional hero block plus ordered sections.
 type HomeVM struct {
 	Page
-	HeroTitle   string
-	HeroSummary string
-	Sections    []SectionVM
-	// Blocks 是 pages_config v2 的模块（C1）：非空时优先于 Sections 渲染。
-	Blocks       []BlockVM
+	// Items 是首页内容卡片（主题化后 = 最新内容一段）。
+	Items        []CardVM
 	TagCloud     []TagChip
 	ShowTagCloud bool
 }
@@ -186,7 +180,7 @@ type DetailVM struct {
 	AssetID     string
 	Section     string
 	SectionHref string
-	ContentHTML string
+	ContentHTML template.HTML
 	TOC         []Heading
 	Fields      []FieldValueVM
 	PublishedOn string
@@ -346,112 +340,18 @@ func cardVM(slug string, post site.PublicPost, summaryRunes int) CardVM {
 	return card
 }
 
-// ResolveHome projects the reader home view into the home VM, honoring the
-// home component order of the style IA (featured → latest → tag_cloud).
-func ResolveHome(view site.PublicHomeView, style site.StyleConfig, tags []tag.FacetItem) HomeVM {
+// ResolveHome projects the reader home view into the home VM: one latest
+// content stream plus the tag cloud (the design surface lives in the theme).
+func ResolveHome(view site.PublicHomeView, tags []tag.FacetItem) HomeVM {
 	vm := HomeVM{Page: Page{Kind: "home"}}
-	for _, block := range view.Blocks {
-		bvm := BlockVM{
-			Type:       block.Type,
-			Title:      block.Title,
-			Subtitle:   block.Subtitle,
-			Href:       block.Href,
-			Layout:     block.Layout,
-			StyleClass: blockStyleClass(block),
-		}
-		for _, item := range block.Items {
-			bvm.Items = append(bvm.Items, cardVM(view.Site.Slug, item, style.SummaryLength))
-		}
-		for _, link := range block.Links {
-			bvm.Links = append(bvm.Links, NavItem{Label: link.Label, Href: link.Href})
-		}
-		for _, cat := range block.Categories {
-			bvm.Categories = append(bvm.Categories, CategoryLinkVM{Name: cat.Name, Href: cat.Href, Count: cat.Count})
-		}
-		vm.Blocks = append(vm.Blocks, bvm)
-	}
-	// P1-B: a section may carry model_key (one resource model owns a slot).
-	// Model-scoped latest/featured slots must NOT merge into the generic
-	// "最新/精选" buckets — each becomes its own titled section. Only
-	// model-less sections keep the legacy merge-by-component behaviour.
-	columnOrder := []string{}
-	columnsBySlug := map[string]SectionVM{}
-	namedOrder := []string{}
-	namedByKey := map[string]SectionVM{}
-	var featured, latest []CardVM
-
 	for _, section := range view.Sections {
-		items := make([]CardVM, 0, len(section.Items))
 		for _, post := range section.Items {
-			items = append(items, cardVM(view.Site.Slug, post, style.SummaryLength))
-		}
-		modelScoped := strings.TrimSpace(section.ModelKey) != ""
-		switch {
-		case section.Type == site.HomepageSectionColumn:
-			title := section.Title
-			if title == "" {
-				title = section.SectionSlug
-			}
-			key := section.SectionSlug + ":" + section.ModelKey
-			existing, ok := columnsBySlug[key]
-			if !ok {
-				columnOrder = append(columnOrder, key)
-				existing = SectionVM{Type: "column", Title: title, ModelKey: section.ModelKey}
-			}
-			existing.Items = append(existing.Items, items...)
-			columnsBySlug[key] = existing
-		case modelScoped:
-			// Model-scoped latest/featured: standalone titled section.
-			title := section.Title
-			if title == "" {
-				title = section.ModelKey
-			}
-			key := section.Type + ":" + section.ModelKey
-			existing, ok := namedByKey[key]
-			if !ok {
-				namedOrder = append(namedOrder, key)
-				existing = SectionVM{Type: section.Type, Title: title, ModelKey: section.ModelKey}
-			}
-			existing.Items = append(existing.Items, items...)
-			namedByKey[key] = existing
-		case section.Type == site.HomepageSectionFeatured:
-			featured = append(featured, items...)
-		case section.Type == site.HomepageSectionLatest:
-			latest = append(latest, items...)
-		}
-	}
-	componentSet := map[string]bool{}
-	vm.Sections = []SectionVM{}
-	for _, component := range style.HomeComponents {
-		componentSet[component] = true
-		switch component {
-		case "featured":
-			if len(featured) > 0 {
-				vm.Sections = append(vm.Sections, SectionVM{Type: "featured", Title: "精选", Items: featured})
-			}
-		case "latest":
-			if len(latest) > 0 {
-				vm.Sections = append(vm.Sections, SectionVM{Type: "latest", Title: "最新", Items: latest})
-			}
-		}
-	}
-	for _, slug := range columnOrder {
-		if column := columnsBySlug[slug]; len(column.Items) > 0 {
-			vm.Sections = append(vm.Sections, column)
-		}
-	}
-	for _, key := range namedOrder {
-		if named := namedByKey[key]; len(named.Items) > 0 {
-			vm.Sections = append(vm.Sections, named)
+			vm.Items = append(vm.Items, cardVM(view.Site.Slug, post, 160))
 		}
 	}
 	if tags != nil {
 		vm.TagCloud = facetChips(view.Site.Slug, tags)
-	}
-	vm.ShowTagCloud = componentSet["tag_cloud"]
-	if hero := firstCard(vm.Sections); hero != nil && style.HomeStyle == "hero" {
-		vm.HeroTitle = hero.Title
-		vm.HeroSummary = hero.Summary
+		vm.ShowTagCloud = len(vm.TagCloud) > 0
 	}
 	return vm
 }
@@ -478,11 +378,11 @@ func facetChips(slug string, items []tag.FacetItem) []TagChip {
 }
 
 // ResolveList projects one post page into the list VM.
-func ResolveList(slug, heading, basePath string, page site.PublicPostPage, style site.StyleConfig, nextCursor string) ListVM {
+func ResolveList(slug, heading, basePath string, page site.PublicPostPage, nextCursor string) ListVM {
 	vm := ListVM{Page: Page{Kind: "list"}, Heading: heading}
 	vm.Items = make([]CardVM, 0, len(page.Items))
 	for _, post := range page.Items {
-		vm.Items = append(vm.Items, cardVM(slug, post, style.SummaryLength))
+		vm.Items = append(vm.Items, cardVM(slug, post, 160))
 	}
 	if page.HasMore && nextCursor != "" {
 		vm.Pagination.NextHref = basePath + "?cursor=" + nextCursor
@@ -553,7 +453,7 @@ func ResolveDetailWithRefs(slug string, content site.PublicPostContent, authoriz
 		AssetID:      content.AssetID,
 		Section:      content.Section,
 		SectionHref:  sectionHref(slug, content.Section),
-		ContentHTML:  markdown.HTML,
+		ContentHTML:  template.HTML(markdown.HTML),
 		TOC:          markdown.Headings,
 		Fields:       FormatFieldValues(content.Fields),
 		PublishedOn:  FormatDate(content.PublishedAt),
@@ -677,33 +577,11 @@ func buildBreadcrumbItems(current string, crumbs []site.CategoryCrumb) []map[str
 	return items
 }
 
-// blockStyleClass renders the closed style vocabulary as template classes
-// (D10 第③层)：与 LayoutClasses 同思路，模块不携带自由 CSS。
-func blockStyleClass(block site.PublicBlock) string {
-	class := "block--" + block.Type
-	if block.Style == nil {
-		return class
-	}
-	s := block.Style
-	if s.Width != "" {
-		class += " block--width-" + s.Width
-	}
-	if s.Variant != "" {
-		class += " block--variant-" + s.Variant
-	}
-	if s.Columns > 0 {
-		class += fmt.Sprintf(" block--cols-%d", s.Columns)
-	}
-	if s.Background != "" {
-		class += " block--bg-" + s.Background
-	}
-	return class
-}
 
 // CustomPageVM renders one pages_config v2 custom page (C1)。
 type CustomPageVM struct {
 	Page
-	Site    Chrome
-	Heading string
-	Blocks  []BlockVM
+	Site        Chrome
+	Heading     string
+	ContentHTML template.HTML
 }

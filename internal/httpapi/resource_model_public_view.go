@@ -43,9 +43,18 @@ func resourceModelPublicView(deps Dependencies) http.HandlerFunc {
 				return
 			}
 			candidates := buildPublicViewCandidates(fields, view)
+			// nil slice 会序列化成 null（或省略），前端按数组消费——补空数组。
+			cardFields := view.CardFields
+			if cardFields == nil {
+				cardFields = []string{}
+			}
+			detailFields := view.DetailFields
+			if detailFields == nil {
+				detailFields = []string{}
+			}
 			writeJSON(w, http.StatusOK, map[string]any{
-				"card_fields":   view.CardFields,
-				"detail_fields": view.DetailFields,
+				"card_fields":   cardFields,
+				"detail_fields": detailFields,
 				"candidates":    candidates,
 			})
 		case http.MethodPut:

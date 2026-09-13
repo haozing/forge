@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"agentchunzhi/internal/site"
 
 	runtimetools "agentchunzhi/internal/agentruntime/tools"
 	"agentchunzhi/internal/agenttask"
@@ -31,24 +30,14 @@ type DomainToolFactory struct {
 	Events eventing.EventStore
 	Query  agentquery.Service
 	// Models resolves the run's pinned structured-output endpoint for the
-	// site_style_suggest tool (nil disables the tool).
+	// suggest_display_path tool (nil disables the tool).
 	Models *ModelRegistry
-	// Sites gives the style tools the site domain surface (preset save and
-	// preset expansion); nil disables those tools.
-	Sites StyleSiteService
 	// Reviews carries the scheduled-publish registration for the
 	// publish_asset tool's scheduled_at parameter (nil disables deferral).
 	Reviews *review.Service
 	// Contents carries the content-pattern domain surface for the G8 tools
 	// (nil disables the pattern tools).
 	Contents *content.Service
-}
-
-// StyleSiteService is the narrow site surface the style tools need.
-type StyleSiteService interface {
-	CreateStylePreset(ctx context.Context, principal auth.Principal, name string, styleConfig json.RawMessage, customCss string) (site.StylePreset, error)
-	ExpandStylePreset(ctx context.Context, organizationID string, patch json.RawMessage) (json.RawMessage, string, error)
-	GetSite(ctx context.Context, principal auth.Principal, workspaceID, siteID string) (site.Site, error)
 }
 
 func (f DomainToolFactory) Build(ctx context.Context, scope ReActToolScope, rawPolicy map[string]any) (*runtimetools.Registry, runtimetools.Policy, error) {
@@ -322,103 +311,6 @@ func (f DomainToolFactory) Build(ctx context.Context, scope ReActToolScope, rawP
 	if f.Models != nil {
 		handlers.SuggestDisplayPath = func(ctx context.Context, arguments map[string]any) (any, error) {
 			return f.suggestDisplayPath(ctx, scope, stringValue(arguments["title"]), stringValue(arguments["asset_id"]))
-		}
-		handlers.SiteStyleSuggest = func(ctx context.Context, arguments map[string]any) (any, error) {
-			// Read-only tool (design doc §8.3): the site row is scoped to
-			// the run's organization and workspace; no site.manage involved.
-			identifier := strings.TrimSpace(stringValue(arguments["site_id"]))
-			if identifier == "" {
-				// Default to the workspace's single active site; ambiguous
-				// workspaces must address the site explicitly (the error
-				// lists the candidates so the model can retry, §8.3).
-				rows, err := f.Store.Pool.Query(ctx, `
-					SELECT slug FROM site.public_sites
-					WHERE organization_id = $1::uuid AND workspace_id = $2::uuid AND status = 'active'
-					ORDER BY created_at
-				`, scope.OrganizationID, scope.WorkspaceID)
-				if err != nil {
-					return nil, err
-				}
-				var slugs []string
-				for rows.Next() {
-					var slug string
-					if err := rows.Scan(&slug); err != nil {
-						rows.Close()
-						return nil, err
-					}
-					slugs = append(slugs, slug)
-				}
-				rows.Close()
-				if len(slugs) == 1 {
-					identifier = slugs[0]
-				} else {
-					return nil, fmt.Errorf("site_id is required (uuid or slug); workspace sites: %s", strings.Join(slugs, ", "))
-				}
-			}
-			// Accept a uuid, slug or display name (model variance on which
-			// identifier it echoes back); all three resolve strictly inside
-			// the run's organization and workspace, so nothing widens.
-			var siteID string
-			if err := f.Store.Pool.QueryRow(ctx, `
-				SELECT id::text FROM site.public_sites
-				WHERE organization_id = $1::uuid AND workspace_id = $2::uuid AND status = 'active'
-				  AND (id::text = $3 OR slug = $3 OR name = $3)
-			`, scope.OrganizationID, scope.WorkspaceID, identifier).Scan(&siteID); err != nil {
-				return nil, fmt.Errorf("site %q was not found in the run workspace (pass the site slug)", clipText(identifier, 60))
-			}
-			return f.suggestStylePatches(ctx, scope, scope.OrganizationID, scope.WorkspaceID, siteID, stringValue(arguments["instruction"]))
-		}
-	}
-	if f.Sites != nil {
-		handlers.SiteStylePresetSave = func(ctx context.Context, arguments map[string]any) (any, error) {
-			identifier := strings.TrimSpace(stringValue(arguments["site_id"]))
-			if identifier == "" {
-				rows, err := f.Store.Pool.Query(ctx, `
-					SELECT id::text FROM site.public_sites
-					WHERE organization_id = $1::uuid AND workspace_id = $2::uuid AND status = 'active'
-					ORDER BY created_at LIMIT 2
-				`, scope.OrganizationID, scope.WorkspaceID)
-				if err != nil {
-					return nil, err
-				}
-				var ids []string
-				for rows.Next() {
-					var id string
-					if err := rows.Scan(&id); err != nil {
-						rows.Close()
-						return nil, err
-					}
-					ids = append(ids, id)
-				}
-				rows.Close()
-				if len(ids) != 1 {
-					return nil, errors.New("site_id is required when the workspace has zero or multiple active sites")
-				}
-				identifier = ids[0]
-			}
-			principal := auth.Principal{OrganizationID: scope.OrganizationID, UserID: scope.PrincipalID, UserType: auth.UserTypeMember}
-			// Resolve uuid/slug/name to the row and read the style bundle
-			// directly (GetSite demands a uuid and a member policy check the
-			// agent principal must not need for this read-only snapshot).
-			var styleDocument []byte
-			var customCSS string
-			err := f.Store.Pool.QueryRow(ctx, `
-				SELECT style_config, custom_css FROM site.public_sites
-				WHERE organization_id = $1::uuid AND workspace_id = $2::uuid AND status = 'active'
-				  AND (id::text = $3 OR slug = $3 OR name = $3)
-			`, scope.OrganizationID, scope.WorkspaceID, identifier).Scan(&styleDocument, &customCSS)
-			if err != nil {
-				return nil, fmt.Errorf("site %q was not found in the run workspace (pass the site slug)", clipText(identifier, 60))
-			}
-			name := strings.TrimSpace(stringValue(arguments["name"]))
-			if name == "" {
-				return nil, errors.New("name is required")
-			}
-			preset, err := f.Sites.CreateStylePreset(ctx, principal, name, styleDocument, customCSS)
-			if err != nil {
-				return nil, err
-			}
-			return map[string]any{"preset_id": preset.ID, "name": preset.Name}, nil
 		}
 	}
 	registry := runtimetools.NewRegistry()
