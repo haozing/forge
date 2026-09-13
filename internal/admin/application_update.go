@@ -282,24 +282,25 @@ func (s Service) UpdateAgentApplication(ctx context.Context, principal auth.Prin
 		}
 		var previousKnowledgeWorkspace string
 		_ = tx.QueryRow(ctx, `
-			SELECT COALESCE(workspace_id::text, '')
-			FROM content.workspace_agent_applications
-			WHERE organization_id = $1::uuid AND agent_application_id = $2::uuid AND enabled = true
-			ORDER BY created_at
+			SELECT COALESCE(wm.workspace_id::text, '')
+			FROM content.workspace_members wm
+			WHERE wm.organization_id = $1::uuid AND wm.user_id = $2::uuid
+			  AND wm.principal_type = 'agent'
+			ORDER BY wm.created_at
 			LIMIT 1
-		`, principal.OrganizationID, input.ApplicationID).Scan(&previousKnowledgeWorkspace)
+		`, principal.OrganizationID, currentAgentUserID).Scan(&previousKnowledgeWorkspace)
 		if _, err = tx.Exec(ctx, `
-			UPDATE content.workspace_agent_applications
-			SET enabled = false
-			WHERE organization_id = $1::uuid AND agent_application_id = $2::uuid AND workspace_id <> $3::uuid
-		`, principal.OrganizationID, input.ApplicationID, targetWorkspace); err != nil {
+			DELETE FROM content.workspace_members
+			WHERE organization_id = $1::uuid AND user_id = $2::uuid
+			  AND principal_type = 'agent' AND workspace_id <> $3::uuid
+		`, principal.OrganizationID, currentAgentUserID, targetWorkspace); err != nil {
 			return UpdateAgentApplicationResult{}, fmt.Errorf("disable previous knowledge base enablement: %w", err)
 		}
 		if _, err = tx.Exec(ctx, `
-			INSERT INTO content.workspace_agent_applications (organization_id, workspace_id, agent_application_id, created_by)
-			VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid)
-			ON CONFLICT (workspace_id, agent_application_id) DO UPDATE SET enabled = true
-		`, principal.OrganizationID, targetWorkspace, input.ApplicationID, principal.UserID); err != nil {
+			INSERT INTO content.workspace_members (organization_id, workspace_id, user_id, role, principal_type, granted_by)
+			VALUES ($1::uuid, $2::uuid, $3::uuid, 'editor', 'agent', $4::uuid)
+			ON CONFLICT (workspace_id, user_id) DO NOTHING
+		`, principal.OrganizationID, targetWorkspace, currentAgentUserID, principal.UserID); err != nil {
 			return UpdateAgentApplicationResult{}, fmt.Errorf("enable target knowledge base: %w", err)
 		}
 		if _, err = tx.Exec(ctx, `

@@ -197,7 +197,8 @@ func publicSitePost(deps Dependencies) http.HandlerFunc {
 		}
 		content, err := deps.PublicSites.Post(r.Context(),
 			effectiveClientAddr(r, deps.TrustedProxyCIDRs),
-			publicVisitorPrincipal(r, deps), slug, r.PathValue("displayPath"))
+			publicVisitorPrincipal(r, deps), slug, r.PathValue("displayPath"),
+			r.URL.Query().Get("locale"))
 		if err != nil {
 			writePublicSiteError(w, err)
 			return
@@ -227,7 +228,7 @@ func publicSiteSection(deps Dependencies) http.HandlerFunc {
 			effectiveClientAddr(r, deps.TrustedProxyCIDRs),
 			publicVisitorPrincipal(r, deps), slug,
 			r.PathValue("sectionSlug"), r.URL.Query().Get("model_key"),
-			atoiDefault(r.URL.Query().Get("limit"), 20))
+			atoiDefault(r.URL.Query().Get("limit"), 20), r.URL.Query().Get("locale"))
 		if err != nil {
 			writePublicSiteError(w, err)
 			return

@@ -192,7 +192,7 @@ func deleteAttachment(deps Dependencies) http.HandlerFunc {
 
 type linkAttachmentRequest struct {
 	AssetID string `json:"asset_id"`
-	Role string `json:"role"` // body | cover (二期 §6)
+	Role    string `json:"role"` // body | cover (二期 §6)
 }
 
 func linkAttachment(deps Dependencies) http.HandlerFunc {

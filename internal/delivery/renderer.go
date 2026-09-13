@@ -55,23 +55,23 @@ var rendererFuncs = template.FuncMap{
 
 // pageSets enumerates every HTML page template with its content file.
 var pageSets = map[string]string{
-	"home":      "templates/pages/home.html",
-	"list":      "templates/pages/list.html",
-	"detail":    "templates/pages/detail.html",
-	"tags":      "templates/pages/tag_index.html",
-	"tag_page":  "templates/pages/tag_page.html",
-	"search":    "templates/pages/search.html",
-	"gate":      "templates/pages/gate.html",
-	"about":     "templates/pages/about.html",
-	"archive":   "templates/pages/archive.html",
-	"error":     "templates/errors/error.html",
+	"home":     "templates/pages/home.html",
+	"list":     "templates/pages/list.html",
+	"detail":   "templates/pages/detail.html",
+	"tags":     "templates/pages/tag_index.html",
+	"tag_page": "templates/pages/tag_page.html",
+	"search":   "templates/pages/search.html",
+	"gate":     "templates/pages/gate.html",
+	"about":    "templates/pages/about.html",
+	"archive":  "templates/pages/archive.html",
+	"error":    "templates/errors/error.html",
 }
 
 // xmlSets enumerates the non-HTML serializations.
 var xmlSets = map[string]string{
-	"rss":    "templates/xml/rss.xml",
+	"rss":     "templates/xml/rss.xml",
 	"sitemap": "templates/xml/sitemap.xml",
-	"robots": "templates/xml/robots.txt",
+	"robots":  "templates/xml/robots.txt",
 }
 
 // Renderer holds the compiled template sets.

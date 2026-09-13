@@ -7,6 +7,7 @@ package httpapi
 // 的工作区策略，服务层不做角色判断。
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 
@@ -197,5 +198,47 @@ func noteContainerResource(deps Dependencies) http.HandlerFunc {
 			"conversation_id":   conversationID,
 			"note_container_id": input.ContainerID,
 		})
+	}
+}
+
+// FolderCategoryPublication serves GET/PUT
+// /api/workspaces/{workspaceId}/folders/{containerId}/category-publication
+// (站点方案 C5/D14：分类公开标记、slug 与分类级 SEO 元数据)。
+func FolderCategoryPublication(deps Dependencies) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		principal, ok := requireMemberSession(w, r, deps)
+		if !ok {
+			return
+		}
+		workspaceID := r.PathValue("workspaceId")
+		containerID := r.PathValue("containerId")
+		if !requirePathUUID(w, workspaceID, containerID) {
+			return
+		}
+		switch r.Method {
+		case http.MethodGet:
+			out, err := deps.FolderService.GetCategoryPublication(r.Context(), principal, workspaceID, folder.KindDoc, containerID)
+			if err != nil {
+				FolderError(w, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, out)
+		case http.MethodPut:
+			var input folder.CategoryPublication
+			decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16*1024))
+			decoder.DisallowUnknownFields()
+			if err := decoder.Decode(&input); err != nil {
+				writeError(w, http.StatusUnprocessableEntity, "validation_failed")
+				return
+			}
+			out, err := deps.FolderService.SetCategoryPublication(r.Context(), principal, workspaceID, folder.KindDoc, containerID, input)
+			if err != nil {
+				FolderError(w, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, out)
+		default:
+			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
+		}
 	}
 }

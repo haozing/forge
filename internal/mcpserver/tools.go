@@ -53,13 +53,13 @@ func registerTools(server *mcp.Server, deps Deps, principal auth.Principal) {
 	if writeCap {
 		mcp.AddTool(server, &mcp.Tool{
 			Name:        "create_document",
-			Description: "创建知识库文档（通用文档模型）。创建后为工作草稿，需依次调用 confirm_asset_version 与 publish_asset 完成入库。",
+			Description: "创建知识库文档（通用文档模型）。创建后为工作草稿，调用 confirm_asset_version 完成确认，随后由人工在管理面发布（agent 不发布）。",
 		}, func(ctx context.Context, req *mcp.CallToolRequest, args createDocumentArgs) (*mcp.CallToolResult, any, error) {
 			return createDocument(ctx, deps, principal, args)
 		})
 		mcp.AddTool(server, &mcp.Tool{
 			Name:        "insert_record",
-			Description: "向指定数据表插入一条结构化记录（fields 的键须匹配表字段定义）。创建后同 create_document 需确认与发布。",
+			Description: "向指定数据表插入一条结构化记录（fields 的键须匹配表字段定义）。创建后同 create_document 需人工确认。",
 		}, func(ctx context.Context, req *mcp.CallToolRequest, args insertRecordArgs) (*mcp.CallToolResult, any, error) {
 			return insertRecord(ctx, deps, principal, args)
 		})
@@ -70,19 +70,15 @@ func registerTools(server *mcp.Server, deps Deps, principal auth.Principal) {
 			return updateDocument(ctx, deps, principal, args)
 		})
 	}
-	if can(principal, "asset.publish") {
+	if can(principal, "asset.confirm") {
 		mcp.AddTool(server, &mcp.Tool{
 			Name:        "confirm_asset_version",
 			Description: "人工确认资产的当前工作版本（入库治理链第一步；direct 发布策略要求先确认）。version_id 缺省时自动解析当前工作版本。",
 		}, func(ctx context.Context, req *mcp.CallToolRequest, args confirmAssetArgs) (*mcp.CallToolResult, any, error) {
 			return confirmAssetVersion(ctx, deps, principal, args)
 		})
-		mcp.AddTool(server, &mcp.Tool{
-			Name:        "publish_asset",
-			Description: "发布资产到知识库。direct 策略直接发布；review 策略自动转发布审核请求。输出会说明实际结果。",
-		}, func(ctx context.Context, req *mcp.CallToolRequest, args publishAssetArgs) (*mcp.CallToolResult, any, error) {
-			return publishAsset(ctx, deps, principal, args)
-		})
+		// publish_asset 已下线（统一方案 J）：发布是 human_only 动作，agent
+		// 侧工具链不再暴露；确认后的内容由人在管理面发布。
 	}
 	if can(principal, "asset.archive") {
 		mcp.AddTool(server, &mcp.Tool{
@@ -137,11 +133,6 @@ type updateDocumentArgs struct {
 type confirmAssetArgs struct {
 	AssetID   string `json:"asset_id" jsonschema:"资产 UUID"`
 	VersionID string `json:"version_id,omitempty" jsonschema:"工作版本 UUID（可选；缺省自动解析当前工作版本）"`
-}
-
-type publishAssetArgs struct {
-	AssetID       string `json:"asset_id" jsonschema:"资产 UUID"`
-	BaseVersionID string `json:"base_version_id" jsonschema:"待发布的已确认版本 UUID（confirm_asset_version 输出）"`
 }
 
 type archiveAssetArgs struct {
@@ -264,7 +255,7 @@ func createDocument(ctx context.Context, deps Deps, principal auth.Principal, ar
 	if err != nil {
 		return nil, nil, err
 	}
-	summary := fmt.Sprintf("文档草稿已创建：asset_id=%s，current_working_version_id=%s（乐观锁）。\n下一步：confirm_asset_version → publish_asset。",
+	summary := fmt.Sprintf("文档草稿已创建：asset_id=%s，current_working_version_id=%s（乐观锁）。\n下一步：confirm_asset_version 完成确认，发布由人工执行。",
 		result.ID, result.CurrentWorkingVersionID)
 	return textResult(summary, result)
 }
@@ -279,7 +270,7 @@ func insertRecord(ctx context.Context, deps Deps, principal auth.Principal, args
 	if err != nil {
 		return nil, nil, err
 	}
-	summary := fmt.Sprintf("记录已创建：asset_id=%s，current_working_version_id=%s。\n下一步：confirm_asset_version → publish_asset。",
+	summary := fmt.Sprintf("记录已创建：asset_id=%s，current_working_version_id=%s。\n下一步：confirm_asset_version 完成确认，发布由人工执行。",
 		result.ID, result.CurrentWorkingVersionID)
 	return textResult(summary, result)
 }
@@ -343,7 +334,7 @@ func updateDocument(ctx context.Context, deps Deps, principal auth.Principal, ar
 	if err != nil {
 		return toolError(err)
 	}
-	summary := fmt.Sprintf("草稿已更新：asset_id=%s，新工作版本 %s。入库需重新 confirm_asset_version → publish_asset。", result.ID, result.CurrentWorkingVersionID)
+	summary := fmt.Sprintf("草稿已更新：asset_id=%s，新工作版本 %s。入库需重新 confirm_asset_version，发布由人工执行。", result.ID, result.CurrentWorkingVersionID)
 	return textResult(summary, result)
 }
 
@@ -360,7 +351,7 @@ func confirmAssetVersion(ctx context.Context, deps Deps, principal auth.Principa
 	if err != nil {
 		return toolError(err)
 	}
-	summary := fmt.Sprintf("版本已人工确认：version_id=%s。下一步 publish_asset（base_version_id 用它）。", version.ID)
+	summary := fmt.Sprintf("版本已人工确认：version_id=%s。确认完成，发布由人工在管理面执行（agent 不发布）。", version.ID)
 	return textResult(summary, version)
 }
 
@@ -381,22 +372,6 @@ func workingVersionID(ctx context.Context, deps Deps, principal auth.Principal, 
 		return "", fmt.Errorf("资产 %s 没有当前工作版本", assetID)
 	}
 	return versionID, nil
-}
-
-func publishAsset(ctx context.Context, deps Deps, principal auth.Principal, args publishAssetArgs) (*mcp.CallToolResult, any, error) {
-	if args.BaseVersionID == "" {
-		return toolError(fmt.Errorf("base_version_id 必填：请使用 confirm_asset_version 输出的版本 UUID"))
-	}
-	allowedModels, err := deps.ScopeResolver.AllowedModelIDs(ctx, principal, "asset.publish")
-	if err != nil {
-		return nil, nil, err
-	}
-	result, err := deps.AssetService.Publish(ctx, principal, allowedModels, args.AssetID, args.BaseVersionID)
-	if err != nil {
-		return toolError(err)
-	}
-	summary := fmt.Sprintf("资产已发布：asset_id=%s，published_version_id=%s，状态 %s。", result.AssetID, result.PublishedVersionID, result.PublicationStatus)
-	return textResult(summary, result)
 }
 
 func archiveAsset(ctx context.Context, deps Deps, principal auth.Principal, args archiveAssetArgs) (*mcp.CallToolResult, any, error) {

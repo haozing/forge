@@ -58,20 +58,20 @@ type RetrievalRebuildService interface {
 // ---------------------------------------------------------------------------
 
 type QueryRequest struct {
-	Query                string                 `json:"query"`
-	Mode                 string                 `json:"mode"`
-	ResourceModelIDs     []string               `json:"resource_model_ids"`
-	Visibility           []string               `json:"visibility"`
-	TagsAny              []string               `json:"tags_any"`
-	TagsAll              []string               `json:"tags_all"`
-	TagsNone             []string               `json:"tags_none"`
+	Query                string                   `json:"query"`
+	Mode                 string                   `json:"mode"`
+	ResourceModelIDs     []string                 `json:"resource_model_ids"`
+	Visibility           []string                 `json:"visibility"`
+	TagsAny              []string                 `json:"tags_any"`
+	TagsAll              []string                 `json:"tags_all"`
+	TagsNone             []string                 `json:"tags_none"`
 	FieldFilters         []agentquery.FieldFilter `json:"field_filters"`
-	Origins              []string               `json:"origins"`
-	ConfirmationStatuses []string               `json:"confirmation_statuses"`
-	PublishedAfter       *string                `json:"published_after"`
-	PublishedBefore      *string                `json:"published_before"`
-	TopK                 int                    `json:"top_k"`
-	Cursor               string                 `json:"cursor"`
+	Origins              []string                 `json:"origins"`
+	ConfirmationStatuses []string                 `json:"confirmation_statuses"`
+	PublishedAfter       *string                  `json:"published_after"`
+	PublishedBefore      *string                  `json:"published_before"`
+	TopK                 int                      `json:"top_k"`
+	Cursor               string                   `json:"cursor"`
 }
 
 func (v QueryRequest) toContract() (agentquery.Request, bool) {
@@ -167,23 +167,23 @@ type rebuildDTO struct {
 }
 
 type executionDTO struct {
-	ID                  string           `json:"id"`
-	SubjectKind         string           `json:"subject_kind"`
-	Channel             string           `json:"channel"`
-	RequestedMode       string           `json:"requested_mode"`
-	ExecutedMode        string           `json:"executed_mode,omitempty"`
-	RankingMethod       string           `json:"ranking_method,omitempty"`
-	Status              string           `json:"status"`
-	Degraded            bool             `json:"degraded"`
-	DegradationReasons  []string         `json:"degradation_reasons"`
-	ResourceModelCount  int              `json:"resource_model_count"`
-	ResultCount         int              `json:"result_count"`
-	StageLatencyMS      map[string]any   `json:"stage_latency_ms"`
-	ErrorCode           string           `json:"error_code,omitempty"`
-	EmbeddingIdentity   string           `json:"embedding_model_identity,omitempty"`
-	RerankerIdentity    string           `json:"reranker_model_identity,omitempty"`
-	StartedAt           string           `json:"started_at"`
-	CompletedAt         string           `json:"completed_at,omitempty"`
+	ID                 string         `json:"id"`
+	SubjectKind        string         `json:"subject_kind"`
+	Channel            string         `json:"channel"`
+	RequestedMode      string         `json:"requested_mode"`
+	ExecutedMode       string         `json:"executed_mode,omitempty"`
+	RankingMethod      string         `json:"ranking_method,omitempty"`
+	Status             string         `json:"status"`
+	Degraded           bool           `json:"degraded"`
+	DegradationReasons []string       `json:"degradation_reasons"`
+	ResourceModelCount int            `json:"resource_model_count"`
+	ResultCount        int            `json:"result_count"`
+	StageLatencyMS     map[string]any `json:"stage_latency_ms"`
+	ErrorCode          string         `json:"error_code,omitempty"`
+	EmbeddingIdentity  string         `json:"embedding_model_identity,omitempty"`
+	RerankerIdentity   string         `json:"reranker_model_identity,omitempty"`
+	StartedAt          string         `json:"started_at"`
+	CompletedAt        string         `json:"completed_at,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
@@ -497,8 +497,8 @@ func WorkspaceRetrievalStatus(deps Dependencies) http.HandlerFunc {
 			}
 		}
 		writeData(w, r, http.StatusOK, map[string]any{
-			"workspace_id":  workspaceID,
-			"run_counts":    counts,
+			"workspace_id":   workspaceID,
+			"run_counts":     counts,
 			"active_profile": activeProfile,
 		})
 	}

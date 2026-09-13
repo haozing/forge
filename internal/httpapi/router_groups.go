@@ -67,6 +67,9 @@ func registerDeliveryRoutes(deps Dependencies, mux *http.ServeMux) {
 	mux.HandleFunc("/sites/{slug}/sitemap.xml", deliverySiteFeed("sitemap")(deps))
 	mux.HandleFunc("/sites/{slug}/robots.txt", deliverySiteFeed("robots")(deps))
 	mux.HandleFunc("/sites/{slug}/about/", deliverySiteAbout(deps))
+	mux.HandleFunc("/sites/{slug}/c/{path...}", deliverySiteCategory(deps))
+	mux.HandleFunc("/sites/{slug}/c", deliverySiteCategory(deps))
+	mux.HandleFunc("/sites/{slug}/p/{pageSlug}", deliverySiteCustomPage(deps))
 	mux.HandleFunc("/sites/{slug}/archive/", deliverySiteArchive(deps))
 	mux.HandleFunc("/sites/{slug}/media/{attachmentId}", deliverySiteMedia(deps))
 	mux.HandleFunc("/static/delivery-search.js", deliverySearchScript(deps))
@@ -279,14 +282,39 @@ func registerTagRoutes(deps Dependencies, mux *http.ServeMux) {
 
 // registerSiteRoutes holds the public-site management surface: workspace site
 // CRUD (DELETE is the soft disable), binding CRUD and the no-store JSON
-// preview snapshot. Binding surfaces sit behind site.manage.
+// preview snapshot. Inclusion surfaces sit behind site.design (统一方案 G)。
 func registerSiteRoutes(deps Dependencies, mux *http.ServeMux) {
 	mux.HandleFunc("/api/workspaces/{workspaceId}/sites", SitesCollection(deps))
 	mux.HandleFunc("/api/workspaces/{workspaceId}/sites/{siteId}", SiteResource(deps))
-	mux.HandleFunc("/api/workspaces/{workspaceId}/sites/{siteId}/bindings", SiteBindingsCollection(deps))
-	mux.HandleFunc("/api/workspaces/{workspaceId}/sites/{siteId}/bindings/{bindingId}", SiteBindingResource(deps))
+	mux.HandleFunc("/api/workspaces/{workspaceId}/sites/{siteId}/bindings", SiteInclusionsCollection(deps))
+	mux.HandleFunc("/api/workspaces/{workspaceId}/sites/{siteId}/inclusions/{assetId}/exclusion", SiteInclusionAssetResource(deps))
+	mux.HandleFunc("/api/workspaces/{workspaceId}/sites/{siteId}/inclusions/{assetId}/feature", SiteInclusionAssetResource(deps))
 	mux.HandleFunc("/api/workspaces/{workspaceId}/sites/{siteId}/summary", SiteSummary(deps))
 	mux.HandleFunc("/api/workspaces/{workspaceId}/sites/{siteId}/preview", SitePreview(deps))
+	start, get, patch, apply := designSessionEndpoints(deps)
+	mux.HandleFunc("/api/workspaces/{workspaceId}/sites/{siteId}/design-sessions", start)
+	mux.HandleFunc("/api/workspaces/{workspaceId}/sites/{siteId}/design-sessions/{sessionId}", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			get(w, r)
+		case http.MethodPatch:
+			patch(w, r)
+		case http.MethodDelete:
+			principal, ok := requireMemberSession(w, r, deps)
+			if !ok {
+				return
+			}
+			if err := deps.Sites.DiscardDesignSession(r.Context(), principal, r.PathValue("workspaceId"), r.PathValue("sessionId")); err != nil {
+				SiteError(w, err, "design_session_discard_failed")
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		default:
+			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
+		}
+	})
+	mux.HandleFunc("/api/workspaces/{workspaceId}/sites/{siteId}/design-sessions/{sessionId}/apply", apply)
+	mux.HandleFunc("/api/workspaces/{workspaceId}/sites/{siteId}/design-sessions/{sessionId}/observe", observeDesignSession(deps))
 	mux.HandleFunc("/api/workspaces/{workspaceId}/sites/{siteId}/releases", SiteReleases(deps))
 	mux.HandleFunc("/api/workspaces/{workspaceId}/sites/{siteId}/comments", SiteComments(deps))
 	mux.HandleFunc("/api/workspaces/{workspaceId}/sites/{siteId}/comments/{commentId}", SiteCommentResource(deps))
@@ -327,6 +355,7 @@ func registerFolderRoutes(deps Dependencies, mux *http.ServeMux) {
 	mux.HandleFunc("/api/workspaces/{workspaceId}/note-containers/{containerId}", NoteFolderResource(deps))
 	mux.HandleFunc("/api/workspaces/{workspaceId}/doc-containers", DocFolderCollection(deps))
 	mux.HandleFunc("/api/workspaces/{workspaceId}/doc-containers/{containerId}", DocFolderResource(deps))
+	mux.HandleFunc("/api/workspaces/{workspaceId}/doc-containers/{containerId}/category-publication", FolderCategoryPublication(deps))
 	mux.HandleFunc("/api/conversations/{conversationId}/note-container", noteContainerResource(deps))
 }
 
@@ -413,6 +442,7 @@ func registerModelRoutes(deps Dependencies, mux *http.ServeMux) {
 	mux.HandleFunc("/api/workspaces/{workspaceId}/resource-models", resourceModelsCollection(deps))
 	mux.HandleFunc("/api/resource-models/{resourceModelId}", resourceModelResource(deps))
 	mux.HandleFunc("/api/resource-models/{resourceModelId}/versions", resourceModelVersionsCollection(deps))
+	mux.HandleFunc("/api/resource-models/{resourceModelId}/public-view", resourceModelPublicView(deps))
 	mux.HandleFunc("/api/resource-model-versions/{versionId}", resourceModelVersionResource(deps))
 	mux.HandleFunc("/api/resource-model-versions/{versionId}/validate", validateResourceModelVersion(deps))
 	mux.HandleFunc("/api/resource-model-versions/{versionId}/publish", publishResourceModelVersion(deps))

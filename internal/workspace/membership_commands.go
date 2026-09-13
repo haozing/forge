@@ -28,9 +28,16 @@ type EligibleMember struct {
 	Email       string `json:"email"`
 }
 
+// agentMemberQuota is the per-workspace cap on agent members
+// (K1: 默认 10；组织级差异化配额待设置中心，先取常量).
+const agentMemberQuota = 10
+
 // AddMember grants an explicit membership. The caller must govern the
-// workspace; the target must be an active member of the same organization and
-// must not hold a membership already.
+// workspace; the target must be an active user of the same organization and
+// must not hold a membership already. Human and agent targets share one path
+// (统一方案 A)：principal_type follows the target's user_type; agent rows are
+// capped by agentMemberQuota and restricted to editor/viewer roles (决策 C，
+// human_only 动作在判权层再排除一次).
 func (s Service) AddMember(ctx context.Context, principal auth.Principal, workspaceID, userID, role string) (MemberDetail, error) {
 	role = strings.TrimSpace(role)
 	if !validMemberRole(role) {
@@ -55,13 +62,20 @@ func (s Service) AddMember(ctx context.Context, principal auth.Principal, worksp
 	defer tx.Rollback(ctx)
 	err = tx.QueryRow(ctx, `
 		WITH target AS (
-			SELECT u.id FROM identity.users u
+			SELECT u.id, u.user_type FROM identity.users u
 			WHERE u.organization_id = $1::uuid AND u.id = $4::uuid
-			  AND u.user_type = 'member' AND u.status = 'active'
+			  AND u.status = 'active' AND u.user_type IN ('member', 'agent')
+		), quota AS (
+			SELECT count(*) AS used FROM content.workspace_members
+			WHERE organization_id = $1::uuid AND workspace_id = $2::uuid
+			  AND principal_type = 'agent'
 		), upsert AS (
-			INSERT INTO content.workspace_members (organization_id, workspace_id, user_id, role, granted_by)
-			SELECT $1::uuid, $2::uuid, target.id, $3, $5::uuid
+			INSERT INTO content.workspace_members (organization_id, workspace_id, user_id, role, principal_type, granted_by)
+			SELECT $1::uuid, $2::uuid, target.id, $3, target.user_type, $5::uuid
 			FROM target
+			WHERE target.user_type = 'member'
+			   OR ($3 IN ('editor', 'viewer')
+			       AND (SELECT used FROM quota) < $6)
 			ON CONFLICT (workspace_id, user_id) DO NOTHING
 			RETURNING id, user_id
 		)
@@ -71,9 +85,10 @@ func (s Service) AddMember(ctx context.Context, principal auth.Principal, worksp
 		       COALESCE((SELECT u.email FROM identity.users u WHERE u.id = $4::uuid AND u.email IS NOT NULL), ''),
 		       $3,
 		       COALESCE((SELECT u.status FROM identity.users u WHERE u.id = $4::uuid), ''),
+		       COALESCE((SELECT u.user_type FROM identity.users u WHERE u.id = $4::uuid), ''),
 		       COALESCE((SELECT wm.created_at FROM content.workspace_members wm WHERE wm.workspace_id = $2::uuid AND wm.user_id = $4::uuid), now())
-	`, principal.OrganizationID, workspaceID, role, userID, principal.UserID).Scan(
-		&inserted, &detail.ID, &detail.DisplayName, &detail.Email, &detail.Role, &detail.Status, &detail.JoinedAt)
+	`, principal.OrganizationID, workspaceID, role, userID, principal.UserID, agentMemberQuota).Scan(
+		&inserted, &detail.ID, &detail.DisplayName, &detail.Email, &detail.Role, &detail.Status, &detail.PrincipalType, &detail.JoinedAt)
 	if err != nil {
 		return MemberDetail{}, fmt.Errorf("add workspace member: %w", err)
 	}

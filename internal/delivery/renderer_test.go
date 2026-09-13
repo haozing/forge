@@ -25,12 +25,12 @@ func TestRendererCompilesEveryTemplate(t *testing.T) {
 
 func renderChrome(config site.StyleConfig, kind string) Chrome {
 	return Chrome{
-		Slug: "demo", Name: "Demo Site", Template: "blog", ScopePublic: true,
+		Slug: "demo", Name: "Demo Site", ScopePublic: true,
 		HomeHref: "/sites/demo/", PostsHref: "/sites/demo/posts/",
 		TagsHref: "/sites/demo/tags/", SearchHref: "/sites/demo/search",
-		RSSHref: "/sites/demo/rss.xml",
-		Style:       config,
-		StyleCSSVars: "/*vars*/",
+		RSSHref:       "/sites/demo/rss.xml",
+		Style:         config,
+		StyleCSSVars:  "/*vars*/",
 		LayoutClasses: LayoutClasses(config, kind),
 	}
 }
@@ -92,7 +92,7 @@ func TestRenderPagesSmoke(t *testing.T) {
 	}
 
 	feeds := map[string]any{
-		"rss": RSSVM{Site: chrome, Items: []RSSItem{{Title: "T", Href: "http://x/a"}}},
+		"rss":     RSSVM{Site: chrome, Items: []RSSItem{{Title: "T", Href: "http://x/a"}}},
 		"sitemap": SitemapVM{Site: chrome, URLs: []SitemapURL{{Loc: "http://x/a", LastmodOn: "2026-09-01T00:00:00Z"}}},
 		"robots":  struct{ ScopePublic bool }{true},
 	}
@@ -195,4 +195,3 @@ func TestPlainTextExcerpt(t *testing.T) {
 		t.Fatal("blank source must yield empty excerpt")
 	}
 }
-

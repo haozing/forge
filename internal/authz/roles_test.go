@@ -44,7 +44,8 @@ func TestViewerIsStrictlyReadOnly(t *testing.T) {
 	}
 	for _, action := range []string{ActionAssetWrite, ActionAssetPublish, ActionAssetArchive, ActionAssetConfirm,
 		ActionTagManage, ActionModelManage, ActionWorkspaceManage, ActionPublicationSubmit,
-		ActionPublicationApprove, ActionPublicationReject, ActionAuditRead, ActionSiteManage} {
+		ActionPublicationApprove, ActionPublicationReject, ActionAuditRead,
+		ActionSiteDesign, ActionSiteLifecycle} {
 		if MemberAllowed(WorkspaceRoleViewer, action) {
 			t.Fatalf("viewer must be denied %s", action)
 		}
@@ -68,13 +69,20 @@ func TestReviewerOnlyGetsPublicationDecisionActions(t *testing.T) {
 
 func TestEditorCannotApproveOrManage(t *testing.T) {
 	for _, action := range []string{ActionPublicationApprove, ActionPublicationReject, ActionPublicationBatch,
-		ActionTagManage, ActionModelManage, ActionSiteManage, ActionAgentApplicationManage} {
+		ActionTagManage, ActionModelManage, ActionSiteLifecycle, ActionAgentApplicationManage} {
 		if MemberAllowed(WorkspaceRoleEditor, action) {
 			t.Fatalf("editor must be denied %s", action)
 		}
 	}
 	if !MemberAllowed(WorkspaceRoleEditor, ActionAssetWrite) || !MemberAllowed(WorkspaceRoleEditor, ActionPublicationSubmit) {
 		t.Fatal("editor must write assets and submit publication requests")
+	}
+	// G: editor 拆得 site.design（外观/页面/发布 release），拿不到 site.lifecycle。
+	if !MemberAllowed(WorkspaceRoleEditor, ActionSiteDesign) {
+		t.Fatal("editor must hold site.design")
+	}
+	if MemberAllowed(WorkspaceRoleEditor, ActionSiteLifecycle) {
+		t.Fatal("editor must be denied site.lifecycle")
 	}
 }
 
@@ -86,22 +94,60 @@ func TestEditorCanCancelOnlyThroughOwnScopeConstant(t *testing.T) {
 	}
 }
 
-func TestAgentActionGate(t *testing.T) {
-	// asset.confirm：MCP/agent 入库链的人工确认闸门（key capabilities +
-	// 模型级 agent_access_policies 仍双重约束谁可调用）。
-	for _, action := range []string{ActionAssetRead, ActionAssetWrite, ActionAssetConfirm, ActionAssetPublish, ActionPublicationSubmit, ActionQueryExecute, ActionProcessingRun} {
-		if !AgentActionAllowed(action) {
-			t.Fatalf("agent policy must allow %s", action)
+func TestHumanOnlyActions(t *testing.T) {
+	// 统一方案 C/I/J：human_only 动作对 agent 永久关闭 —— 与角色、覆写、
+	// 能力清单无关。
+	humanOnly := []string{
+		ActionAssetPublish,             // J: 发布必须人做
+		ActionPublicationApprove,       // 审核决策必须是人
+		ActionPublicationReject,        //
+		ActionPublicationBatch,         //
+		ActionSiteLifecycle,            // 站点生命周期
+		ActionAgentApplicationManage,   //
+		ActionAuditRead,                //
+		ActionOrganizationManage,       //
+		ActionOrganizationMemberManage, //
+		ActionWorkspaceManage,          //
+		ActionTagManage,                //
+	}
+	for _, action := range humanOnly {
+		if !HumanOnlyAction(action) {
+			t.Fatalf("%s must be marked human_only", action)
+		}
+		if AgentActionAllowed(action) {
+			t.Fatalf("agent must never be allowed %s", action)
 		}
 	}
-	for _, action := range AllActions {
-		switch action {
-		case ActionAssetRead, ActionAssetWrite, ActionAssetConfirm, ActionAssetPublish, ActionPublicationSubmit, ActionQueryExecute, ActionProcessingRun:
-		default:
-			if AgentActionAllowed(action) {
-				t.Fatalf("agent policy must never grant %s", action)
-			}
+	// 起草与确认链必须对 agent 开放（J：agent 只能起草与确认）。
+	for _, action := range []string{ActionAssetRead, ActionAssetWrite, ActionAssetConfirm, ActionPublicationSubmit, ActionQueryExecute} {
+		if HumanOnlyAction(action) {
+			t.Fatalf("%s must remain agent-grantable", action)
 		}
+	}
+}
+
+func TestEffectiveMemberActionsAgentOverride(t *testing.T) {
+	// 覆写可以给 editor 加 site.design 之外的授权，但 human_only 永远过滤。
+	effective := EffectiveMemberActions(WorkspaceRoleEditor,
+		[]string{ActionSiteLifecycle}, nil, "agent")
+	for _, action := range effective {
+		if action == ActionSiteLifecycle {
+			t.Fatal("agent must never receive a human_only action via override")
+		}
+	}
+	human := EffectiveMemberActions(WorkspaceRoleViewer,
+		[]string{ActionSiteDesign}, []string{ActionQueryExecute}, "member")
+	found := false
+	for _, action := range human {
+		if action == ActionSiteDesign {
+			found = true
+		}
+		if action == ActionQueryExecute {
+			t.Fatal("revoked action must be removed for human members")
+		}
+	}
+	if !found {
+		t.Fatal("granted override must appear for human members")
 	}
 }
 

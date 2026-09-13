@@ -519,6 +519,7 @@ func memberPublishAsset(deps Dependencies) http.HandlerFunc {
 		var body struct {
 			DraftRevision *int64     `json:"draft_revision"`
 			ScheduledAt   *time.Time `json:"scheduled_at"`
+			ChangeNote    string     `json:"change_note"`
 		}
 		if !decodeBody(w, r, &body, 16*1024) {
 			return
@@ -548,7 +549,7 @@ func memberPublishAsset(deps Dependencies) http.HandlerFunc {
 			writeData(w, r, http.StatusAccepted, request)
 			return
 		}
-		result, err := deps.MemberAssetService.Publish(r.Context(), principal, target.WorkspaceID, assetID, strconv.FormatInt(*body.DraftRevision, 10), requireIdempotencyKeyValue(r))
+		result, err := deps.MemberAssetService.Publish(r.Context(), principal, target.WorkspaceID, assetID, strconv.FormatInt(*body.DraftRevision, 10), requireIdempotencyKeyValue(r), body.ChangeNote)
 		if err != nil {
 			ServiceError(w, err)
 			return

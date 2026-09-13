@@ -68,7 +68,7 @@ func TestMemberAssetVisibilityContractLegacyRejected(t *testing.T) {
 
 func TestPublishRejectsInvalidScopeOrIDs(t *testing.T) {
 	principal := auth.Principal{OrganizationID: "00000000-0000-4000-8000-000000000001"}
-	_, err := (Service{}).Publish(context.Background(), principal, nil, "bad", "bad")
+	_, err := (Service{}).Publish(context.Background(), principal, nil, "bad", "bad", "")
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expected not found, got %v", err)
 	}

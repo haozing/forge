@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 
 	"agentchunzhi/internal/authz"
 	"agentchunzhi/internal/delivery"
@@ -65,28 +66,27 @@ type CreateSiteRequest struct {
 	Slug                string          `json:"slug"`
 	Name                string          `json:"name"`
 	Domain              string          `json:"domain"`
-	Template            string          `json:"template"`
 	DefaultContentScope string          `json:"default_content_scope"`
 	HomepageConfig      json.RawMessage `json:"homepage_config"`
+	PagesConfig         json.RawMessage `json:"pages_config"`
 	NavigationConfig    json.RawMessage `json:"navigation_config"`
 	StyleConfig         json.RawMessage `json:"style_config"`
 }
 
 type UpdateSiteRequest struct {
-	Name                    *string                    `json:"name"`
-	Domain                  *string                    `json:"domain"`
-	Template                *string                    `json:"template"`
-	DefaultContentScope     *string                    `json:"default_content_scope"`
-	HomepageConfig          *json.RawMessage           `json:"homepage_config"`
-	NavigationConfig        *json.RawMessage           `json:"navigation_config"`
-	StyleConfig             *json.RawMessage           `json:"style_config"`
-	CustomCss               *string                    `json:"custom_css"`
-	CommentsMode            *string                    `json:"comments_mode"`
-	Status                  *string                    `json:"status"`
-	ModelViews              *map[string]site.ModelView `json:"model_views"`
-	LogoAttachmentID        *string                    `json:"logo_attachment_id"`
-	FaviconAttachmentID     *string                    `json:"favicon_attachment_id"`
-	SocialImageAttachmentID *string                    `json:"social_image_attachment_id"`
+	Name                    *string          `json:"name"`
+	Domain                  *string          `json:"domain"`
+	DefaultContentScope     *string          `json:"default_content_scope"`
+	HomepageConfig          *json.RawMessage `json:"homepage_config"`
+	PagesConfig             *json.RawMessage `json:"pages_config"`
+	NavigationConfig        *json.RawMessage `json:"navigation_config"`
+	StyleConfig             *json.RawMessage `json:"style_config"`
+	CustomCss               *string          `json:"custom_css"`
+	CommentsMode            *string          `json:"comments_mode"`
+	Status                  *string          `json:"status"`
+	LogoAttachmentID        *string          `json:"logo_attachment_id"`
+	FaviconAttachmentID     *string          `json:"favicon_attachment_id"`
+	SocialImageAttachmentID *string          `json:"social_image_attachment_id"`
 }
 
 // SitesCollection serves GET/POST /api/workspaces/{workspaceId}/sites.
@@ -119,33 +119,6 @@ func SitesCollection(deps Dependencies) http.HandlerFunc {
 				"items": page.Items,
 				"page":  cursorPageFrom(page.HasMore, page.NextCursor),
 			})
-		case http.MethodPost:
-			if !requireWorkspaceAction(w, r, deps, principal, workspaceID, authz.ActionSiteManage) {
-				return
-			}
-			if _, ok := requireIdempotencyKey(w, r); !ok {
-				return
-			}
-			var input CreateSiteRequest
-			if !decodeBody(w, r, &input, 256*1024) {
-				return
-			}
-			item, err := deps.Sites.CreateSite(r.Context(), principal, workspaceID, site.CreateSiteInput{
-				Slug:                input.Slug,
-				Name:                input.Name,
-				Domain:              input.Domain,
-				Template:            input.Template,
-				DefaultContentScope: input.DefaultContentScope,
-				HomepageConfig:      input.HomepageConfig,
-				NavigationConfig:    input.NavigationConfig,
-				StyleConfig:         input.StyleConfig,
-			})
-			if err != nil {
-				SiteError(w, err, "slug_conflict")
-				return
-			}
-			writeETag(w, item.ETag)
-			writeData(w, r, http.StatusCreated, item)
 		default:
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
 		}
@@ -155,7 +128,8 @@ func SitesCollection(deps Dependencies) http.HandlerFunc {
 // SiteResource serves GET/PATCH/DELETE
 // /api/workspaces/{workspaceId}/sites/{siteId}. PATCH demands the site
 // revision If-Match; DELETE is the soft disable (status='disabled') and
-// honors an optional If-Match.
+// honors an optional If-Match. G: PATCH = site.design（外观配置），
+// 但携带 Status/Domain 的补丁升级为 site.lifecycle（停用/域名是生命周期权）。
 func SiteResource(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		principal, ok := sessionPrincipal(w, r, deps)
@@ -183,9 +157,6 @@ func SiteResource(deps Dependencies) http.HandlerFunc {
 			writeETag(w, item.ETag)
 			writeData(w, r, http.StatusOK, item)
 		case http.MethodPatch:
-			if !requireWorkspaceAction(w, r, deps, principal, workspaceID, authz.ActionSiteManage) {
-				return
-			}
 			if _, ok := requireIfMatch(w, r); !ok {
 				return
 			}
@@ -193,41 +164,39 @@ func SiteResource(deps Dependencies) http.HandlerFunc {
 			if !decodeBody(w, r, &input, 256*1024) {
 				return
 			}
+			if !requireWorkspaceAction(w, r, deps, principal, workspaceID, authz.ActionSiteDesign) {
+				return
+			}
+			if input.Status != nil || input.Domain != nil {
+				if !requireWorkspaceAction(w, r, deps, principal, workspaceID, authz.ActionSiteLifecycle) {
+					return
+				}
+			}
 			item, err := deps.Sites.UpdateSite(r.Context(), principal, workspaceID, siteID,
 				expectedRevisionFromIfMatch(r), site.UpdateSiteInput{
 					Name:                    input.Name,
 					Domain:                  input.Domain,
-					Template:                input.Template,
 					DefaultContentScope:     input.DefaultContentScope,
 					HomepageConfig:          input.HomepageConfig,
+					PagesConfig:             input.PagesConfig,
 					NavigationConfig:        input.NavigationConfig,
 					StyleConfig:             input.StyleConfig,
 					CustomCss:               input.CustomCss,
 					CommentsMode:            input.CommentsMode,
 					Status:                  input.Status,
-					ModelViews:              input.ModelViews,
 					LogoAttachmentID:        input.LogoAttachmentID,
 					FaviconAttachmentID:     input.FaviconAttachmentID,
 					SocialImageAttachmentID: input.SocialImageAttachmentID,
 				})
 			if err != nil {
-				var modelViewErr *site.ModelViewError
-				if errors.As(err, &modelViewErr) {
-					writeErrorDetail(w, http.StatusUnprocessableEntity, "validation_failed",
-						"model view validation failed", map[string]any{
-							"model_id": modelViewErr.ModelID,
-							"field":    modelViewErr.Field,
-							"reason":   modelViewErr.Reason,
-						})
-					return
-				}
 				SiteError(w, err, "slug_conflict")
 				return
 			}
 			writeETag(w, item.ETag)
 			writeData(w, r, http.StatusOK, item)
 		case http.MethodDelete:
-			if !requireWorkspaceAction(w, r, deps, principal, workspaceID, authz.ActionSiteManage) {
+			// G: 停用是站点生命周期权（admin）。
+			if !requireWorkspaceAction(w, r, deps, principal, workspaceID, authz.ActionSiteLifecycle) {
 				return
 			}
 			if _, ok := requireIdempotencyKey(w, r); !ok {
@@ -247,31 +216,10 @@ func SiteResource(deps Dependencies) http.HandlerFunc {
 	}
 }
 
-type CreateBindingRequest struct {
-	AssetID       string          `json:"asset_id"`
-	DisplayPath   string          `json:"display_path"`
-	ContentType   string          `json:"content_type"`
-	SectionSlug   string          `json:"section_slug"`
-	SortOrder     int             `json:"sort_order"`
-	OnHomepage    bool            `json:"on_homepage"`
-	OnNavigation  bool            `json:"on_navigation"`
-	DisplayConfig json.RawMessage `json:"display_config"`
-}
-
-type UpdateBindingRequest struct {
-	DisplayPath   *string          `json:"display_path"`
-	ContentType   *string          `json:"content_type"`
-	SectionSlug   *string          `json:"section_slug"`
-	SortOrder     *int             `json:"sort_order"`
-	OnHomepage    *bool            `json:"on_homepage"`
-	OnNavigation  *bool            `json:"on_navigation"`
-	DisplayConfig *json.RawMessage `json:"display_config"`
-}
-
-// SiteBindingsCollection serves GET/POST
-// /api/workspaces/{workspaceId}/sites/{siteId}/bindings. The stage 5
-// matrix gates both surfaces behind site.manage.
-func SiteBindingsCollection(deps Dependencies) http.HandlerFunc {
+// SiteInclusionsCollection serves GET
+// /api/workspaces/{workspaceId}/sites/{siteId}/bindings —— 收录清单读模型
+// （派生视图，站点方案 B4/B6）。写操作走 inclusions/{assetId}/exclusion|feature。
+func SiteInclusionsCollection(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		principal, ok := sessionPrincipal(w, r, deps)
 		if !ok {
@@ -285,55 +233,31 @@ func SiteBindingsCollection(deps Dependencies) http.HandlerFunc {
 		if !requirePathUUID(w, workspaceID, siteID) {
 			return
 		}
-		if !requireWorkspaceAction(w, r, deps, principal, workspaceID, authz.ActionSiteManage) {
+		if !requireWorkspaceAction(w, r, deps, principal, workspaceID, authz.ActionSiteDesign) {
 			return
 		}
-		switch r.Method {
-		case http.MethodGet:
-			page, err := deps.Sites.ListBindings(r.Context(), principal, workspaceID, siteID,
-				r.URL.Query().Get("cursor"), atoiDefault(r.URL.Query().Get("limit"), 50))
-			if err != nil {
-				SiteError(w, err, "path_conflict")
-				return
-			}
-			writeData(w, r, http.StatusOK, map[string]any{
-				"items": page.Items,
-				"page":  cursorPageFrom(page.HasMore, page.NextCursor),
-			})
-		case http.MethodPost:
-			if _, ok := requireIdempotencyKey(w, r); !ok {
-				return
-			}
-			var input CreateBindingRequest
-			if !decodeBody(w, r, &input, 64*1024) {
-				return
-			}
-			item, err := deps.Sites.CreateBinding(r.Context(), principal, workspaceID, siteID, site.CreateBindingInput{
-				AssetID:       input.AssetID,
-				DisplayPath:   input.DisplayPath,
-				ContentType:   input.ContentType,
-				SectionSlug:   input.SectionSlug,
-				SortOrder:     input.SortOrder,
-				OnHomepage:    input.OnHomepage,
-				OnNavigation:  input.OnNavigation,
-				DisplayConfig: input.DisplayConfig,
-			})
-			if err != nil {
-				SiteError(w, err, "path_conflict")
-				return
-			}
-			writeData(w, r, http.StatusCreated, item)
-		default:
+		if r.Method != http.MethodGet {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
+			return
 		}
+		page, err := deps.Sites.ListBindings(r.Context(), principal, workspaceID, siteID,
+			r.URL.Query().Get("cursor"), atoiDefault(r.URL.Query().Get("limit"), 50))
+		if err != nil {
+			SiteError(w, err, "path_conflict")
+			return
+		}
+		writeData(w, r, http.StatusOK, map[string]any{
+			"items": page.Items,
+			"page":  cursorPageFrom(page.HasMore, page.NextCursor),
+		})
 	}
 }
 
-// SiteBindingResource serves PATCH/DELETE
-// /api/workspaces/{workspaceId}/sites/{siteId}/bindings/{bindingId}.
-// Bindings carry no revision column, so these commands use the
-// Idempotency-Key contract without If-Match.
-func SiteBindingResource(deps Dependencies) http.HandlerFunc {
+// SiteInclusionAssetResource serves PUT/DELETE
+// /api/workspaces/{workspaceId}/sites/{siteId}/inclusions/{assetId}/exclusion
+// and /feature. PUT = 排除/精选生效，DELETE = 恢复收录/取消精选
+// (站点方案 D2/B4；权限 site.design，统一方案 G)。
+func SiteInclusionAssetResource(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		principal, ok := sessionPrincipal(w, r, deps)
 		if !ok {
@@ -344,49 +268,29 @@ func SiteBindingResource(deps Dependencies) http.HandlerFunc {
 		}
 		workspaceID := r.PathValue("workspaceId")
 		siteID := r.PathValue("siteId")
-		bindingID := r.PathValue("bindingId")
-		if !requirePathUUID(w, workspaceID, siteID, bindingID) {
+		assetID := r.PathValue("assetId")
+		if !requirePathUUID(w, workspaceID, siteID, assetID) {
 			return
 		}
-		if !requireWorkspaceAction(w, r, deps, principal, workspaceID, authz.ActionSiteManage) {
+		if !requireWorkspaceAction(w, r, deps, principal, workspaceID, authz.ActionSiteDesign) {
 			return
 		}
-		switch r.Method {
-		case http.MethodPatch:
-			if _, ok := requireIdempotencyKey(w, r); !ok {
-				return
-			}
-			var input UpdateBindingRequest
-			if !decodeBody(w, r, &input, 64*1024) {
-				return
-			}
-			item, err := deps.Sites.UpdateBinding(r.Context(), principal, workspaceID, siteID, bindingID, site.UpdateBindingInput{
-				DisplayPath:   input.DisplayPath,
-				ContentType:   input.ContentType,
-				SectionSlug:   input.SectionSlug,
-				SortOrder:     input.SortOrder,
-				OnHomepage:    input.OnHomepage,
-				OnNavigation:  input.OnNavigation,
-				DisplayConfig: input.DisplayConfig,
-			})
-			if err != nil {
-				SiteError(w, err, "path_conflict")
-				return
-			}
-			writeData(w, r, http.StatusOK, item)
-		case http.MethodDelete:
-			if _, ok := requireIdempotencyKey(w, r); !ok {
-				return
-			}
-			item, err := deps.Sites.DeleteBinding(r.Context(), principal, workspaceID, siteID, bindingID)
-			if err != nil {
-				SiteError(w, err, "path_conflict")
-				return
-			}
-			writeData(w, r, http.StatusOK, item)
-		default:
-			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
+		kind := "exclusion"
+		if strings.HasSuffix(r.URL.Path, "/feature") {
+			kind = "feature"
 		}
+		active := r.Method == http.MethodPut
+		var err error
+		if kind == "feature" {
+			err = deps.Sites.SetFeatured(r.Context(), principal, workspaceID, siteID, assetID, active)
+		} else {
+			err = deps.Sites.SetExcluded(r.Context(), principal, workspaceID, siteID, assetID, active)
+		}
+		if err != nil {
+			SiteError(w, err, "inclusion_update_failed")
+			return
+		}
+		writeData(w, r, http.StatusOK, map[string]any{"ok": true})
 	}
 }
 
@@ -486,7 +390,7 @@ func SiteReleases(deps Dependencies) http.HandlerFunc {
 				"page":  cursorPageFrom(page.HasMore, page.NextCursor),
 			})
 		case http.MethodPost:
-			if !requireWorkspaceAction(w, r, deps, principal, workspaceID, authz.ActionSiteManage) {
+			if !requireWorkspaceAction(w, r, deps, principal, workspaceID, authz.ActionSiteDesign) {
 				return
 			}
 			if _, ok := requireIdempotencyKey(w, r); !ok {

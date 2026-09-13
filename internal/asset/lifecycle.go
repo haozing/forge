@@ -13,6 +13,7 @@ import (
 
 	"agentchunzhi/internal/auth"
 	"agentchunzhi/internal/eventing"
+	"agentchunzhi/internal/site"
 	"agentchunzhi/internal/store"
 
 	"github.com/jackc/pgx/v5"
@@ -75,7 +76,11 @@ func LoadLifecycleTx(ctx context.Context, tx pgx.Tx, organizationID, assetID str
 // different version stamps now(); replaying the same version (idempotent
 // re-publish or publish-after-restore of the same pointer) keeps the existing
 // timestamp.
-func SetPublishedPointerTx(ctx context.Context, tx pgx.Tx, row LifecycleRow, versionID string) (LifecycleRow, error) {
+//
+// 每次真实发布在此记录一行发布历史（站点方案 D16/C7：更新记录的数据源，
+// change_note 为作者主动写的公开说明）并原子切换公开站点 slug + 301
+// （D18）——本函数是所有发布路径（direct/审核通过/回滚重发）的必经点。
+func SetPublishedPointerTx(ctx context.Context, tx pgx.Tx, row LifecycleRow, versionID, actorUserID, changeNote string) (LifecycleRow, error) {
 	if row.PublicationStatus != PublicationDraft && row.PublicationStatus != PublicationPublished {
 		return row, ErrInvalidTransition
 	}
@@ -114,6 +119,22 @@ func SetPublishedPointerTx(ctx context.Context, tx pgx.Tx, row LifecycleRow, ver
 	if previous != versionID || row.PublishedAt == nil {
 		now := time.Now().UTC()
 		next.PublishedAt = &now
+	}
+	// D16：发布历史行（更新记录块的数据源）。
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO asset.asset_publications
+			(organization_id, workspace_id, asset_id, asset_version_id, version_no,
+			 origin, confirmation_status, change_note, published_by)
+		SELECT $1::uuid, $2::uuid, $4::uuid, v.id, v.version_no, v.origin,
+		       v.confirmation_status, NULLIF($6, ''), now(), $5::uuid
+		FROM asset.asset_versions v
+		WHERE v.organization_id = $1::uuid AND v.id = $3::uuid
+	`, row.OrganizationID, row.WorkspaceID, versionID, row.ID, actorUserID, changeNote); err != nil {
+		return next, fmt.Errorf("record asset publication history: %w", err)
+	}
+	// D18：公开站点 slug 原子切换 + 301（无活跃站点时 no-op）。
+	if err := site.EnsurePublishedSlugTx(ctx, tx, row.OrganizationID, row.WorkspaceID, row.ID, versionID, actorUserID); err != nil {
+		return next, err
 	}
 	return next, nil
 }
@@ -249,6 +270,10 @@ func CancelPendingRequestsTx(ctx context.Context, tx pgx.Tx, events *eventing.Ev
 			INSERT INTO content.notifications (organization_id, workspace_id, recipient_user_id, kind, payload)
 			SELECT $1::uuid, $2::uuid, $3::uuid, 'publication.cancelled', $4::jsonb
 			WHERE $3::uuid IS DISTINCT FROM $5::uuid
+			  AND NOT EXISTS (
+				SELECT 1 FROM identity.users u
+				WHERE u.id = $3::uuid AND u.user_type = 'agent'
+			  )
 		`, row.OrganizationID, item.workspaceID, item.submittedBy, []byte(fmt.Sprintf(
 			`{"request_id":%q,"asset_id":%q,"status":"cancelled","reason":%q,"title":"发布申请已取消","body":%q,"object_type":"publication_request","object_id":%q}`,
 			item.id, item.assetID, item.cancelReason,

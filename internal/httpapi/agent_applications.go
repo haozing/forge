@@ -105,10 +105,10 @@ func workspaceAgentApplications(deps Dependencies) http.HandlerFunc {
 			return
 		}
 		if _, err := deps.Store.Pool.Exec(r.Context(), `
-                        INSERT INTO content.workspace_agent_applications (organization_id, workspace_id, agent_application_id, created_by)
-                        VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid)
-                        ON CONFLICT (workspace_id, agent_application_id) DO UPDATE SET enabled = true
-                `, principal.OrganizationID, r.PathValue("workspaceId"), created.AgentApplicationID, principal.UserID); err != nil {
+                        INSERT INTO content.workspace_members (organization_id, workspace_id, user_id, role, principal_type, granted_by)
+                        VALUES ($1::uuid, $2::uuid, $3::uuid, 'editor', 'agent', $4::uuid)
+                        ON CONFLICT (workspace_id, user_id) DO NOTHING
+                `, principal.OrganizationID, r.PathValue("workspaceId"), created.AgentUserID, principal.UserID); err != nil {
 			writeError(w, http.StatusInternalServerError, "workspace_agent_application_link_failed")
 			return
 		}

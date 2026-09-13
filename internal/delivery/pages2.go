@@ -6,7 +6,10 @@ package delivery
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"html/template"
+	"strings"
 	"time"
 
 	"agentchunzhi/internal/auth"
@@ -374,4 +377,109 @@ func (s *Service) postNeighbors(ctx context.Context, facts site.SiteFacts, asset
 		return &NeighborLink{Title: title, Href: href}
 	}
 	return neighbor("prev"), neighbor("next")
+}
+
+// Category serves the hierarchical public category listing (站点方案 C5/D14):
+// /c/{path...} walks the public container tree, renders subcategories plus
+// the included posts of the subtree, with CollectionPage + BreadcrumbList
+// structured data and category-level SEO title/description.
+func (s *Service) Category(ctx context.Context, addr string, principal auth.Principal, siteSlug, path, baseURL string, locale string) (*Response, error) {
+	routePath := "/sites/" + siteSlug + "/c/" + strings.Trim(path, "/")
+	return s.pipeline(ctx, addr, principal, siteSlug, routePath, baseURL, func(ctx context.Context, facts site.SiteFacts, band string) (renderOutput, error) {
+		if gated(facts, band) {
+			return s.gateOutput(facts)
+		}
+		config := style(facts)
+		category, err := s.Reader.PublicCategoryPath(ctx, addr, principal, siteSlug, path, locale)
+		if err != nil {
+			return renderOutput{}, err
+		}
+		description := category.Description
+		if description == "" {
+			description = category.Title
+		}
+		vm := CategoryVM{
+			Page: Page{
+				Kind:        "category",
+				Title:       category.Title + " · " + facts.Site.Name,
+				Description: description,
+				Canonical:   baseURL + routePath,
+				NoIndex:     facts.Site.DefaultContentScope != site.ScopePublic,
+			},
+			Site:          chrome(facts, config, "category"),
+			Heading:       category.Title,
+			Crumbs:        []CrumbVM{},
+			Subcategories: []SubcategoryVM{},
+			Items:         []CardVM{},
+		}
+		for _, crumb := range category.Crumbs {
+			vm.Crumbs = append(vm.Crumbs, CrumbVM{Name: crumb.Name, Href: crumb.Href})
+		}
+		for _, sub := range category.Subcategories {
+			vm.Subcategories = append(vm.Subcategories, SubcategoryVM{Name: sub.Name, Href: sub.Href, Count: sub.Count})
+		}
+		for _, post := range category.Posts {
+			vm.Items = append(vm.Items, cardVM(siteSlug, post, config.SummaryLength))
+		}
+		breadcrumbs := map[string]any{
+			"@context":        "https://schema.org",
+			"@type":           "BreadcrumbList",
+			"itemListElement": buildBreadcrumbItems(baseURL+routePath, category.Crumbs),
+		}
+		ld, _ := json.Marshal([]map[string]any{
+			{"@context": "https://schema.org", "@type": "CollectionPage", "name": category.Title, "description": description},
+			breadcrumbs,
+		})
+		vm.JSONLD = template.JS(ld)
+		return renderOutput{kind: "category", vm: vm, noIndex: vm.NoIndex}, nil
+	})
+}
+
+// CustomPage serves /sites/{slug}/p/{pageSlug} (C1)：pages_config v2 自定义
+// 页的全模块渲染。canonical 与缓存走同一 pipeline（发布快照冻结）。
+func (s *Service) CustomPage(ctx context.Context, addr string, principal auth.Principal, siteSlug, pageSlug, baseURL string, locale string) (*Response, error) {
+	routePath := "/sites/" + siteSlug + "/p/" + strings.Trim(pageSlug, "/")
+	return s.pipeline(ctx, addr, principal, siteSlug, routePath, baseURL, func(ctx context.Context, facts site.SiteFacts, band string) (renderOutput, error) {
+		if gated(facts, band) {
+			return s.gateOutput(facts)
+		}
+		config := style(facts)
+		page, err := s.Reader.CustomPage(ctx, addr, principal, siteSlug, pageSlug)
+		if err != nil {
+			return renderOutput{}, err
+		}
+		vm := CustomPageVM{
+			Page: Page{
+				Kind:        "page",
+				Title:       page.Title + " · " + facts.Site.Name,
+				Description: page.Title,
+				Canonical:   baseURL + routePath,
+				NoIndex:     facts.Site.DefaultContentScope != site.ScopePublic,
+			},
+			Site:    chrome(facts, config, "page"),
+			Heading: page.Title,
+			Blocks:  []BlockVM{},
+		}
+		for _, block := range page.Blocks {
+			bvm := BlockVM{
+				Type:       block.Type,
+				Title:      block.Title,
+				Subtitle:   block.Subtitle,
+				Href:       block.Href,
+				Layout:     block.Layout,
+				StyleClass: blockStyleClass(block),
+			}
+			for _, item := range block.Items {
+				bvm.Items = append(bvm.Items, cardVM(siteSlug, item, config.SummaryLength))
+			}
+			for _, link := range block.Links {
+				bvm.Links = append(bvm.Links, NavItem{Label: link.Label, Href: link.Href})
+			}
+			for _, cat := range block.Categories {
+				bvm.Categories = append(bvm.Categories, CategoryLinkVM{Name: cat.Name, Href: cat.Href, Count: cat.Count})
+			}
+			vm.Blocks = append(vm.Blocks, bvm)
+		}
+		return renderOutput{kind: "page", vm: vm, noIndex: vm.NoIndex}, nil
+	})
 }

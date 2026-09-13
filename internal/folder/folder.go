@@ -12,10 +12,13 @@ package folder
 import (
 	"context"
 	"errors"
+	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
 	"agentchunzhi/internal/auth"
+	"agentchunzhi/internal/site"
 	"agentchunzhi/internal/store"
 
 	"github.com/jackc/pgx/v5"
@@ -366,4 +369,87 @@ func (s Service) ancestorCheck(ctx context.Context, principal auth.Principal, wo
 		steps += 1
 	}
 	return steps, nil
+}
+
+// CategoryPublication 是分类公开化的管理面载荷（站点方案 C5/D14）。
+type CategoryPublication struct {
+	PublicFlag        bool   `json:"public_flag"`
+	Slug              string `json:"slug"`
+	PublicTitle       string `json:"public_title"`
+	PublicDescription string `json:"public_description"`
+}
+
+var publicCategorySlugPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$`)
+
+// GetCategoryPublication reads the publication metadata of one container.
+func (s Service) GetCategoryPublication(ctx context.Context, principal auth.Principal, workspaceID string, kind Kind, containerID string) (CategoryPublication, error) {
+	if !kind.valid() || !s.validID(containerID) {
+		return CategoryPublication{}, ErrInvalidInput
+	}
+	var out CategoryPublication
+	err := s.Store.Pool.QueryRow(ctx, `
+		SELECT public_flag, COALESCE(slug, ''), public_title, public_description
+		FROM content.containers
+		WHERE organization_id = $1::uuid AND workspace_id = $2::uuid
+		  AND id = $3::uuid AND kind = $4 AND status = 'active'
+	`, principal.OrganizationID, workspaceID, containerID, string(kind)).Scan(
+		&out.PublicFlag, &out.Slug, &out.PublicTitle, &out.PublicDescription)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return CategoryPublication{}, ErrNotFound
+		}
+		return CategoryPublication{}, err
+	}
+	return out, nil
+}
+
+// SetCategoryPublication 开启/更新分类的公开语义：公开标记、公开 slug
+// （拼音生成后可手工改成关键词）、分类级 SEO 标题/描述。slug 校验：
+// 保留字（站点固定路由段 + 语言码）拒绝、格式 ^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$、
+// 组织内公开分类唯一（唯一索引兜底）。
+func (s Service) SetCategoryPublication(ctx context.Context, principal auth.Principal, workspaceID string, kind Kind, containerID string, input CategoryPublication) (CategoryPublication, error) {
+	if !kind.valid() || !s.validID(containerID) {
+		return CategoryPublication{}, ErrInvalidInput
+	}
+	slug := strings.ToLower(strings.TrimSpace(input.Slug))
+	if input.PublicFlag {
+		if !publicCategorySlugPattern.MatchString(slug) {
+			return CategoryPublication{}, fmt.Errorf("%w: slug 需为 2~63 位小写字母、数字或连字符", ErrInvalidInput)
+		}
+		if site.ReservedPublicSlug(slug) {
+			return CategoryPublication{}, fmt.Errorf("%w: slug 与站点保留路由或语言码冲突", ErrInvalidInput)
+		}
+	}
+	title := strings.TrimSpace(input.PublicTitle)
+	if len([]rune(title)) > 120 {
+		return CategoryPublication{}, ErrInvalidInput
+	}
+	description := strings.TrimSpace(input.PublicDescription)
+	if len([]rune(description)) > 300 {
+		return CategoryPublication{}, ErrInvalidInput
+	}
+	if _, err := s.Get(ctx, principal, workspaceID, kind, containerID); err != nil {
+		return CategoryPublication{}, err
+	}
+	var out CategoryPublication
+	err := s.Store.Pool.QueryRow(ctx, `
+		UPDATE content.containers SET
+			public_flag = $5,
+			slug = CASE WHEN $5::bool THEN NULLIF($6, '') ELSE slug END,
+			public_title = $7,
+			public_description = $8,
+			updated_at = now()
+		WHERE organization_id = $1::uuid AND id = $2::uuid
+		  AND workspace_id = $3::uuid AND kind = $4 AND status = 'active'
+		RETURNING public_flag, COALESCE(slug, ''), public_title, public_description
+	`, principal.OrganizationID, containerID, workspaceID, string(kind),
+		input.PublicFlag, slug, title, description).Scan(
+		&out.PublicFlag, &out.Slug, &out.PublicTitle, &out.PublicDescription)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return CategoryPublication{}, ErrNotFound
+		}
+		return CategoryPublication{}, err
+	}
+	return out, nil
 }

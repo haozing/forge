@@ -90,14 +90,26 @@ func TestVersionLifecycleRoutesThroughOrgAwareAuth(t *testing.T) {
 	}
 }
 
-// The site model-view whitelist validator must admit builtin models too.
-func TestModelViewValidationAdmitsOrgLevelModels(t *testing.T) {
-	raw, err := os.ReadFile(filepath.Join("..", "site", "modelview.go"))
+// C4: 白名单下沉后，公开视图写入口 SetModelPublicView 也必须走
+// requireModelAction（builtin 模型无 workspace，与版本生命周期同规则）。
+func TestModelPublicViewRoutesThroughOrgAwareAuth(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join(".", "publicview.go"))
 	if err != nil {
-		t.Fatalf("read modelview.go: %v", err)
+		t.Fatalf("read publicview.go: %v", err)
 	}
-	text := string(raw)
-	if !strings.Contains(text, "rm.workspace_id IS NULL") {
-		t.Error("model-view reference validation must include organization-level (builtin) models")
+	src := string(raw)
+	for _, signature := range []string{
+		"func (s Service) SetModelPublicView(",
+		"func (s Service) GetModelPublicView(",
+	} {
+		body := fnBody(src, signature)
+		if body == "" {
+			t.Errorf("%s not found in publicview.go", signature)
+			continue
+		}
+		if !strings.Contains(body, "requireModelAction") {
+			t.Errorf("%s must authorize through requireModelAction (builtin models have no workspace)", signature)
+		}
 	}
 }
+

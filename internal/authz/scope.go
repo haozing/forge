@@ -44,6 +44,27 @@ func (r ScopeResolver) AllowedModelIDs(ctx context.Context, principal auth.Princ
 		return nil, fmt.Errorf("database store is not initialized")
 	}
 	if principal.UserType == auth.UserTypeAgent {
+		// A4：human_only 动作（如 asset.publish）对 agent 永远解析出空范围，
+		// 与角色/覆写/能力无关。
+		if HumanOnlyAction(strings.TrimSpace(action)) {
+			return []string{}, nil
+		}
+		// A4：无成员行即无权限——create/update/insert 走本路径而非
+		// WorkspacePolicy.Require，成员基线在这里补判。
+		var member bool
+		if err := r.Store.Pool.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM content.workspace_members wm
+				JOIN content.workspaces w ON w.organization_id = wm.organization_id AND w.id = wm.workspace_id
+				WHERE wm.organization_id = $1::uuid AND wm.user_id = $2::uuid
+				  AND wm.principal_type = 'agent' AND w.status = 'active'
+			)
+		`, principal.OrganizationID, principal.UserID).Scan(&member); err != nil {
+			return nil, fmt.Errorf("resolve agent membership: %w", err)
+		}
+		if !member {
+			return []string{}, nil
+		}
 		action = strings.TrimPrefix(strings.TrimSpace(action), "asset.")
 		// Workspace-scoped grants (the ones workspace agent-app registration
 		// writes) and org-wide grants both count; the retrieval funnel then
@@ -85,11 +106,13 @@ func (r ScopeResolver) AllowedAgentApplicationIDs(ctx context.Context, principal
 		return []string{}, nil
 	}
 	rows, err := r.Store.Pool.Query(ctx, `
-		SELECT DISTINCT wa.agent_application_id::text
-		FROM content.workspace_agent_applications wa
-		JOIN content.workspace_members wm ON wm.workspace_id = wa.workspace_id AND wm.user_id = $2::uuid
-		JOIN integration.agent_applications aa ON aa.id = wa.agent_application_id
-		WHERE wa.organization_id = $1::uuid AND wa.enabled = true AND aa.status = 'active'
+		SELECT DISTINCT aa.id::text
+		FROM content.workspace_members wm_me
+		JOIN content.workspace_members wm_agent
+		  ON wm_agent.workspace_id = wm_me.workspace_id AND wm_agent.principal_type = 'agent'
+		JOIN integration.agent_applications aa
+		  ON aa.organization_id = wm_me.organization_id AND aa.bound_agent_user_id = wm_agent.user_id
+		WHERE wm_me.organization_id = $1::uuid AND wm_me.user_id = $2::uuid AND aa.status = 'active'
 	`, principal.OrganizationID, principal.UserID)
 	if err != nil {
 		return nil, fmt.Errorf("resolve member agent applications: %w", err)

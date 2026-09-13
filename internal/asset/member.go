@@ -886,7 +886,7 @@ func EnsurePublishableVersionTx(ctx context.Context, tx pgx.Tx, organizationID, 
 // Publish executes a direct-policy publish: commit the dirty draft, then
 // switch the published pointer. Approval-policy assets return a conflict and
 // must go through a PublicationRequest.
-func (s MemberService) Publish(ctx context.Context, principal auth.Principal, workspaceID, assetID, expectedDraftRevision, idempotencyKey string) (MemberAsset, error) {
+func (s MemberService) Publish(ctx context.Context, principal auth.Principal, workspaceID, assetID, expectedDraftRevision, idempotencyKey, changeNote string) (MemberAsset, error) {
 	if !validID(assetID) {
 		return MemberAsset{}, ErrInvalidInput
 	}
@@ -945,7 +945,7 @@ func (s MemberService) Publish(ctx context.Context, principal auth.Principal, wo
 		return MemberAsset{}, err
 	}
 	previous := row.CurrentPublishedVersionID
-	row, err = SetPublishedPointerTx(ctx, tx, row, row.CurrentWorkingVersionID)
+	row, err = SetPublishedPointerTx(ctx, tx, row, row.CurrentWorkingVersionID, principal.UserID, changeNote)
 	if err != nil {
 		return MemberAsset{}, err
 	}

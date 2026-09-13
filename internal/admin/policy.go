@@ -34,10 +34,10 @@ type PolicyResult struct {
 }
 
 var supportedAgentActions = map[string]struct{}{
-	"read":    {},
-	"create":  {},
-	"edit":    {},
-	"publish": {},
+	"read":   {},
+	"create": {},
+	"edit":   {},
+	// "publish" 已移除（统一方案 J）：agent 只能起草与确认，发布必须人做。
 	"archive": {},
 	// agentAllowedActions 已收录 asset.confirm（bb7db38）；MCP/open 链路的
 	// 检索闸门要求 query.execute。两者缺位时管理员只能 SQL 授权，与管理台

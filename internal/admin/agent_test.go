@@ -68,8 +68,8 @@ func TestNormalizeCapabilitiesDeduplicatesAndTrims(t *testing.T) {
 }
 
 func TestNormalizeActionsSortsAndRejectsUnknownActions(t *testing.T) {
-	got, ok := normalizeActions([]string{"publish", "read", "read"})
-	if !ok || len(got) != 2 || got[0] != "publish" || got[1] != "read" {
+	got, ok := normalizeActions([]string{"confirm", "read", "read"})
+	if !ok || len(got) != 2 || got[0] != "confirm" || got[1] != "read" {
 		t.Fatalf("unexpected normalized actions: %#v (ok=%v)", got, ok)
 	}
 	if _, ok := normalizeActions([]string{"asset.read"}); ok {

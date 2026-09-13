@@ -44,7 +44,7 @@ type ArchiveResult struct {
 // The agent principal must hold asset.publish for the asset's model through
 // its AgentAccessPolicy; version selection by the caller is not part of the
 // contract.
-func (s Service) Publish(ctx context.Context, principal auth.Principal, allowedModelIDs []string, assetID, versionID string) (PublishResult, error) {
+func (s Service) Publish(ctx context.Context, principal auth.Principal, allowedModelIDs []string, assetID, versionID, changeNote string) (PublishResult, error) {
 	if !validID(assetID) || len(allowedModelIDs) == 0 {
 		return PublishResult{}, ErrNotFound
 	}
@@ -100,7 +100,7 @@ func (s Service) Publish(ctx context.Context, principal auth.Principal, allowedM
 		return PublishResult{}, err
 	}
 	previous := row.CurrentPublishedVersionID
-	row, err = SetPublishedPointerTx(ctx, tx, row, row.CurrentWorkingVersionID)
+	row, err = SetPublishedPointerTx(ctx, tx, row, row.CurrentWorkingVersionID, principal.UserID, changeNote)
 	if err != nil {
 		return PublishResult{}, err
 	}

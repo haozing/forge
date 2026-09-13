@@ -57,7 +57,14 @@ func (f DomainToolFactory) Build(ctx context.Context, scope ReActToolScope, rawP
 	}
 	principal := auth.Principal{OrganizationID: scope.OrganizationID, UserID: scope.AgentUserID, UserType: "agent"}
 	scopeResolver := authz.ScopeResolver{Store: f.Store}
+	// 决策 D（防提权）：工具动作必须同时落在发起人与 agent 两套权限的交集内
+	// —— viewer 发起的会话里，editor agent 也只按 viewer 干活。任一侧无
+	// 成员行时下限取 viewer（最保守）。
+	floorRole := f.effectiveFloorRole(ctx, scope)
 	allowed := func(ctx context.Context, action string) ([]string, error) {
+		if authz.ValidAction(action) && !authz.MemberAllowed(floorRole, action) {
+			return nil, fmt.Errorf("action %s 超出发起人在该工作区的权限，已被拒绝", action)
+		}
 		return scopeResolver.AllowedModelIDs(ctx, principal, action)
 	}
 	queryService := f.Query
@@ -246,7 +253,7 @@ func (f DomainToolFactory) Build(ctx context.Context, scope ReActToolScope, rawP
 			if err != nil {
 				return nil, err
 			}
-			return assets.Publish(ctx, principal, models, stringValue(arguments["asset_id"]), stringValue(arguments["version_id"]))
+			return assets.Publish(ctx, principal, models, stringValue(arguments["asset_id"]), stringValue(arguments["version_id"]), "")
 		},
 		ArchiveAsset: func(ctx context.Context, arguments map[string]any) (any, error) {
 			models, err := allowed(ctx, "asset.archive")
@@ -463,6 +470,40 @@ func parseToolPolicy(raw map[string]any) runtimetools.Policy {
 // published relations/attachment text without any visibility narrowing, so a
 // workspace-visible asset leaked into a public-scope agent's context; missing
 // policy rows fail closed to public-only.
+// effectiveFloorRole resolves the weaker of the initiator's and the agent's
+// workspace roles (决策 D). Missing memberships degrade to viewer — the most
+// conservative floor — so an unseeded principal can never widen the run.
+func (f DomainToolFactory) effectiveFloorRole(ctx context.Context, scope ReActToolScope) string {
+	rank := map[string]int{
+		authz.WorkspaceRoleViewer:   0,
+		authz.WorkspaceRoleReviewer: 1,
+		authz.WorkspaceRoleEditor:   2,
+		authz.WorkspaceRoleAdmin:    3,
+	}
+	role := func(userType, userID string) string {
+		if f.Store == nil || f.Store.Pool == nil {
+			return authz.WorkspaceRoleViewer
+		}
+		var role string
+		err := f.Store.Pool.QueryRow(ctx, `
+			SELECT wm.role FROM content.workspace_members wm
+			JOIN content.workspaces w ON w.organization_id = wm.organization_id AND w.id = wm.workspace_id
+			WHERE wm.organization_id = $1::uuid AND wm.workspace_id = $2::uuid
+			  AND wm.user_id = $3::uuid AND wm.principal_type = $4 AND w.status = 'active'
+		`, scope.OrganizationID, scope.WorkspaceID, userID, userType).Scan(&role)
+		if err != nil || !authz.ValidWorkspaceRole(role) {
+			return authz.WorkspaceRoleViewer
+		}
+		return role
+	}
+	agentRole := role("agent", scope.AgentUserID)
+	initiatorRole := role("member", scope.PrincipalID)
+	if rank[agentRole] <= rank[initiatorRole] {
+		return agentRole
+	}
+	return initiatorRole
+}
+
 func (f DomainToolFactory) agentVisibilityBand(ctx context.Context, scope ReActToolScope) []string {
 	var dataScope string
 	_ = f.Store.Pool.QueryRow(ctx, "SELECT ap.data_scope FROM content.agent_access_policies ap WHERE ap.agent_user_id = $1::uuid AND (ap.workspace_id = $2::uuid OR ap.workspace_id IS NULL) ORDER BY ap.workspace_id NULLS LAST LIMIT 1", scope.AgentUserID, scope.WorkspaceID).Scan(&dataScope)

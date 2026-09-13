@@ -156,7 +156,7 @@ func colorToHSL(hex string) hsl {
 
 func hslColor(color hsl) string {
 	hue := math.Mod(math.Mod(color.H, 360)+360, 360)
-	return fmt.Sprintf("hsl(%.0f %.d%% %.0f%%)", hue, int(math.Round(color.S * 100)), math.Round(color.L*100))
+	return fmt.Sprintf("hsl(%.0f %.d%% %.0f%%)", hue, int(math.Round(color.S*100)), math.Round(color.L*100))
 }
 
 // parseRGB decodes #rrggbb and #rgb hex values.

@@ -56,7 +56,14 @@ func (s *Service) relatedCandidates(ctx context.Context, addr string, principal 
 	if len(cards) >= relatedMaxItems {
 		return cards
 	}
-	// Tier 2: newest posts sharing the first tag.
+	// Tier 2 (C8): 同分类——把权重优先导向同主题聚类。
+	if posts, err := s.Reader.SameCategoryPosts(ctx, addr, principal, slug, content.AssetID, relatedMaxItems+3, ""); err == nil {
+		add(site.PublicPostPage{Items: posts})
+	}
+	if len(cards) >= relatedMaxItems {
+		return cards
+	}
+	// Tier 3: newest posts sharing the first tag.
 	for _, tag := range content.Tags {
 		if page, err := s.Reader.TagPage(ctx, addr, principal, slug, tag.Key, site.PublicPostQuery{Limit: relatedMaxItems + 3}); err == nil {
 			add(page)
@@ -66,7 +73,7 @@ func (s *Service) relatedCandidates(ctx context.Context, addr string, principal 
 	if len(cards) >= relatedMaxItems {
 		return cards
 	}
-	// Tier 3: site-latest.
+	// Tier 4: site-latest.
 	if page, err := s.Reader.Posts(ctx, addr, principal, slug, site.PublicPostQuery{Limit: relatedMaxItems + 3}); err == nil {
 		add(page)
 	}

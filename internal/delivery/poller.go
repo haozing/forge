@@ -88,10 +88,10 @@ func (p *Poller) PollOnce(ctx context.Context) error {
 		return err
 	}
 	type pending struct {
-		ID      int64
-		SiteID  string
-		Tier    string
-		Prefix  string
+		ID     int64
+		SiteID string
+		Tier   string
+		Prefix string
 	}
 	batch := make([]pending, 0, pollBatchSize)
 	for rows.Next() {

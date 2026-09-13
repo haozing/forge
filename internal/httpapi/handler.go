@@ -1780,7 +1780,7 @@ func publishAsset(deps Dependencies) http.HandlerFunc {
 			writeError(w, http.StatusInternalServerError, "authorization_scope_failed")
 			return
 		}
-		result, err := deps.AssetService.Publish(r.Context(), principal, allowedModels, assetID, input.VersionID)
+		result, err := deps.AssetService.Publish(r.Context(), principal, allowedModels, assetID, input.VersionID, "")
 		if errors.Is(err, assetservice.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "asset_not_found")
 			return

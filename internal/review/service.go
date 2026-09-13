@@ -412,6 +412,10 @@ func (s Service) appendEventTx(ctx context.Context, tx pgx.Tx, principal auth.Pr
 		SELECT organization_id, workspace_id, submitted_by, $3, $4::jsonb
 		FROM asset.publication_requests WHERE id = $1::uuid AND organization_id = $2::uuid
 		  AND submitted_by <> NULLIF($5,'')::uuid
+		  AND NOT EXISTS (
+			SELECT 1 FROM identity.users u
+			WHERE u.id = asset.publication_requests.submitted_by AND u.user_type = 'agent'
+		  )
 	`, request.ID, principal.OrganizationID, kind, mustJSON(map[string]any{
 		"request_id":  request.ID,
 		"asset_id":    request.AssetID,
@@ -455,12 +459,17 @@ func (s Service) enqueueDecisionEmailTx(ctx context.Context, tx pgx.Tx, principa
 		return nil
 	}
 	var email string
-	err := tx.QueryRow(ctx, `SELECT email FROM identity.users WHERE id = $1::uuid`, request.SubmittedBy).Scan(&email)
+	err := tx.QueryRow(ctx, `SELECT COALESCE(email, '') FROM identity.users WHERE id = $1::uuid`, request.SubmittedBy).Scan(&email)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil
 	}
 	if err != nil {
 		return fmt.Errorf("resolve submitter email: %w", err)
+	}
+	if strings.TrimSpace(email) == "" {
+		// Agent principals have no inbox (users.user_type='agent'); the
+		// in-app notification recorded above already covers them.
+		return nil
 	}
 	action := "approved"
 	if nextStatus == RequestRejected {
@@ -1058,7 +1067,7 @@ func (s Service) executeApprovedTx(ctx context.Context, tx pgx.Tx, principal aut
 		return nil, err
 	}
 	previous := row.CurrentPublishedVersionID
-	row, err = asset.SetPublishedPointerTx(ctx, tx, row, versionID)
+	row, err = asset.SetPublishedPointerTx(ctx, tx, row, versionID, principal.UserID, "")
 	if err != nil {
 		if errors.Is(err, asset.ErrInvalidTransition) {
 			return nil, ErrVersionSuperseded
@@ -1321,7 +1330,11 @@ func (s Service) failScheduled(ctx context.Context, actor auth.Principal, item d
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO content.notifications (organization_id, workspace_id, recipient_user_id, kind, payload)
-		VALUES ($1::uuid, $2::uuid, $3::uuid, 'publication.scheduled_failed', $4::jsonb)
+		SELECT $1::uuid, $2::uuid, $3::uuid, 'publication.scheduled_failed', $4::jsonb
+		WHERE NOT EXISTS (
+			SELECT 1 FROM identity.users u
+			WHERE u.id = $3::uuid AND u.user_type = 'agent'
+		)
 	`, item.organizationID, item.workspaceID, item.submittedBy, mustJSON(map[string]any{
 		"request_id":   item.id,
 		"asset_id":     item.assetID,

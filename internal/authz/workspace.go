@@ -79,28 +79,57 @@ func (p WorkspacePolicyService) Require(ctx context.Context, principal auth.Prin
 		return Scope{WorkspaceID: workspaceID, ResourceModelID: resourceModelID, Role: role, AllowedActions: allowed}, nil
 	}
 	if principal.UserType == auth.UserTypeAgent {
-		var allowed []string
-		// Organization-level policy rows (workspace_id NULL) answer for every
-		// workspace of the organization — the same C11-family NULL semantics
-		// already fixed for models and webhooks. A workspace-specific row
-		// wins over the org-level fallback (narrowest grant first).
+		// 统一方案 A/B：agent 与人共用成员表 —— 必须持有 agent 成员行，
+		// 权限 = 角色预设 ± 成员覆写，再减去 human_only 动作（C/I/J）。
+		// 能力清单（key/应用）与模型级策略行仍是工具/模型层的附加授予源。
+		var role string
+		var granted, revoked []string
 		err := p.Store.Pool.QueryRow(ctx, `
-			SELECT COALESCE(ap.actions, '{}'::text[])
-			FROM content.agent_access_policies ap
-			WHERE ap.organization_id = $1::uuid
-			  AND (ap.workspace_id = $2::uuid OR ap.workspace_id IS NULL)
-			  AND ap.agent_user_id = $3::uuid
-			  AND ($4 = '' OR ap.resource_model_id = NULLIF($4, '')::uuid)
-			ORDER BY ap.workspace_id NULLS LAST, ap.resource_model_id NULLS LAST
-			LIMIT 1
-		`, principal.OrganizationID, workspaceID, principal.UserID, resourceModelID).Scan(&allowed)
-		if errors.Is(err, pgx.ErrNoRows) || (!containsAction(allowed, action) && !containsAction(principal.Capabilities, action)) {
+			SELECT wm.role, wm.granted_actions, wm.revoked_actions
+			FROM content.workspace_members wm
+			JOIN content.workspaces w ON w.organization_id = wm.organization_id AND w.id = wm.workspace_id
+			WHERE wm.organization_id = $1::uuid AND wm.workspace_id = $2::uuid AND wm.user_id = $3::uuid
+			  AND wm.principal_type = 'agent' AND w.status = 'active'
+		`, principal.OrganizationID, workspaceID, principal.UserID).Scan(&role, &granted, &revoked)
+		if errors.Is(err, pgx.ErrNoRows) {
+			var exists bool
+			if probeErr := p.Store.Pool.QueryRow(ctx, `
+				SELECT EXISTS (
+					SELECT 1 FROM content.workspaces
+					WHERE organization_id = $1::uuid AND id = $2::uuid AND status = 'active'
+				)
+			`, principal.OrganizationID, workspaceID).Scan(&exists); probeErr == nil && !exists {
+				return Scope{}, ErrWorkspaceNotFound
+			}
 			return Scope{}, ErrWorkspaceForbidden
 		}
-		if !AgentActionAllowed(action) {
+		if err != nil {
+			return Scope{}, fmt.Errorf("load agent membership: %w", err)
+		}
+		effective := EffectiveMemberActions(role, granted, revoked, principal.UserType)
+		if !containsAction(effective, action) {
+			// human_only 或预设/覆写未授予：单一答案来源，直接拒绝。
 			return Scope{}, ErrWorkspaceForbidden
 		}
-		return Scope{WorkspaceID: workspaceID, ResourceModelID: resourceModelID, Role: "agent", AllowedActions: allowed}, nil
+		// 模型级策略行（workspace 级优先于 org 级）与能力清单作为附加授予源
+		// ——保留既有 C11 语义；角色基线不满足时上面已经拒绝。
+		var policyActions []string
+		if resourceModelID != "" {
+			_ = p.Store.Pool.QueryRow(ctx, `
+				SELECT COALESCE(ap.actions, '{}'::text[])
+				FROM content.agent_access_policies ap
+				WHERE ap.organization_id = $1::uuid
+				  AND (ap.workspace_id = $2::uuid OR ap.workspace_id IS NULL)
+				  AND ap.agent_user_id = $3::uuid
+				  AND ap.resource_model_id = NULLIF($4, '')::uuid
+				ORDER BY ap.workspace_id NULLS LAST
+				LIMIT 1
+			`, principal.OrganizationID, workspaceID, principal.UserID, resourceModelID).Scan(&policyActions)
+		}
+		if !containsAction(policyActions, action) && !containsAction(principal.Capabilities, action) {
+			return Scope{}, ErrWorkspaceForbidden
+		}
+		return Scope{WorkspaceID: workspaceID, ResourceModelID: resourceModelID, Role: role, AllowedActions: effective}, nil
 	}
 	return Scope{}, ErrWorkspaceForbidden
 }

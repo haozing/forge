@@ -71,7 +71,7 @@ func TestToolVisibilityFollowsCapabilities(t *testing.T) {
 		}
 	}
 
-	writer := capabilitiesClient(t, buildServer(Deps{}, agentWith("asset.create", "asset.publish")))
+	writer := capabilitiesClient(t, buildServer(Deps{}, agentWith("asset.create", "asset.confirm")))
 	seen := map[string]bool{}
 	for _, name := range writer {
 		seen[name] = true
@@ -79,7 +79,7 @@ func TestToolVisibilityFollowsCapabilities(t *testing.T) {
 	// asset.create / asset.edit / asset.write 是同一写类的三种拼写（设计文档
 	// §3.2 把 create/update 系工具记在 asset.write 名下；细分别名仅为兼容），
 	// 任一拼写下发全部写工具。
-	for _, want := range []string{"create_document", "insert_record", "update_document", "publish_asset"} {
+	for _, want := range []string{"create_document", "insert_record", "update_document"} {
 		if !seen[want] {
 			t.Errorf("writer key missing tool %q (got %v)", want, seen)
 		}
@@ -105,16 +105,20 @@ func TestUnauthenticatedAndMemberPrincipalsSeeNoTools(t *testing.T) {
 
 func TestFullWriteKeySeesCompleteChain(t *testing.T) {
 	tools := capabilitiesClient(t, buildServer(Deps{}, agentWith(
-		"query.read", "query.execute", "asset.read", "asset.create", "asset.edit", "asset.publish", "asset.archive",
+		"query.read", "query.execute", "asset.read", "asset.create", "asset.edit", "asset.confirm", "asset.archive",
 	)))
 	want := []string{
 		"search_assets", "get_asset", "list_tables",
 		"create_document", "insert_record", "update_document",
-		"confirm_asset_version", "publish_asset", "archive_asset",
+		"confirm_asset_version", "archive_asset",
 	}
 	seen := map[string]bool{}
 	for _, name := range tools {
 		seen[name] = true
+	}
+	// J: publish_asset 已对 agent 下线。
+	if seen["publish_asset"] {
+		t.Fatal("publish_asset must not be visible to any agent key")
 	}
 	for _, name := range want {
 		if !seen[name] {

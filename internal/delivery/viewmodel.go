@@ -7,6 +7,7 @@ package delivery
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	"time"
@@ -28,7 +29,9 @@ type NavItem struct {
 type Chrome struct {
 	Slug        string
 	Name        string
-	Template    string
+	SiteLang    string
+	// Languages 是访客端语言切换器（D11/E）：启用语言 >1 时非空。
+	Languages []NavItem
 	ScopePublic bool
 	// 品牌媒体：站点 Logo、Favicon 与社交分享图的公开媒体地址（空 = 未配置）。
 	LogoURL        string
@@ -71,6 +74,7 @@ type Page struct {
 	// Kind names the page template (content block).
 	Kind string
 }
+
 
 // FormatDate renders one timestamp for display.
 func FormatDate(value *time.Time) string {
@@ -117,11 +121,34 @@ type PaginationVM struct {
 // HomeVM renders the homepage: optional hero block plus ordered sections.
 type HomeVM struct {
 	Page
-	HeroTitle    string
-	HeroSummary  string
-	Sections     []SectionVM
+	HeroTitle   string
+	HeroSummary string
+	Sections    []SectionVM
+	// Blocks 是 pages_config v2 的模块（C1）：非空时优先于 Sections 渲染。
+	Blocks       []BlockVM
 	TagCloud     []TagChip
 	ShowTagCloud bool
+}
+
+// BlockVM is one resolved pages_config v2 module (C1/D6/D10).
+type BlockVM struct {
+	Type       string
+	Title      string
+	Subtitle   string
+	BodyHTML   string
+	Href       string
+	Layout     string
+	StyleClass string
+	Items      []CardVM
+	Links      []NavItem
+	Categories []CategoryLinkVM
+}
+
+// CategoryLinkVM is one public category entry of the categories block.
+type CategoryLinkVM struct {
+	Name  string
+	Href  string
+	Count int
 }
 
 // SectionVM is one homepage section (featured / latest / column).
@@ -147,6 +174,7 @@ type ListVM struct {
 // label/value row (presentation text already formatted per type).
 type FieldValueVM struct {
 	Key   string
+	Label string
 	Type  string
 	Value string
 }
@@ -182,6 +210,9 @@ type DetailVM struct {
 	// Related is the related-posts block (G7): fulltext recall over the
 	// unified query service with same-tag / latest fallbacks.
 	Related []CardVM
+	// D16 更新记录：版本号元信息行 + 折叠版本轨迹（≥2 个已发布版本才渲染）。
+	VersionNo    int
+	Publications []PublicationVM
 }
 
 // CommentVM is one rendered comment (plain text, escaped by the template).
@@ -317,6 +348,26 @@ func cardVM(slug string, post site.PublicPost, summaryRunes int) CardVM {
 // home component order of the style IA (featured → latest → tag_cloud).
 func ResolveHome(view site.PublicHomeView, style site.StyleConfig, tags []tag.FacetItem) HomeVM {
 	vm := HomeVM{Page: Page{Kind: "home"}}
+	for _, block := range view.Blocks {
+		bvm := BlockVM{
+			Type:       block.Type,
+			Title:      block.Title,
+			Subtitle:   block.Subtitle,
+			Href:       block.Href,
+			Layout:     block.Layout,
+			StyleClass: blockStyleClass(block),
+		}
+		for _, item := range block.Items {
+			bvm.Items = append(bvm.Items, cardVM(view.Site.Slug, item, style.SummaryLength))
+		}
+		for _, link := range block.Links {
+			bvm.Links = append(bvm.Links, NavItem{Label: link.Label, Href: link.Href})
+		}
+		for _, cat := range block.Categories {
+			bvm.Categories = append(bvm.Categories, CategoryLinkVM{Name: cat.Name, Href: cat.Href, Count: cat.Count})
+		}
+		vm.Blocks = append(vm.Blocks, bvm)
+	}
 	// P1-B: a section may carry model_key (one resource model owns a slot).
 	// Model-scoped latest/featured slots must NOT merge into the generic
 	// "最新/精选" buckets — each becomes its own titled section. Only
@@ -441,8 +492,49 @@ func ResolveList(slug, heading, basePath string, page site.PublicPostPage, style
 // sanitized markdown body and the extracted TOC. Only image references in
 // the authorized set leave the database as same-origin media; every other
 // image is stripped whole.
+// PublicationVM is one entry of the detail update-history block (D16)。
+type PublicationVM struct {
+	VersionNo   int
+	PublishedOn string
+	ChangeNote  string
+	AILabel     string
+}
+
+// publicationVMs projects the publication history, newest first. The
+// provenance label renders only for AI-assisted origins (human stays
+// unlabelled); ≥2 published entries required for the block to render
+// is enforced in the template via len.
+func publicationVMs(content site.PublicPostContent) []PublicationVM {
+	items := make([]PublicationVM, 0, len(content.Publications))
+	for _, p := range content.Publications {
+		vm := PublicationVM{
+			VersionNo:   p.VersionNo,
+			PublishedOn: FormatDate(&p.PublishedAt),
+			ChangeNote:  p.ChangeNote,
+		}
+		switch {
+		case p.Origin == "ai_generated" && p.Confirmed:
+			vm.AILabel = "AI 起草 · 人工确认"
+		case p.Origin == "ai_assisted" && p.Confirmed:
+			vm.AILabel = "AI 协助 · 人工确认"
+		case p.Origin == "ai_generated" || p.Origin == "ai_assisted":
+			vm.AILabel = "AI 参与"
+		}
+		items = append(items, vm)
+	}
+	return items
+}
+
+// DetailVM ends
+
 func ResolveDetail(slug string, content site.PublicPostContent, authorizedImages map[string]bool) DetailVM {
-	markdown := RenderSiteMarkdown(content.Markdown, slug, authorizedImages)
+	return ResolveDetailWithRefs(slug, content, authorizedImages, nil)
+}
+
+// ResolveDetailWithRefs is ResolveDetail with chunzhi-asset reference
+// resolution (D13): public targets become same-site dofollow links.
+func ResolveDetailWithRefs(slug string, content site.PublicPostContent, authorizedImages map[string]bool, refs map[string]AssetRefView) DetailVM {
+	markdown := RenderSiteMarkdown(applyAssetRefs(content.Markdown, refs), slug, authorizedImages)
 	// Meta description: the editor's summary when present, otherwise a
 	// plain-text excerpt of the body, otherwise the title — a detail page
 	// without any description is the single most common on-page SEO defect,
@@ -455,17 +547,19 @@ func ResolveDetail(slug string, content site.PublicPostContent, authorizedImages
 		description = content.Title
 	}
 	detail := DetailVM{
-		Page:        Page{Kind: "detail", Title: content.Title, Description: description},
-		AssetID:     content.AssetID,
-		Section:     content.Section,
-		SectionHref: sectionHref(slug, content.Section),
-		ContentHTML: markdown.HTML,
-		TOC:         markdown.Headings,
-		Fields:      FormatFieldValues(content.Fields),
-		PublishedOn: FormatDate(content.PublishedAt),
-		UpdatedISO:  FormatISO(content.UpdatedAt),
-		Tags:        tagChips(slug, content.Tags),
-		PostPath:    postHref(slug, content.DisplayPath),
+		Page:         Page{Kind: "detail", Title: content.Title, Description: description},
+		AssetID:      content.AssetID,
+		Section:      content.Section,
+		SectionHref:  sectionHref(slug, content.Section),
+		ContentHTML:  markdown.HTML,
+		TOC:          markdown.Headings,
+		Fields:       FormatFieldValues(content.Fields),
+		PublishedOn:  FormatDate(content.PublishedAt),
+		UpdatedISO:   FormatISO(content.UpdatedAt),
+		Tags:         tagChips(slug, content.Tags),
+		PostPath:     postHref(slug, content.DisplayPath),
+		VersionNo:    content.VersionNo,
+		Publications: publicationVMs(content),
 	}
 	if content.CoverAttachmentID != "" {
 		detail.CoverURL = "/sites/" + slug + "/media/" + content.CoverAttachmentID
@@ -488,7 +582,7 @@ func FormatFieldValues(fields []site.PublicFieldValue) []FieldValueVM {
 	}
 	out := make([]FieldValueVM, 0, len(fields))
 	for _, field := range fields {
-		out = append(out, FieldValueVM{Key: field.Key, Type: field.Type, Value: formatFieldValue(field)})
+		out = append(out, FieldValueVM{Key: field.Key, Label: field.Label, Type: field.Type, Value: formatFieldValue(field)})
 	}
 	return out
 }
@@ -535,4 +629,79 @@ type AttachmentVM struct {
 type NeighborLink struct {
 	Title string
 	Href  string
+}
+
+// CategoryVM renders one public category listing page (站点方案 C5/D14).
+type CategoryVM struct {
+	Page
+	Site          Chrome
+	Heading       string
+	Items         []CardVM
+	Crumbs        []CrumbVM
+	Subcategories []SubcategoryVM
+}
+
+// CrumbVM is one breadcrumb entry (name + public href).
+type CrumbVM struct {
+	Name string
+	Href string
+}
+
+// SubcategoryVM is one public child category of the listing page.
+type SubcategoryVM struct {
+	Name  string
+	Href  string
+	Count int
+}
+
+// buildBreadcrumbItems emits BreadcrumbList itemListElement entries for the
+// trail plus the current page.
+func buildBreadcrumbItems(current string, crumbs []site.CategoryCrumb) []map[string]any {
+	items := []map[string]any{}
+	for i, crumb := range crumbs {
+		items = append(items, map[string]any{
+			"@type":    "ListItem",
+			"position": i + 1,
+			"name":     crumb.Name,
+			"item":     crumb.Href,
+		})
+	}
+	items = append(items, map[string]any{
+		"@type":    "ListItem",
+		"position": len(crumbs) + 1,
+		"name":     "当前页",
+		"item":     current,
+	})
+	return items
+}
+
+// blockStyleClass renders the closed style vocabulary as template classes
+// (D10 第③层)：与 LayoutClasses 同思路，模块不携带自由 CSS。
+func blockStyleClass(block site.PublicBlock) string {
+	class := "block--" + block.Type
+	if block.Style == nil {
+		return class
+	}
+	s := block.Style
+	if s.Width != "" {
+		class += " block--width-" + s.Width
+	}
+	if s.Variant != "" {
+		class += " block--variant-" + s.Variant
+	}
+	if s.Columns > 0 {
+		class += fmt.Sprintf(" block--cols-%d", s.Columns)
+	}
+	if s.Background != "" {
+		class += " block--bg-" + s.Background
+	}
+	return class
+}
+
+// CustomPageVM renders one pages_config v2 custom page (C1)。
+type CustomPageVM struct {
+	Page
+	Site    Chrome
+	Heading string
+	Blocks  []BlockVM
 }

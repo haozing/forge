@@ -253,12 +253,27 @@ func agentDataScopeVisibilities(rank int) []string {
 
 // ForOpenAPI compiles the technical API key scope: channels.open_api enabled
 // models across the organization, and the key must carry query.execute
-// (doc §5.4/§11.2).
+// (doc §5.4/§11.2). 统一方案 A4：agent 还必须持有本组织任一活跃工作区的
+// agent 成员行——无成员行即无任何权限，检索也不例外。
 func (c ScopeCompiler) ForOpenAPI(ctx context.Context, principal auth.Principal) (QueryAccessScope, error) {
 	if c.Store == nil || c.Store.Pool == nil {
 		return QueryAccessScope{}, errors.New("database store is not initialized")
 	}
 	if principal.UserType != auth.UserTypeAgent || !principal.HasCapability(authz.ActionQueryExecute) {
+		return QueryAccessScope{}, ErrQueryScopeForbidden
+	}
+	var member bool
+	if err := c.Store.Pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM content.workspace_members wm
+			JOIN content.workspaces w ON w.organization_id = wm.organization_id AND w.id = wm.workspace_id
+			WHERE wm.organization_id = $1::uuid AND wm.user_id = $2::uuid
+			  AND wm.principal_type = 'agent' AND w.status = 'active'
+		)
+	`, principal.OrganizationID, principal.UserID).Scan(&member); err != nil {
+		return QueryAccessScope{}, fmt.Errorf("resolve agent membership: %w", err)
+	}
+	if !member {
 		return QueryAccessScope{}, ErrQueryScopeForbidden
 	}
 	workspaces, err := c.organizationWorkspaces(ctx, principal.OrganizationID)

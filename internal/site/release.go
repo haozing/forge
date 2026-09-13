@@ -42,13 +42,12 @@ type ReleasePage struct {
 // CommentsMode ride the snapshot (二期: the whole user-adjustable surface is
 // versioned together).
 type ReleaseConfig struct {
-	HomepageConfig   json.RawMessage      `json:"homepage_config"`
-	NavigationConfig json.RawMessage      `json:"navigation_config"`
-	StyleConfig      json.RawMessage      `json:"style_config"`
-	CustomCss        string               `json:"custom_css"`
-	CommentsMode     string               `json:"comments_mode"`
-	Template         string               `json:"template"`
-	ModelViews       map[string]ModelView `json:"model_views"`
+	HomepageConfig   json.RawMessage `json:"homepage_config"`
+	PagesConfig      json.RawMessage `json:"pages_config,omitempty"`
+	NavigationConfig json.RawMessage `json:"navigation_config"`
+	StyleConfig      json.RawMessage `json:"style_config"`
+	CustomCss        string          `json:"custom_css"`
+	CommentsMode     string          `json:"comments_mode"`
 }
 
 const releaseColumns = `id::text, site_id::text, revision, config, published_by::text, created_at`
@@ -128,7 +127,7 @@ func (s Service) PublishRelease(ctx context.Context, principal auth.Principal, w
 	if baseReleaseID != "" && !validID(baseReleaseID) {
 		return Release{}, ErrInvalidInput
 	}
-	if err := s.require(ctx, principal, workspaceID, authz.ActionSiteManage); err != nil {
+	if err := s.require(ctx, principal, workspaceID, authz.ActionSiteDesign); err != nil {
 		return Release{}, err
 	}
 	if s.Events == nil {
@@ -165,23 +164,17 @@ func (s Service) PublishRelease(ctx context.Context, principal auth.Principal, w
 	} else {
 		snapshot = ReleaseConfig{
 			HomepageConfig:   current.HomepageConfig,
+			PagesConfig:      current.PagesConfig,
 			NavigationConfig: current.NavigationConfig,
 			StyleConfig:      current.StyleConfig,
 			CustomCss:        current.CustomCss,
 			CommentsMode:     current.CommentsMode,
-			Template:         current.Template,
-			ModelViews:       current.ModelViews,
 		}
 	}
 	// The field whitelist is pruned (not rejected) against the models'
 	// current field_schema: a model version moved between write and publish
 	// shrinks the snapshot instead of failing the release. The pruned count
-	// lands in the release audit.
-	prunedModelViews := 0
-	snapshot.ModelViews, prunedModelViews, err = pruneModelViewsTx(ctx, tx, principal.OrganizationID, snapshot.ModelViews)
-	if err != nil {
-		return Release{}, fmt.Errorf("prune model views: %w", err)
-	}
+	// C4: model_views 快照与剪枝已随白名单下沉到模型版本而移除。
 	// Render-side re-validation of the snapshot style document (design doc
 	// §7.2: both write and render reject invalid values).
 	if _, err := ParseStyleConfig(snapshot.StyleConfig); err != nil {
@@ -217,7 +210,7 @@ func (s Service) PublishRelease(ctx context.Context, principal auth.Principal, w
 	}
 	recordSiteAudit(ctx, tx, principal, workspaceID, "site.release_published", siteID, map[string]any{
 		"release_id": item.ID, "revision": item.Revision, "action": action,
-		"base_release_id": baseReleaseID, "model_views_pruned": prunedModelViews,
+		"base_release_id": baseReleaseID,
 	})
 	if err := appendSiteEvent(ctx, tx, s.Events, principal, workspaceID, updated, action); err != nil {
 		return Release{}, err
@@ -226,15 +219,4 @@ func (s Service) PublishRelease(ctx context.Context, principal auth.Principal, w
 		return Release{}, err
 	}
 	return item, nil
-}
-
-// pruneModelViewsTx prunes the whitelist against the models' current
-// field_schema inside the release transaction (see PruneModelViews).
-func pruneModelViewsTx(ctx context.Context, tx pgx.Tx, organizationID string, views map[string]ModelView) (map[string]ModelView, int, error) {
-	schemas, err := LoadModelSchemasForPrune(ctx, tx, organizationID, views)
-	if err != nil {
-		return nil, 0, err
-	}
-	pruned, count := PruneModelViews(views, schemas)
-	return pruned, count, nil
 }

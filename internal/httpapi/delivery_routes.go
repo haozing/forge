@@ -11,9 +11,9 @@ import (
 	"io"
 	"log"
 	"math"
-	"strings"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"agentchunzhi/internal/auth"
 	"agentchunzhi/internal/delivery"
@@ -121,6 +121,21 @@ func writeDeliveryError(w http.ResponseWriter, r *http.Request, service *deliver
 
 // deliverySiteHome serves /sites/{slug} and /sites/{slug}/ (the subtree
 // registration doubles as the site-scoped 404 catch-all).
+// deliveryLocale extracts and shape-validates the optional locale prefix
+// (D11/E)。空串 = 默认语言（无前缀访问）；非法形态一律空串（兜底路由吞掉）。
+func deliveryLocale(r *http.Request) string {
+	locale := strings.ToLower(strings.TrimSpace(r.PathValue("locale")))
+	if len(locale) != 2 {
+		return ""
+	}
+	for _, char := range locale {
+		if char < 'a' || char > 'z' {
+			return ""
+		}
+	}
+	return locale
+}
+
 func deliverySiteHome(deps Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		service := requireDelivery(w, deps)
@@ -141,7 +156,7 @@ func deliverySiteHome(deps Dependencies) http.HandlerFunc {
 			return
 		}
 		page, err := service.Home(r.Context(), effectiveClientAddr(r, deps.TrustedProxyCIDRs),
-			publicVisitorPrincipal(r, deps), slug, deps.deliveryBaseURL(r))
+			publicVisitorPrincipal(r, deps), slug, deps.deliveryBaseURL(r), deliveryLocale(r))
 		if err != nil {
 			writeDeliveryError(w, r, service, err)
 			return
@@ -219,7 +234,7 @@ func deliverySitePost(deps Dependencies) http.HandlerFunc {
 			return
 		}
 		page, err := service.Post(r.Context(), effectiveClientAddr(r, deps.TrustedProxyCIDRs),
-			publicVisitorPrincipal(r, deps), slug, displayPath, deps.deliveryBaseURL(r))
+			publicVisitorPrincipal(r, deps), slug, displayPath, deps.deliveryBaseURL(r), deliveryLocale(r))
 		if err != nil {
 			writeDeliveryError(w, r, service, err)
 			return
@@ -623,5 +638,61 @@ func deliverySiteCommentPost(deps Dependencies) http.HandlerFunc {
 			log.Printf("delivery comment form write failed slug=%s path=%s: %v", slug, displayPath, err)
 		}
 		http.Redirect(w, r, postPath, http.StatusSeeOther)
+	}
+}
+
+// deliverySiteCategory serves /sites/{slug}/c/{path...}: the hierarchical
+// public category listing (站点方案 C5/D14). GET only; the path walks the
+// public container tree by slug.
+func deliverySiteCategory(deps Dependencies) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		service := requireDelivery(w, deps)
+		if service == nil {
+			return
+		}
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			writeDeliveryPage(w, r, service, service.ErrorPage(http.StatusMethodNotAllowed))
+			return
+		}
+		slug := r.PathValue("slug")
+		if !site.ValidSlug(slug) {
+			writeDeliveryPage(w, r, service, service.ErrorPage(http.StatusNotFound))
+			return
+		}
+		path := r.PathValue("path")
+		page, err := service.Category(r.Context(), effectiveClientAddr(r, deps.TrustedProxyCIDRs),
+			publicVisitorPrincipal(r, deps), slug, path, deps.deliveryBaseURL(r), deliveryLocale(r))
+		if err != nil {
+			writeDeliveryError(w, r, service, err)
+			return
+		}
+		writeDeliveryPage(w, r, service, page)
+	}
+}
+
+// deliverySiteCustomPage serves /sites/{slug}/p/{pageSlug}: pages_config v2
+// 自定义页（C1）。GET only；slug 为保留字时永不到达（保存时 422）。
+func deliverySiteCustomPage(deps Dependencies) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		service := requireDelivery(w, deps)
+		if service == nil {
+			return
+		}
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			writeDeliveryPage(w, r, service, service.ErrorPage(http.StatusMethodNotAllowed))
+			return
+		}
+		slug := r.PathValue("slug")
+		if !site.ValidSlug(slug) {
+			writeDeliveryPage(w, r, service, service.ErrorPage(http.StatusNotFound))
+			return
+		}
+		page, err := service.CustomPage(r.Context(), effectiveClientAddr(r, deps.TrustedProxyCIDRs),
+			publicVisitorPrincipal(r, deps), slug, r.PathValue("pageSlug"), deps.deliveryBaseURL(r), deliveryLocale(r))
+		if err != nil {
+			writeDeliveryError(w, r, service, err)
+			return
+		}
+		writeDeliveryPage(w, r, service, page)
 	}
 }

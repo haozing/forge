@@ -224,7 +224,7 @@ func AllowedActions(organizationRole string) []string {
 type MeResponse struct {
 	identity.Profile
 	Organization   OrganizationRef `json:"organization"`
-	AllowedActions []string          `json:"allowed_actions"`
+	AllowedActions []string        `json:"allowed_actions"`
 }
 
 type OrganizationRef struct {

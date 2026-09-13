@@ -21,6 +21,7 @@ import (
 // PreviewInput carries the preview request body.
 type PreviewInput struct {
 	StyleConfig json.RawMessage `json:"style_config"`
+	PagesConfig json.RawMessage `json:"pages_config"`
 	CustomCss   string          `json:"custom_css"`
 	Page        string          `json:"page"`
 	DisplayPath string          `json:"display_path"`
@@ -69,7 +70,6 @@ func (s *Service) RenderPreview(ctx context.Context, principal auth.Principal, w
 		NavigationConfig: row.NavigationConfig,
 		StyleConfig:      styleDocument,
 		CustomCss:        customCss,
-		Template:         row.Template,
 	}
 	// The base URL must validate before any rendering happens; the closure
 	// below rewrites root-relative references so cross-origin iframe
@@ -95,7 +95,11 @@ func (s *Service) RenderPreview(ctx context.Context, principal auth.Principal, w
 	}
 	switch input.Page {
 	case "", "home":
-		view, err := s.Reader.HomeWithConfig(ctx, previewAddr, principal, row.Slug, facts.HomepageConfig)
+		pagesConfig := facts.PagesConfig
+		if len(input.PagesConfig) > 0 {
+			pagesConfig = input.PagesConfig
+		}
+		view, err := s.Reader.HomeWithConfig(ctx, previewAddr, principal, row.Slug, facts.HomepageConfig, pagesConfig, "")
 		if err != nil {
 			return nil, err
 		}
@@ -130,7 +134,7 @@ func (s *Service) RenderPreview(ctx context.Context, principal auth.Principal, w
 		if input.DisplayPath == "" {
 			return nil, site.ErrPathInvalid
 		}
-		content, err := s.Reader.Post(ctx, previewAddr, principal, row.Slug, input.DisplayPath)
+		content, err := s.Reader.Post(ctx, previewAddr, principal, row.Slug, input.DisplayPath, "")
 		if err != nil {
 			return nil, err
 		}

@@ -17,6 +17,7 @@ import (
 	"html/template"
 	"log"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -145,24 +146,39 @@ func chrome(facts site.SiteFacts, style site.StyleConfig, pageKind string) Chrom
 	if facts.Site.SocialImageAttachmentID != "" {
 		socialURL = "/sites/" + slug + "/media/" + facts.Site.SocialImageAttachmentID
 	}
+	languages := []NavItem{}
+	if len(facts.Site.EnabledLocales) > 1 {
+		for _, locale := range facts.Site.EnabledLocales {
+			locale = strings.ToLower(strings.TrimSpace(locale))
+			if locale == "" {
+				continue
+			}
+			href := "/sites/" + slug
+			if locale != facts.Site.DefaultLocale {
+				href += "/" + locale
+			}
+			languages = append(languages, NavItem{Label: strings.ToUpper(locale), Href: href})
+		}
+	}
 	return Chrome{
-		Slug:          slug,
-		Name:          facts.Site.Name,
-		Template:      facts.Template,
-		ScopePublic:   facts.Site.DefaultContentScope == site.ScopePublic,
-		LogoURL:       logoURL,
-		FaviconURL:    faviconURL,
+		Slug:           slug,
+		Name:           facts.Site.Name,
+		SiteLang:       facts.Site.DefaultLocale,
+		ScopePublic:    facts.Site.DefaultContentScope == site.ScopePublic,
+		LogoURL:        logoURL,
+		FaviconURL:     faviconURL,
 		SocialImageURL: socialURL,
-		Nav:           parseNavigation(facts.NavigationConfig, slug),
-		HomeHref:      "/sites/" + slug + "/",
-		PostsHref:     "/sites/" + slug + "/posts/",
-		TagsHref:      "/sites/" + slug + "/tags/",
-		SearchHref:    "/sites/" + slug + "/search",
-		RSSHref:       "/sites/" + slug + "/rss.xml",
-		Style:         style,
-		StyleCSSVars:  template.CSS(StyleCSS(style) + baseStyleSheet + sanitizedCustomCSS(facts.CustomCss)),
-		ModeAttribute: ColorModeAttribute(style),
-		LayoutClasses: LayoutClasses(style, pageKind),
+		Nav:            navFor(facts, slug),
+		Languages:      languages,
+		HomeHref:       "/sites/" + slug + "/",
+		PostsHref:      "/sites/" + slug + "/posts/",
+		TagsHref:       "/sites/" + slug + "/tags/",
+		SearchHref:     "/sites/" + slug + "/search",
+		RSSHref:        "/sites/" + slug + "/rss.xml",
+		Style:          style,
+		StyleCSSVars:   template.CSS(StyleCSS(style) + baseStyleSheet + sanitizedCustomCSS(facts.CustomCss)),
+		ModeAttribute:  ColorModeAttribute(style),
+		LayoutClasses:  LayoutClasses(style, pageKind),
 	}
 }
 
@@ -251,6 +267,10 @@ func (s *Service) pipeline(ctx context.Context, addr string, principal auth.Prin
 		body, err := s.Render.RenderPage(output.kind, output.vm)
 		if err != nil {
 			return nil, err
+		}
+		// D11/E：多语言站点为每个页面注入 hreflang 备选（单语言为空）。
+		if alts := s.alternates(facts, routePath); len(alts) > 0 {
+			body = injectHeadTags(body, alts)
 		}
 		cacheControl := publicCachePolicy
 		if band == "member" || facts.Site.DefaultContentScope != site.ScopePublic {
@@ -343,14 +363,14 @@ func (s *Service) ErrorPage(status int) *Response {
 }
 
 // Home serves the site homepage.
-func (s *Service) Home(ctx context.Context, addr string, principal auth.Principal, slug, baseURL string) (*Response, error) {
-	routePath := "/sites/" + slug + "/"
+func (s *Service) Home(ctx context.Context, addr string, principal auth.Principal, slug, baseURL string, locale string) (*Response, error) {
+	routePath := "/sites/" + slug + "/" + locale
 	return s.pipeline(ctx, addr, principal, slug, routePath, baseURL, func(ctx context.Context, facts site.SiteFacts, band string) (renderOutput, error) {
 		if gated(facts, band) {
 			return s.gateOutput(facts)
 		}
 		config := style(facts)
-		view, err := s.Reader.HomeWithConfig(ctx, addr, principal, slug, facts.HomepageConfig)
+		view, err := s.Reader.HomeWithConfig(ctx, addr, principal, slug, facts.HomepageConfig, facts.PagesConfig, locale)
 		if err != nil {
 			return renderOutput{}, err
 		}
@@ -372,7 +392,7 @@ func (s *Service) Home(ctx context.Context, addr string, principal auth.Principa
 		vm := ResolveHome(view, config, facets)
 		vm.Site = chrome(facts, config, "home")
 		vm.Title = facts.Site.Name
-		vm.Description = facts.Site.Name + " — " + facts.Template
+		vm.Description = facts.Site.Name
 		vm.Canonical = baseURL + routePath
 		vm.NoIndex = !vm.Site.ScopePublic
 		return renderOutput{kind: "home", vm: vm, noIndex: vm.NoIndex}, nil
@@ -404,14 +424,14 @@ func (s *Service) Posts(ctx context.Context, addr string, principal auth.Princip
 }
 
 // Post serves one post detail page.
-func (s *Service) Post(ctx context.Context, addr string, principal auth.Principal, slug, displayPath, baseURL string) (*Response, error) {
+func (s *Service) Post(ctx context.Context, addr string, principal auth.Principal, slug, displayPath, baseURL string, locale string) (*Response, error) {
 	routePath := "/sites/" + slug + "/posts/" + displayPath
 	return s.pipeline(ctx, addr, principal, slug, routePath, baseURL, func(ctx context.Context, facts site.SiteFacts, band string) (renderOutput, error) {
 		if gated(facts, band) {
 			return s.gateOutput(facts)
 		}
 		config := style(facts)
-		content, err := s.Reader.Post(ctx, addr, principal, slug, displayPath)
+		content, err := s.Reader.Post(ctx, addr, principal, slug, displayPath, locale)
 		if err != nil {
 			// A path with no live binding may have been renamed: answer one
 			// hop 301 to the moved target (G2) before giving up on the 404.
@@ -422,7 +442,15 @@ func (s *Service) Post(ctx context.Context, addr string, principal auth.Principa
 			}
 			return renderOutput{}, err
 		}
-		vm := ResolveDetail(slug, content, s.authorizedBodyImages(ctx, facts, content.Markdown))
+		// D13: 解析正文引用 —— 公开目标转站内 dofollow 链接，其余剥除。
+		refs := map[string]AssetRefView{}
+		if ids := AssetRefIDs(content.Markdown); len(ids) > 0 {
+			lookup := s.Reader.AssetRefLookup(ctx, addr, principal, slug, ids)
+			for id, target := range lookup {
+				refs[id] = AssetRefView{Title: target.Title, Href: "/sites/" + slug + "/posts/" + target.Slug}
+			}
+		}
+		vm := ResolveDetailWithRefs(slug, content, s.authorizedBodyImages(ctx, facts, content.Markdown), refs)
 		vm.Site = chrome(facts, config, "detail")
 		vm.Title = content.Title + " · " + facts.Site.Name
 		// Description comes from ResolveDetail (summary -> body excerpt ->
@@ -462,7 +490,7 @@ func (s *Service) Section(ctx context.Context, addr string, principal auth.Princ
 			return s.gateOutput(facts)
 		}
 		config := style(facts)
-		page, err := s.Reader.Section(ctx, addr, principal, slug, sectionSlug, modelKey, config.PostsPerPage)
+		page, err := s.Reader.Section(ctx, addr, principal, slug, sectionSlug, modelKey, config.PostsPerPage, "")
 		if err != nil {
 			return renderOutput{}, err
 		}
@@ -703,4 +731,79 @@ func articleJSONLD(facts site.SiteFacts, content site.PublicPostContent, canonic
 		return ""
 	}
 	return template.JS(body)
+}
+
+// navFor prefers the pages_config v2 auto-enumerated navigation (C1) and
+// falls back to the legacy navigation_config parse when absent.
+func navFor(facts site.SiteFacts, slug string) []NavItem {
+	if len(facts.NavV2) > 0 {
+		items := make([]NavItem, 0, len(facts.NavV2))
+		for _, entry := range facts.NavV2 {
+			items = append(items, NavItem{Label: entry.Name, Href: entry.Href})
+		}
+		return items
+	}
+	return parseNavigation(facts.NavigationConfig, slug)
+}
+
+// hreflangAlternate is one resolved alternate entry.
+type hreflangAlternate struct {
+	Hreflang string
+	Href     string
+}
+
+// alternates resolves the enabled-locale alternates for one page path
+// (D11/E). 详情页译文 slug 需翻译组查询，此处 v1 以路径回退表达；列表/首页
+// 精确。
+func (s *Service) alternates(facts site.SiteFacts, routePath string) []hreflangAlternate {
+	if len(facts.Site.EnabledLocales) <= 1 {
+		return nil
+	}
+	locales := append([]string{}, facts.Site.EnabledLocales...)
+	sort.Strings(locales)
+	prefix := "/sites/" + facts.Site.Slug
+	trimmed := strings.TrimSuffix(routePath, "/")
+	rest := strings.TrimPrefix(trimmed, prefix)
+	if rest == "" {
+		rest = "/"
+	}
+	out := []hreflangAlternate{}
+	for _, locale := range locales {
+		href := "/sites/" + facts.Site.Slug
+		if locale != facts.Site.DefaultLocale {
+			href += "/" + locale
+		}
+		if rest != "" {
+			href += rest
+		}
+		out = append(out, hreflangAlternate{Hreflang: locale, Href: href})
+	}
+	xDefault := prefix + rest
+	out = append(out, hreflangAlternate{Hreflang: "x-default", Href: xDefault})
+	return out
+}
+
+// injectHeadTags inserts rendered link tags right before </head>.
+func injectHeadTags(body []byte, alts []hreflangAlternate) []byte {
+	var builder strings.Builder
+	for _, alt := range alts {
+		builder.WriteString(`<link rel="alternate" hreflang="`)
+		builder.WriteString(alt.Hreflang)
+		builder.WriteString(`" href="`)
+		builder.WriteString(alt.Href)
+		builder.WriteString(`">`)
+	}
+	closing := strings.ToUpper("</head>")
+	html := string(body)
+	idx := strings.Index(html, closing)
+	if idx < 0 {
+		idx = strings.Index(html, "</head>")
+		if idx < 0 {
+			return body
+		}
+		idx += len("</head>")
+	} else {
+		idx += len(closing)
+	}
+	return []byte(html[:idx] + builder.String() + html[idx:])
 }

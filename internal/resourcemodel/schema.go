@@ -372,6 +372,18 @@ func validateFieldAt(key string, definition map[string]any, path string, nested 
 	if searchable, ok := definition["searchable"].(bool); ok && searchable && fieldType == "object" {
 		*issues = append(*issues, issue(path+".searchable", "invalid_index", "object fields cannot be searchable"))
 	}
+	// D17: label 是字段的人读展示名（如 shot_size → 景别），随 field_schema
+	// 走模型版本快照。可选；为空时公开面回退渲染 key。nested 层不支持。
+	if !nested {
+		if rawLabel, exists := definition["label"]; exists {
+			label, ok := rawLabel.(string)
+			if !ok {
+				*issues = append(*issues, issue(path+".label", "invalid_label", "label must be a string"))
+			} else if n := len([]rune(strings.TrimSpace(label))); n > 40 {
+				*issues = append(*issues, issue(path+".label", "invalid_label", "label must be at most 40 runes"))
+			}
+		}
+	}
 }
 
 // validateFieldDefault checks a field's optional default value against its own

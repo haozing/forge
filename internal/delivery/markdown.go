@@ -67,6 +67,49 @@ func buildMarkdownPolicy() *bluemonday.Policy {
 	return policy
 }
 
+// assetRefPattern matches the frozen asset reference (站点方案 D13):
+// chunzhi-asset://{asset_id}. Render-time conversion turns public targets
+// into same-site dofollow links and strips everything else (fail-closed).
+var assetRefPattern = regexp.MustCompile(`chunzhi-asset://([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})`)
+
+// AssetRefIDs extracts the distinct asset references of one markdown body in
+// first-appearance order.
+func AssetRefIDs(source string) []string {
+	seen := map[string]bool{}
+	ids := []string{}
+	for _, match := range assetRefPattern.FindAllStringSubmatch(source, -1) {
+		if seen[match[1]] {
+			continue
+		}
+		seen[match[1]] = true
+		ids = append(ids, match[1])
+	}
+	return ids
+}
+
+// AssetRefView is the render-time resolution of one asset reference.
+type AssetRefView struct {
+	Title string
+	Href  string
+}
+
+// applyAssetRefs rewrites references before parsing: public targets become
+// same-site dofollow links; non-public/unknown targets degrade to their
+// (already known to the editor) title, or vanish when no title is safe to
+// show — a raw protocol token never survives to the visitor.
+func applyAssetRefs(source string, refs map[string]AssetRefView) string {
+	if len(refs) == 0 {
+		return source
+	}
+	return assetRefPattern.ReplaceAllStringFunc(source, func(match string) string {
+		id := assetRefPattern.FindStringSubmatch(match)[1]
+		if view, ok := refs[id]; ok {
+			return "[" + view.Title + "](" + view.Href + ")"
+		}
+		return ""
+	})
+}
+
 // mediaRefPattern matches the frozen image reference the note freeze writes:
 // chunzhi-media://{attachment_id}.
 var mediaRefPattern = regexp.MustCompile(`chunzhi-media://([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})`)

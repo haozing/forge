@@ -2894,68 +2894,155 @@ paths:
                       next_cursor: { type: string }
                       has_more: { type: boolean }
                   - $ref: '#/components/schemas/Envelope'
-    post:
+  /api/workspaces/{workspaceId}/sites/{siteId}/inclusions/{assetId}/exclusion:
+    put:
       tags: [sites]
-      operationId: createSiteBinding
-      description: 绑定已发布资产到站点（binding_target_invalid=422 当未发布/越档/通道关闭）
+      operationId: excludeSiteAsset
+      summary: 排除单条收录（重新发布不解除）
       parameters:
         - $ref: '#/components/parameters/WorkspaceId'
         - $ref: '#/components/parameters/SiteId'
-        - $ref: '#/components/parameters/IdempotencyKey'
+        - name: assetId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200': { description: 已排除, content: { application/json: { schema: { $ref: '#/components/schemas/Envelope' } } } }
+        '403': { $ref: '#/components/responses/Error' }
+    delete:
+      tags: [sites]
+      operationId: restoreSiteAsset
+      summary: 恢复收录
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/SiteId'
+        - name: assetId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200': { description: 已恢复, content: { application/json: { schema: { $ref: '#/components/schemas/Envelope' } } } }
+        '403': { $ref: '#/components/responses/Error' }
+  /api/workspaces/{workspaceId}/sites/{siteId}/inclusions/{assetId}/feature:
+    put:
+      tags: [sites]
+      operationId: featureSiteAsset
+      summary: 设为精选
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/SiteId'
+        - name: assetId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200': { description: 已精选, content: { application/json: { schema: { $ref: '#/components/schemas/Envelope' } } } }
+        '403': { $ref: '#/components/responses/Error' }
+    delete:
+      tags: [sites]
+      operationId: unfeatureSiteAsset
+      summary: 取消精选
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/SiteId'
+        - name: assetId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200': { description: 已取消精选, content: { application/json: { schema: { $ref: '#/components/schemas/Envelope' } } } }
+        '403': { $ref: '#/components/responses/Error' }
+  /api/workspaces/{workspaceId}/sites/{siteId}/design-sessions:
+    post:
+      tags: [sites]
+      operationId: startDesignSession
+      summary: 开始 AI 设计会话（fork 沙盒）
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/SiteId'
+      responses:
+        '201': { description: 会话已创建, content: { application/json: { schema: { $ref: '#/components/schemas/Envelope' } } } }
+        '403': { $ref: '#/components/responses/Error' }
+  /api/workspaces/{workspaceId}/sites/{siteId}/design-sessions/{sessionId}:
+    get:
+      tags: [sites]
+      operationId: getDesignSession
+      summary: 读会话（含沙盒配置）
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/SiteId'
+        - name: sessionId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200': { description: 会话详情, content: { application/json: { schema: { $ref: '#/components/schemas/Envelope' } } } }
+    patch:
+      tags: [sites]
+      operationId: patchDesignSession
+      summary: 写沙盒配置（pages_config 整体替换，过模块目录校验）
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/SiteId'
+        - name: sessionId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/BindingCreate' }
+            schema: { type: object }
       responses:
-        '201':
-          description: 已绑定
-          content:
-            application/json:
-              schema:
-                allOf:
-                  - $ref: '#/components/schemas/SiteBinding'
-                  - $ref: '#/components/schemas/Envelope'
-        '409': { description: display_path 冲突, content: { application/json: { schema: { $ref: '#/components/schemas/Envelope' } } } }
+        '200': { description: 已应用, content: { application/json: { schema: { $ref: '#/components/schemas/Envelope' } } } }
         '422': { $ref: '#/components/responses/Error' }
-  /api/workspaces/{workspaceId}/sites/{siteId}/bindings/{bindingId}:
-    patch:
-      tags: [sites]
-      operationId: patchSiteBinding
-      parameters:
-        - $ref: '#/components/parameters/WorkspaceId'
-        - $ref: '#/components/parameters/SiteId'
-        - name: bindingId
-          in: path
-          required: true
-          schema: { type: string, format: uuid }
-        - $ref: '#/components/parameters/IdempotencyKey'
-      requestBody:
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/BindingPatch' }
-      responses:
-        '200':
-          description: 已更新
-          content:
-            application/json:
-              schema:
-                allOf:
-                  - $ref: '#/components/schemas/SiteBinding'
-                  - $ref: '#/components/schemas/Envelope'
     delete:
       tags: [sites]
-      operationId: deleteSiteBinding
+      operationId: discardDesignSession
+      summary: 放弃会话（零残留）
       parameters:
         - $ref: '#/components/parameters/WorkspaceId'
         - $ref: '#/components/parameters/SiteId'
-        - name: bindingId
+        - name: sessionId
           in: path
           required: true
           schema: { type: string, format: uuid }
-        - $ref: '#/components/parameters/IdempotencyKey'
       responses:
-        '200': { description: 已解绑, content: { application/json: { schema: { $ref: '#/components/schemas/Envelope' } } } }
+        '200': { description: 已放弃, content: { application/json: { schema: { $ref: '#/components/schemas/Envelope' } } } }
+  /api/workspaces/{workspaceId}/sites/{siteId}/design-sessions/{sessionId}/observe:
+    post:
+      tags: [sites]
+      operationId: observeDesignSession
+      summary: 观察当前沙盒（截图或结构化降级）
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/SiteId'
+        - name: sessionId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: 观察结果（RENDERER_ENABLED 时含 base64 截图）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '403': { $ref: '#/components/responses/Error' }
+  /api/workspaces/{workspaceId}/sites/{siteId}/design-sessions/{sessionId}/apply:
+    post:
+      tags: [sites]
+      operationId: applyDesignSession
+      summary: 人审后把沙盒写回站点工作配置（site.design）
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/SiteId'
+        - name: sessionId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200': { description: 已应用, content: { application/json: { schema: { $ref: '#/components/schemas/Envelope' } } } }
+        '403': { $ref: '#/components/responses/Error' }
   /api/workspaces/{workspaceId}/sites/{siteId}/preview:
     get:
       tags: [sites]
@@ -3038,7 +3125,7 @@ paths:
     post:
       tags: [sites]
       operationId: publishSiteRelease
-      description: 发布不可变配置快照（{homepage_config,navigation_config,style_config,template}）；带 base_release_id 时按历史快照重发（回退=拨指针，新 Release 留审计）。发布后公开渲染只读快照，缓存 release_rev 整体换代
+      description: 发布不可变配置快照（{homepage_config,navigation_config,style_config}）；带 base_release_id 时按历史快照重发（回退=拨指针，新 Release 留审计）。发布后公开渲染只读快照，缓存 release_rev 整体换代
       parameters:
         - $ref: '#/components/parameters/WorkspaceId'
         - $ref: '#/components/parameters/SiteId'
@@ -4323,6 +4410,44 @@ paths:
           description: 已删除
         '404': { $ref: '#/components/responses/Error' }
         '409': { $ref: '#/components/responses/Error' }
+  /api/workspaces/{workspaceId}/doc-containers/{containerId}/category-publication:
+    get:
+      tags: [folders]
+      operationId: getFolderCategoryPublication
+      summary: 读分类公开化元数据（公开标记/slug/SEO 标题与描述）
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - name: containerId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200': { description: 分类公开元数据, content: { application/json: { schema: { $ref: '#/components/schemas/Envelope' } } } }
+        '404': { $ref: '#/components/responses/Error' }
+    put:
+      tags: [folders]
+      operationId: setFolderCategoryPublication
+      summary: 更新分类公开化元数据（slug 不得与保留路由/语言码冲突）
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - name: containerId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                public_flag: { type: boolean }
+                slug: { type: string }
+                public_title: { type: string }
+                public_description: { type: string }
+      responses:
+        '200': { description: 已保存, content: { application/json: { schema: { $ref: '#/components/schemas/Envelope' } } } }
+        '422': { $ref: '#/components/responses/Error' }
   /api/conversations/{conversationId}/note-container:
     put:
       tags: [conversations]
@@ -5301,6 +5426,46 @@ paths:
                   - $ref: '#/components/schemas/Envelope'
         '404': { $ref: '#/components/responses/Error' }
         '422': { $ref: '#/components/responses/Error' }
+  /api/resource-models/{resourceModelId}/public-view:
+    get:
+      tags: [resource-models]
+      operationId: getResourceModelPublicView
+      summary: 读字段公开白名单 + 候选字段清单（D5 向导数据源）
+      parameters:
+        - name: resourceModelId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: 当前白名单与候选
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+    put:
+      tags: [resource-models]
+      operationId: putResourceModelPublicView
+      summary: 整体替换字段公开白名单（card_fields ≤4 / detail_fields ≤12，标量准入）
+      parameters:
+        - name: resourceModelId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                card_fields: { type: array, items: { type: string } }
+                detail_fields: { type: array, items: { type: string } }
+      responses:
+        '200': { description: 已保存, content: { application/json: { schema: { $ref: '#/components/schemas/Envelope' } } } }
+        '403': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
   /api/resource-models/{resourceModelId}/versions:
     get:
       tags: [resource-models]
@@ -6189,17 +6354,19 @@ components:
         slug: { type: string }
         name: { type: string }
         domain: { type: string }
-        template: { type: string, enum: [blog, pro] }
         default_content_scope: { type: string, enum: [public, organization, workspace] }
-        homepage_config: { type: object, description: '首页栏目：{sections:[{type:latest|featured|column, title, section_slug?, model_key?, limit?}]}；model_key 按资源模型收窄栏目（P1-B）' }
+        homepage_config: { type: object, description: '首页栏目（旧版，被 pages_config 取代时忽略）' }
+        pages_config: { type: object, description: '页面配置 v2（C1）：{version:2, home:{content_width, blocks:[hero|latest|ranked|featured|categories|text|links]}, pages:[自定义页 ≤20], collections:{model_key:{sort_field,order,page_size}}, nav:{order,hidden,extra}}' }
         navigation_config: { type: object }
         style_config: { type: object }
-        model_views: { type: object, description: '按资源模型的字段展示白名单：model_id → card_fields / detail_fields；空 = 不公开任何结构化字段' }
         logo_attachment_id: { type: string, format: uuid, nullable: true, description: '站点 Logo 图片附件（image/*）' }
         favicon_attachment_id: { type: string, format: uuid, nullable: true, description: '站点 Favicon 图片附件' }
         social_image_attachment_id: { type: string, format: uuid, nullable: true, description: '社交分享图附件（og:image）' }
         custom_css: { type: string }
         comments_mode: { type: string, enum: [off, moderated, open] }
+        default_locale: { type: string, description: '默认语言（BCP-47 主子标签，zh）' }
+        enabled_locales: { type: array, items: { type: string }, description: '对外启用的语言集合（仅默认语言 = 多语言链路不激活）' }
+        fallback_to_default: { type: boolean, description: '当前语言无内容时列表回退显示默认语言版本' }
         published_release_id: { type: string, format: uuid, nullable: true }
         status: { type: string, enum: [active, disabled] }
         revision: { type: integer }
@@ -6214,21 +6381,20 @@ components:
         name: { type: string, maxLength: 200 }
         domain: { type: string }
         style_config: { type: object, description: L1 样式参数空间（写入时完整校验） }
-        template: { type: string, enum: [blog, pro] }
         default_content_scope: { type: string, enum: [public, organization, workspace] }
-        homepage_config: { type: object, description: '首页栏目：{sections:[{type:latest|featured|column, title, section_slug?, model_key?, limit?}]}；model_key 按资源模型收窄栏目（P1-B）' }
+        homepage_config: { type: object, description: '首页栏目（旧版，被 pages_config 取代时忽略）' }
+        pages_config: { type: object, description: '页面配置 v2（C1）：{version:2, home:{content_width, blocks:[hero|latest|ranked|featured|categories|text|links]}, pages:[自定义页 ≤20], collections:{model_key:{sort_field,order,page_size}}, nav:{order,hidden,extra}}' }
         navigation_config: { type: object }
     SitePatch:
       type: object
       properties:
         name: { type: string, maxLength: 200 }
         domain: { type: string }
-        template: { type: string, enum: [blog, pro] }
         default_content_scope: { type: string, enum: [public, organization, workspace] }
-        homepage_config: { type: object, description: '首页栏目：{sections:[{type:latest|featured|column, title, section_slug?, model_key?, limit?}]}；model_key 按资源模型收窄栏目（P1-B）' }
+        homepage_config: { type: object, description: '首页栏目（旧版，被 pages_config 取代时忽略）' }
+        pages_config: { type: object, description: '页面配置 v2（C1）：{version:2, home:{content_width, blocks:[hero|latest|ranked|featured|categories|text|links]}, pages:[自定义页 ≤20], collections:{model_key:{sort_field,order,page_size}}, nav:{order,hidden,extra}}' }
         navigation_config: { type: object }
         style_config: { type: object, description: patch 语义，深合并到工作样式 }
-        model_views: { type: object, description: '字段展示白名单，整体替换语义：键为资源模型 uuid，值为 card_fields / detail_fields 数组；字段须存在于模型当前 field_schema 且为可呈现标量类型' }
         custom_css: { type: string, description: L2 自定义 CSS（服务端白名单清洗） }
         comments_mode: { type: string, enum: [off, moderated, open] }
         status: { type: string, enum: [active, disabled] }
@@ -6283,7 +6449,6 @@ components:
       properties:
         slug: { type: string }
         name: { type: string }
-        template: { type: string, enum: [blog, pro] }
         navigation_config: { type: object }
     PublicSection:
       type: object
@@ -6332,9 +6497,28 @@ components:
         summary: { type: string }
         markdown: { type: string, description: 正文 markdown 原文；渲染与净化由前端负责 }
         fields:
-          type: object
-          description: 按 field_schema 投影的白名单字段
+          type: array
+          description: 按 field_schema 投影的白名单字段（label 为人读展示名，D17；缺省渲染回退 key）
+          items:
+            type: object
+            properties:
+              key: { type: string }
+              label: { type: string }
+              type: { type: string }
+              value: {}
         content_kind: { type: string }
+        publications:
+          type: array
+          description: 更新记录（D16：最近 10 条已发布动作元数据，倒序）
+          items:
+            type: object
+            properties:
+              version_no: { type: integer }
+              published_at: { type: string, format: date-time }
+              change_note: { type: string }
+              origin: { type: string, enum: [human, imported, ai_generated, ai_assisted] }
+              confirmed: { type: boolean }
+        version_no: { type: integer }
         tags:
           type: array
           items: { $ref: '#/components/schemas/TagSummary' }

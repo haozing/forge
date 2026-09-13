@@ -74,7 +74,9 @@ func (s Service) validateStore() error {
 }
 
 // requireWorkspaceMember ensures the principal is a non-viewer member of the
-// workspace the attachment operation targets.
+// workspace the attachment operation targets. Agents are excluded: attachment
+// upload/link/delete is a human surface (agent media flows through the asset
+// version attachment path, which carries its own authorization).
 func (s Service) requireWorkspaceMember(ctx context.Context, principal auth.Principal, workspaceID string) error {
 	if err := s.validateStore(); err != nil {
 		return err
@@ -82,9 +84,12 @@ func (s Service) requireWorkspaceMember(ctx context.Context, principal auth.Prin
 	var allowed bool
 	if err := s.Store.Pool.QueryRow(ctx, `
 		SELECT EXISTS (
-			SELECT 1 FROM content.workspace_members
-			WHERE organization_id = $1::uuid AND workspace_id = $2::uuid
-			  AND user_id = $3::uuid AND role <> 'viewer'
+			SELECT 1 FROM content.workspace_members wm
+			JOIN identity.users u
+			  ON u.organization_id = wm.organization_id AND u.id = wm.user_id
+			WHERE wm.organization_id = $1::uuid AND wm.workspace_id = $2::uuid
+			  AND wm.user_id = $3::uuid AND wm.role <> 'viewer'
+			  AND u.user_type = 'member'
 		)
 	`, principal.OrganizationID, workspaceID, principal.UserID).Scan(&allowed); err != nil {
 		return fmt.Errorf("check workspace membership: %w", err)

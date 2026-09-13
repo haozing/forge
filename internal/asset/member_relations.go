@@ -189,17 +189,17 @@ func trim(value string) string {
 // materialized on sealed versions or staged on the shared draft pending a
 // commit.
 type AssetRelationEntry struct {
-	ID                       string    `json:"id"`
-	RelationType             string    `json:"relation_type"`
-	Direction                string    `json:"direction"`
-	Status                   string    `json:"status"`
-	Source                   string    `json:"source"`
-	CounterpartAssetID       string    `json:"counterpart_asset_id"`
-	CounterpartTitle         string    `json:"counterpart_title"`
-	CounterpartStatus        string    `json:"counterpart_publication_status"`
-	CounterpartVisibility    string    `json:"counterpart_visibility"`
-	AssetVersionID           string    `json:"asset_version_id,omitempty"`
-	CreatedAt                time.Time `json:"created_at"`
+	ID                    string    `json:"id"`
+	RelationType          string    `json:"relation_type"`
+	Direction             string    `json:"direction"`
+	Status                string    `json:"status"`
+	Source                string    `json:"source"`
+	CounterpartAssetID    string    `json:"counterpart_asset_id"`
+	CounterpartTitle      string    `json:"counterpart_title"`
+	CounterpartStatus     string    `json:"counterpart_publication_status"`
+	CounterpartVisibility string    `json:"counterpart_visibility"`
+	AssetVersionID        string    `json:"asset_version_id,omitempty"`
+	CreatedAt             time.Time `json:"created_at"`
 }
 
 // Relations returns the full relation graph around an asset: outgoing and

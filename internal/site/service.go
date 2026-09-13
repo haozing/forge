@@ -41,7 +41,6 @@ type Site struct {
 	Slug                string          `json:"slug"`
 	Name                string          `json:"name"`
 	Domain              string          `json:"domain"`
-	Template            string          `json:"template"`
 	DefaultContentScope string          `json:"default_content_scope"`
 	Status              string          `json:"status"`
 	HomepageConfig      json.RawMessage `json:"homepage_config"`
@@ -54,13 +53,16 @@ type Site struct {
 	CommentsMode string `json:"comments_mode"`
 	// 品牌媒体（CMS §10.7）：站点 Logo、Favicon 与社交分享图，引用
 	// asset.attachments（image/*，交付面媒体路由校验后对外服务）。
-	LogoAttachmentID       string `json:"logo_attachment_id"`
-	FaviconAttachmentID    string `json:"favicon_attachment_id"`
+	LogoAttachmentID        string `json:"logo_attachment_id"`
+	FaviconAttachmentID     string `json:"favicon_attachment_id"`
 	SocialImageAttachmentID string `json:"social_image_attachment_id"`
-	// ModelViews is the per-model field display whitelist (CMS plan §7.2):
-	// which structured fields the site publishes on cards and detail pages.
-	// Empty/absent views publish zero fields (fail-closed).
-	ModelViews map[string]ModelView `json:"model_views"`
+	// 多语言（D11）：默认语言 + 启用语言集合 + 回退开关。
+	DefaultLocale     string   `json:"default_locale"`
+	EnabledLocales    []string `json:"enabled_locales"`
+	FallbackToDefault bool     `json:"fallback_to_default"`
+	// PagesConfig is the v2 page/document configuration (C1)：home blocks、
+	// 自定义页、集合页参数与导航。空文档渲染默认首页。
+	PagesConfig json.RawMessage `json:"pages_config"`
 	// PublishedReleaseID points at the live immutable config snapshot; NULL
 	// means the public render falls back to the working columns above.
 	PublishedReleaseID *string   `json:"published_release_id"`
@@ -78,10 +80,10 @@ type CreateSiteInput struct {
 	Slug                string
 	Name                string
 	Domain              string
-	Template            string
 	DefaultContentScope string
 	HomepageConfig      json.RawMessage
 	NavigationConfig    json.RawMessage
+	PagesConfig         json.RawMessage
 	StyleConfig         json.RawMessage
 }
 
@@ -92,10 +94,13 @@ type CreateSiteInput struct {
 type UpdateSiteInput struct {
 	Name                *string
 	Domain              *string
-	Template            *string
 	DefaultContentScope *string
 	HomepageConfig      *json.RawMessage
 	NavigationConfig    *json.RawMessage
+	DefaultLocale       *string
+	EnabledLocales      *[]string
+	FallbackToDefault   *bool
+	PagesConfig         *json.RawMessage
 	StyleConfig         *json.RawMessage
 	CustomCss           *string
 	CommentsMode        *string
@@ -104,9 +109,6 @@ type UpdateSiteInput struct {
 	LogoAttachmentID        *string
 	FaviconAttachmentID     *string
 	SocialImageAttachmentID *string
-	// ModelViews replaces the whole per-model field display whitelist when
-	// non-nil (whole-document semantics, like homepage_config).
-	ModelViews *map[string]ModelView
 }
 
 // SitePage is one keyset page of the workspace site catalog.
@@ -157,25 +159,24 @@ func (s Service) require(ctx context.Context, principal auth.Principal, workspac
 }
 
 const siteColumns = `id::text, organization_id::text, workspace_id::text, slug, name,
-	COALESCE(domain, ''), template, default_content_scope, status, revision,
+	COALESCE(domain, ''), default_content_scope, status, revision,
+	default_locale, enabled_locales, fallback_to_default,
 	homepage_config, navigation_config, style_config, custom_css, comments_mode,
-	model_views, published_release_id::text, created_at, updated_at,
+	pages_config, published_release_id::text, created_at, updated_at,
 	COALESCE(logo_attachment_id::text, ''), COALESCE(favicon_attachment_id::text, ''),
 	COALESCE(social_image_attachment_id::text, '')`
 
 func scanSiteRow(row interface{ Scan(...any) error }) (Site, error) {
 	var item Site
-	var modelViews []byte
 	err := row.Scan(&item.ID, &item.OrganizationID, &item.WorkspaceID, &item.Slug, &item.Name,
-		&item.Domain, &item.Template, &item.DefaultContentScope, &item.Status, &item.Revision,
+		&item.Domain, &item.DefaultContentScope, &item.Status, &item.Revision,
+		&item.DefaultLocale, &item.EnabledLocales, &item.FallbackToDefault,
 		&item.HomepageConfig, &item.NavigationConfig, &item.StyleConfig, &item.CustomCss,
-		&item.CommentsMode, &modelViews, &item.PublishedReleaseID, &item.CreatedAt, &item.UpdatedAt,
+		&item.CommentsMode, &item.PagesConfig, &item.PublishedReleaseID, &item.CreatedAt, &item.UpdatedAt,
 		&item.LogoAttachmentID, &item.FaviconAttachmentID, &item.SocialImageAttachmentID)
 	if err != nil {
 		return Site{}, err
 	}
-	item.ModelViews = map[string]ModelView{}
-	_ = json.Unmarshal(modelViews, &item.ModelViews)
 	item.ETag = fmt.Sprint(item.Revision)
 	return item, nil
 }
@@ -288,7 +289,8 @@ func (s Service) CreateSite(ctx context.Context, principal auth.Principal, works
 	if !validID(workspaceID) {
 		return Site{}, ErrInvalidInput
 	}
-	if err := s.require(ctx, principal, workspaceID, authz.ActionSiteManage); err != nil {
+	// G: 建站是站点生命周期权（admin）；handler 层已做同款检查。
+	if err := s.require(ctx, principal, workspaceID, authz.ActionSiteLifecycle); err != nil {
 		return Site{}, err
 	}
 	slug := strings.TrimSpace(input.Slug)
@@ -301,13 +303,6 @@ func (s Service) CreateSite(ctx context.Context, principal auth.Principal, works
 	}
 	domain := strings.TrimSpace(input.Domain)
 	if domain != "" && !ValidDomain(domain) {
-		return Site{}, ErrInvalidInput
-	}
-	template := input.Template
-	if template == "" {
-		template = TemplateBlog
-	}
-	if !ValidTemplate(template) {
 		return Site{}, ErrInvalidInput
 	}
 	scope := input.DefaultContentScope
@@ -326,6 +321,10 @@ func (s Service) CreateSite(ctx context.Context, principal auth.Principal, works
 		return Site{}, err
 	}
 	style, err := defaultStyleConfig(input.StyleConfig)
+	if err != nil {
+		return Site{}, err
+	}
+	pagesConfig, err := defaultPagesConfigOr(input.PagesConfig)
 	if err != nil {
 		return Site{}, err
 	}
@@ -348,6 +347,9 @@ func (s Service) CreateSite(ctx context.Context, principal auth.Principal, works
 	if exists {
 		return Site{}, ErrConflict
 	}
+	if err := ValidatePagesConfig(ctx, tx, principal.OrganizationID, workspaceID, pagesConfig); err != nil {
+		return Site{}, ErrInvalidInput
+	}
 	if domain != "" {
 		if err := tx.QueryRow(ctx, `
 			SELECT EXISTS (SELECT 1 FROM site.public_sites WHERE domain = $1)
@@ -360,13 +362,13 @@ func (s Service) CreateSite(ctx context.Context, principal auth.Principal, works
 	}
 	item, err := scanSiteRow(tx.QueryRow(ctx, `
 		INSERT INTO site.public_sites
-			(organization_id, workspace_id, slug, name, domain, template,
+			(organization_id, workspace_id, slug, name, domain,
 			 default_content_scope, homepage_config, navigation_config, style_config,
-			 status, revision, created_by)
-		VALUES ($1::uuid, $2::uuid, $3, $4, NULLIF($5, ''), $6, $7, $8::jsonb, $9::jsonb, $10::jsonb, 'active', 1, $11::uuid)
+			 pages_config, status, revision, created_by)
+		VALUES ($1::uuid, $2::uuid, $3, $4, NULLIF($5, ''), $6, $7::jsonb, $8::jsonb, $9::jsonb, $10::jsonb, 'active', 1, $11::uuid)
 		RETURNING `+siteColumns+`
-	`, principal.OrganizationID, workspaceID, slug, name, domain, template,
-		scope, []byte(homepage), []byte(navigation), []byte(style), principal.UserID))
+	`, principal.OrganizationID, workspaceID, slug, name, domain,
+		scope, []byte(homepage), []byte(navigation), []byte(style), mustMarshalJSON(pagesConfig), principal.UserID))
 	if err != nil {
 		if uniqueViolation(err) {
 			return Site{}, ErrConflict
@@ -375,7 +377,6 @@ func (s Service) CreateSite(ctx context.Context, principal auth.Principal, works
 	}
 	recordSiteAudit(ctx, tx, principal, workspaceID, "site.created", item.ID, map[string]any{
 		"slug":                  item.Slug,
-		"template":              item.Template,
 		"default_content_scope": item.DefaultContentScope,
 	})
 	if err := appendSiteEvent(ctx, tx, s.Events, principal, workspaceID, item, "created"); err != nil {
@@ -417,7 +418,7 @@ func (s Service) UpdateSite(ctx context.Context, principal auth.Principal, works
 	if !validID(workspaceID) || !validID(siteID) {
 		return Site{}, ErrInvalidInput
 	}
-	if err := s.require(ctx, principal, workspaceID, authz.ActionSiteManage); err != nil {
+	if err := s.require(ctx, principal, workspaceID, authz.ActionSiteDesign); err != nil {
 		return Site{}, err
 	}
 	name := strings.TrimSpace(deref(input.Name))
@@ -428,19 +429,11 @@ func (s Service) UpdateSite(ctx context.Context, principal auth.Principal, works
 	if input.Domain != nil && domain != "" && !ValidDomain(domain) {
 		return Site{}, ErrInvalidInput
 	}
-	if input.Template != nil && !ValidTemplate(*input.Template) {
-		return Site{}, ErrInvalidInput
-	}
 	if input.DefaultContentScope != nil && !ValidScope(*input.DefaultContentScope) {
 		return Site{}, ErrInvalidInput
 	}
 	if input.Status != nil && *input.Status != StatusActive && *input.Status != StatusDisabled {
 		return Site{}, ErrInvalidInput
-	}
-	if input.ModelViews != nil {
-		if err := ValidateModelViewShape(*input.ModelViews); err != nil {
-			return Site{}, err
-		}
 	}
 	var homepage, navigation json.RawMessage
 	if input.HomepageConfig != nil {
@@ -449,6 +442,18 @@ func (s Service) UpdateSite(ctx context.Context, principal auth.Principal, works
 		}
 		homepage = *input.HomepageConfig
 	}
+	if input.DefaultLocale != nil || input.EnabledLocales != nil {
+		if err := validLocalePair(deref(input.DefaultLocale), derefStringSlice(input.EnabledLocales)); err != nil {
+			return Site{}, err
+		}
+	}
+	if input.PagesConfig != nil {
+		var pages PagesConfig
+		if err := json.Unmarshal(*input.PagesConfig, &pages); err != nil {
+			return Site{}, ErrInvalidInput
+		}
+	}
+
 	if input.NavigationConfig != nil {
 		if !validConfigObject(*input.NavigationConfig) {
 			return Site{}, ErrInvalidInput
@@ -491,11 +496,6 @@ func (s Service) UpdateSite(ctx context.Context, principal auth.Principal, works
 		if input.CustomCss == nil && strings.TrimSpace(presetCSS) != "" {
 			copied, _ := SanitizeCSS(presetCSS)
 			input.CustomCss = &copied
-		}
-	}
-	if input.ModelViews != nil {
-		if err := ValidateModelViewReferences(ctx, tx, principal.OrganizationID, workspaceID, *input.ModelViews); err != nil {
-			return Site{}, err
 		}
 	}
 	// The L2 layer is sanitized at write; the stored form is the canonical
@@ -599,9 +599,6 @@ func applySiteUpdate(ctx context.Context, tx pgx.Tx, principal auth.Principal, w
 	if input.Domain != nil {
 		sets = append(sets, "domain = NULLIF("+arg(domain)+", '')")
 	}
-	if input.Template != nil {
-		sets = append(sets, "template = "+arg(*input.Template))
-	}
 	if input.DefaultContentScope != nil {
 		sets = append(sets, "default_content_scope = "+arg(*input.DefaultContentScope))
 	}
@@ -610,6 +607,25 @@ func applySiteUpdate(ctx context.Context, tx pgx.Tx, principal auth.Principal, w
 	}
 	if input.NavigationConfig != nil {
 		sets = append(sets, "navigation_config = "+arg(string(navigation))+"::jsonb")
+	}
+	if input.PagesConfig != nil {
+		var pages PagesConfig
+		if err := json.Unmarshal(*input.PagesConfig, &pages); err != nil {
+			return Site{}, ErrInvalidInput
+		}
+		if err := ValidatePagesConfig(ctx, tx, principal.OrganizationID, workspaceID, pages); err != nil {
+			return Site{}, err
+		}
+		sets = append(sets, "pages_config = "+arg(string(*input.PagesConfig))+"::jsonb")
+	}
+	if input.DefaultLocale != nil {
+		sets = append(sets, "default_locale = "+arg(strings.ToLower(strings.TrimSpace(*input.DefaultLocale))))
+	}
+	if input.EnabledLocales != nil {
+		sets = append(sets, "enabled_locales = "+arg(*input.EnabledLocales)+"::text[]")
+	}
+	if input.FallbackToDefault != nil {
+		sets = append(sets, "fallback_to_default = "+arg(*input.FallbackToDefault))
 	}
 	if input.StyleConfig != nil {
 		sets = append(sets, "style_config = "+arg(string(style))+"::jsonb")
@@ -631,13 +647,6 @@ func applySiteUpdate(ctx context.Context, tx pgx.Tx, principal auth.Principal, w
 	}
 	if input.Status != nil {
 		sets = append(sets, "status = "+arg(*input.Status))
-	}
-	if input.ModelViews != nil {
-		modelViews, err := json.Marshal(*input.ModelViews)
-		if err != nil {
-			return Site{}, fmt.Errorf("encode model views: %w", err)
-		}
-		sets = append(sets, "model_views = "+arg(string(modelViews))+"::jsonb")
 	}
 	item, err := scanSiteRow(tx.QueryRow(ctx, `
 		UPDATE site.public_sites
@@ -706,6 +715,52 @@ func defaultStyleConfig(raw json.RawMessage) (json.RawMessage, error) {
 func deref(value *string) string {
 	if value == nil {
 		return ""
+	}
+	return *value
+}
+
+func mustMarshalJSON(value any) []byte {
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return []byte("{}")
+	}
+	return raw
+}
+
+// validLocalePair 校验默认语言与启用集合：全部归一为两位字母码，默认语言
+// 必须在启用集合内（D11）。
+func validLocalePair(defaultLocale string, enabled []string) error {
+	twoLetter := func(value string) bool {
+		value = strings.ToLower(strings.TrimSpace(value))
+		if len(value) != 2 {
+			return false
+		}
+		for _, char := range value {
+			if char < 'a' || char > 'z' {
+				return false
+			}
+		}
+		return true
+	}
+	if defaultLocale != "" && !twoLetter(defaultLocale) {
+		return ErrInvalidInput
+	}
+	normalized := map[string]bool{}
+	for _, locale := range enabled {
+		if !twoLetter(locale) {
+			return ErrInvalidInput
+		}
+		normalized[strings.ToLower(strings.TrimSpace(locale))] = true
+	}
+	if defaultLocale != "" && len(normalized) > 0 && !normalized[strings.ToLower(strings.TrimSpace(defaultLocale))] {
+		return ErrInvalidInput
+	}
+	return nil
+}
+
+func derefStringSlice(value *[]string) []string {
+	if value == nil {
+		return nil
 	}
 	return *value
 }

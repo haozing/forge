@@ -97,9 +97,11 @@ func agentSessionRuns(deps Dependencies) http.HandlerFunc {
 			FROM integration.agent_sessions s
 			JOIN integration.agent_applications aa ON aa.id = s.agent_application_id
 			JOIN integration.model_endpoints e ON e.id = aa.model_endpoint_id AND e.organization_id = aa.organization_id
-			JOIN content.workspace_agent_applications wa ON wa.organization_id = s.organization_id
-			  AND wa.workspace_id = $4::uuid AND wa.agent_application_id = aa.id AND wa.enabled = true
-			JOIN content.workspace_members wm ON wm.workspace_id = wa.workspace_id AND wm.user_id = $3::uuid
+			JOIN content.workspace_members wa ON wa.organization_id = s.organization_id
+			  AND wa.workspace_id = $4::uuid AND wa.user_id = aa.bound_agent_user_id
+			  AND wa.principal_type = 'agent'
+			JOIN content.workspace_members wm ON wm.organization_id = s.organization_id
+			  AND wm.workspace_id = $4::uuid AND wm.user_id = $3::uuid
 			WHERE s.id = $1::uuid AND s.organization_id = $2::uuid AND s.initiator_user_id = $3::uuid
 			  AND s.status = 'active' AND s.expires_at > now() AND aa.status = 'active'
 			  AND aa.runtime_mode = 'react' AND e.status = 'active'

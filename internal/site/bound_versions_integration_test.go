@@ -184,14 +184,11 @@ func TestBoundVersionRowsAgainstLiveSchema(t *testing.T) {
 		WorkspaceID:         workspaceID,
 		Slug:                slug,
 		DefaultContentScope: "public",
-		ModelViews: map[string]ModelView{
-			modelID: {CardFields: []string{"shot_size"}, DetailFields: []string{"shot_size", "lens_mm"}},
-		},
 	}
 
 	// The join must reach model.resource_model_versions.field_schema; a
 	// reference to a non-existent column fails here as it did in production.
-	rows, err := reader.boundVersionRows(ctx, item, "itc-shots", "", false, 10)
+	rows, err := reader.boundVersionRows(ctx, item, "itc-shots", "", false, 10, "")
 	if err != nil {
 		t.Fatalf("boundVersionRows (no model filter): %v", err)
 	}
@@ -210,14 +207,14 @@ func TestBoundVersionRowsAgainstLiveSchema(t *testing.T) {
 
 	// A model_key filter narrows to the owning model, and a non-matching key
 	// yields zero rows (never a leak of other models' content).
-	filtered, err := reader.boundVersionRows(ctx, item, "itc-shots", "itc_bounds_shots", false, 10)
+	filtered, err := reader.boundVersionRows(ctx, item, "itc-shots", "itc_bounds_shots", false, 10, "")
 	if err != nil {
 		t.Fatalf("boundVersionRows (model filter): %v", err)
 	}
 	if len(filtered) != 1 {
 		t.Fatalf("model filter dropped the row: got %d", len(filtered))
 	}
-	empty, err := reader.boundVersionRows(ctx, item, "itc-shots", "itc_bounds_other", false, 10)
+	empty, err := reader.boundVersionRows(ctx, item, "itc-shots", "itc_bounds_other", false, 10, "")
 	if err != nil {
 		t.Fatalf("boundVersionRows (other model): %v", err)
 	}

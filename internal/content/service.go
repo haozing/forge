@@ -11,9 +11,9 @@ import (
 	"time"
 
 	assetservice "agentchunzhi/internal/asset"
-	"agentchunzhi/internal/noteblocks"
 	"agentchunzhi/internal/auth"
 	"agentchunzhi/internal/eventing"
+	"agentchunzhi/internal/noteblocks"
 	"agentchunzhi/internal/store"
 
 	"github.com/jackc/pgx/v5"
@@ -164,16 +164,16 @@ type derivationSourceBlock struct {
 }
 
 type DerivationResult struct {
-	DerivationID         string              `json:"derivation_id"`
-	SourceConversationID string              `json:"source_conversation_id"`
-	TargetConversationID string              `json:"target_conversation_id"`
-	TargetNoteAssetID    string              `json:"target_note_asset_id"`
-	Operation            string              `json:"operation"`
-	ContextPolicy        string              `json:"context_policy"`
-	Status               string              `json:"status"`
-	CreatedAt            string              `json:"created_at"`
-	CompletedAt          string              `json:"completed_at"`
-	Sources              []DerivationSource  `json:"sources,omitempty"`
+	DerivationID         string             `json:"derivation_id"`
+	SourceConversationID string             `json:"source_conversation_id"`
+	TargetConversationID string             `json:"target_conversation_id"`
+	TargetNoteAssetID    string             `json:"target_note_asset_id"`
+	Operation            string             `json:"operation"`
+	ContextPolicy        string             `json:"context_policy"`
+	Status               string             `json:"status"`
+	CreatedAt            string             `json:"created_at"`
+	CompletedAt          string             `json:"completed_at"`
+	Sources              []DerivationSource `json:"sources,omitempty"`
 }
 
 func (s Service) CreateDerivation(ctx context.Context, principal auth.Principal, idempotencyKey string, input CreateDerivationInput) (DerivationResult, error) {
@@ -1119,11 +1119,12 @@ func (s Service) CreateConversation(ctx context.Context, principal auth.Principa
 	var boundAgent string
 	err = tx.QueryRow(ctx, `
 		SELECT aa.bound_agent_user_id::text
-		FROM content.workspace_agent_applications wa
-		JOIN integration.agent_applications aa ON aa.id = wa.agent_application_id
+		FROM content.workspace_members wa
+		JOIN integration.agent_applications aa ON aa.bound_agent_user_id = wa.user_id
 		WHERE wa.organization_id = $1::uuid AND wa.workspace_id = $2::uuid
-		  AND wa.agent_application_id = $3::uuid AND wa.enabled = true
+		  AND wa.user_id = aa.bound_agent_user_id AND wa.principal_type = 'agent'
 		  AND aa.organization_id = $1::uuid AND aa.status = 'active'
+		  AND aa.id = $3::uuid
 	`, principal.OrganizationID, input.WorkspaceID, appID).Scan(&boundAgent)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ConversationResult{}, ErrForbidden

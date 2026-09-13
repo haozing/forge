@@ -1,0 +1,18 @@
+{{define "content"}}
+<article class="custom-page">
+  <h1 class="article-title">{{.Heading}}</h1>
+  {{range .Blocks}}
+  <section class="home-block {{.StyleClass}}">
+    {{if eq .Type "text"}}
+    <div class="block-text">{{with .BodyHTML}}{{noescape .}}{{end}}</div>
+    {{else if eq .Type "links"}}
+    <div class="block-links">{{if .Title}}<h2>{{.Title}}</h2>{{end}}<ul>{{range .Links}}<li><a href="{{.Href}}">{{.Label}}</a></li>{{end}}</ul></div>
+    {{else}}
+    {{if .Title}}<h2>{{.Title}}</h2>{{end}}
+    {{if eq .Layout "grid"}}<div class="cards cards-featured">{{range .Items}}<article class="card card-featured"><h3><a href="{{.Href}}">{{.Title}}</a></h3>{{with .Summary}}<p class="card-summary">{{.}}</p>{{end}}<footer class="card-meta">{{with .PublishedOn}}<time>{{.}}</time>{{end}}{{template "tag_chips" .Tags}}</footer></article>{{end}}</div>
+    {{else}}<div class="cards">{{range .Items}}{{template "card" .}}{{end}}</div>{{end}}
+    {{end}}
+  </section>
+  {{end}}
+</article>
+{{end}}

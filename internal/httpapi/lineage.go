@@ -2,8 +2,8 @@ package httpapi
 
 import (
 	"encoding/json"
-	"log"
 	"errors"
+	"log"
 	"net/http"
 	"strings"
 

@@ -1,6 +1,9 @@
 package authz
 
-import "errors"
+import (
+	"errors"
+	"sort"
+)
 
 // Phase 0 contract: workspace collaboration roles. There is no workspace
 // owner and no workspace member role; Organization is the owner tier and
@@ -77,19 +80,20 @@ var memberRoleActions = map[string]map[string]bool{
 		ActionPublicationCancel:      true,
 		ActionPublicationBatch:       true,
 		ActionSiteRead:               true,
-		ActionSiteManage:             true,
+		ActionSiteDesign:             true,
+		ActionSiteLifecycle:          true,
 		ActionAgentApplicationUse:    true,
 		ActionAgentApplicationManage: true,
 		ActionAuditRead:              true,
 	},
 	WorkspaceRoleEditor: {
-		ActionWorkspaceRead:       true,
-		ActionModelRead:           true,
-		ActionTagRead:             true,
-		ActionAssetRead:           true,
-		ActionAssetWrite:          true,
-		ActionAssetConfirm:        true,
-		ActionAssetArchive:        true,
+		ActionWorkspaceRead: true,
+		ActionModelRead:     true,
+		ActionTagRead:       true,
+		ActionAssetRead:     true,
+		ActionAssetWrite:    true,
+		ActionAssetConfirm:  true,
+		ActionAssetArchive:  true,
 		// Publish is "allowed by policy": the matrix grants the action and the
 		// publish command enforces publishing.mode = direct.
 		ActionAssetPublish:        true,
@@ -100,9 +104,10 @@ var memberRoleActions = map[string]map[string]bool{
 		ActionPublicationComment:  true,
 		ActionPublicationCancel:   true, // only own requests; service narrows
 		ActionAgentApplicationUse: true,
-		// Phase 5 sites: every collaboration role may read the site surface;
-		// only admin mutates it (site.manage stays admin-only).
-		ActionSiteRead: true,
+		ActionSiteRead:            true,
+		// G: 站点外观/页面/导航/发布 release 归 editor；建站/停用/域名/删除
+		// 仍是 admin 的 site.lifecycle。
+		ActionSiteDesign: true,
 	},
 	WorkspaceRoleReviewer: {
 		ActionWorkspaceRead:       true,
@@ -197,4 +202,47 @@ func MemberRoleActions(role string) []string {
 // MemberAllowed reports whether the workspace role grants the action.
 func MemberAllowed(role, action string) bool {
 	return memberRoleActions[role][action] || legacyRoleActions[role][action]
+}
+
+// EffectiveMemberActions applies member-level overrides (granted/revoked
+// columns on workspace_members) over the role preset, then strips every
+// human_only action when the member is an agent. The result is the single
+// permission source for both humans and agents (统一方案 A/H/I).
+func EffectiveMemberActions(role string, granted, revoked []string, principalType string) []string {
+	base := MemberRoleActions(role)
+	allowed := make(map[string]bool, len(base)+len(granted))
+	for _, action := range base {
+		allowed[action] = true
+	}
+	for _, action := range granted {
+		if ValidAction(action) {
+			allowed[action] = true
+		}
+	}
+	for _, action := range revoked {
+		delete(allowed, action)
+	}
+	if principalType == "agent" {
+		for action := range allowed {
+			if HumanOnlyAction(action) {
+				delete(allowed, action)
+			}
+		}
+	}
+	result := make([]string, 0, len(allowed))
+	for action := range allowed {
+		result = append(result, action)
+	}
+	sort.Strings(result)
+	return result
+}
+
+// ValidAction reports whether the value is a known action constant.
+func ValidAction(action string) bool {
+	for _, known := range AllActions {
+		if known == action {
+			return true
+		}
+	}
+	return false
 }

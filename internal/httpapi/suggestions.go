@@ -551,14 +551,14 @@ func AssetPrepare(deps Dependencies) http.HandlerFunc {
 		var modelEndpointRevision int64
 		err = deps.Store.Pool.QueryRow(r.Context(), `
 			SELECT aa.id::text, aa.bound_agent_user_id::text, aa.model_endpoint_id::text, me.current_revision
-			FROM content.workspace_agent_applications wa
+			FROM content.workspace_members wa
 			JOIN integration.agent_applications aa
-			  ON aa.organization_id = wa.organization_id AND aa.id = wa.agent_application_id
+			  ON aa.organization_id = wa.organization_id AND aa.bound_agent_user_id = wa.user_id
 			JOIN integration.model_endpoints me
 			  ON me.id = aa.model_endpoint_id AND me.organization_id = aa.organization_id AND me.status = 'active'
 			JOIN integration.model_endpoint_revisions mer
 			  ON mer.model_endpoint_id = me.id AND mer.revision = me.current_revision AND mer.revoked_at IS NULL
-			WHERE wa.organization_id = $1::uuid AND wa.workspace_id = $2::uuid AND wa.enabled = true
+			WHERE wa.organization_id = $1::uuid AND wa.workspace_id = $2::uuid AND wa.principal_type = 'agent'
 			  AND aa.status = 'active' AND aa.runtime_mode = 'workflow' AND aa.workflow_key = 'asset_prepare'
 			ORDER BY aa.created_at, aa.id
 			LIMIT 1

@@ -266,11 +266,11 @@ func (s Service) AgentApplications(ctx context.Context, principal auth.Principal
 	rows, err := s.Store.Pool.Query(ctx, `
 		SELECT aa.id::text, aa.name, aa.model_endpoint_id::text, mer.provider_type,
 		       mer.model_name, aa.runtime_mode, aa.status, aa.capabilities, aa.bound_agent_user_id::text
-		FROM content.workspace_agent_applications wa
-		JOIN integration.agent_applications aa ON aa.organization_id = wa.organization_id AND aa.id = wa.agent_application_id
+		FROM content.workspace_members wa
+		JOIN integration.agent_applications aa ON aa.organization_id = wa.organization_id AND aa.bound_agent_user_id = wa.user_id
 		JOIN integration.model_endpoints me ON me.id = aa.model_endpoint_id AND me.status = 'active'
 		JOIN integration.model_endpoint_revisions mer ON mer.model_endpoint_id = me.id AND mer.revision = me.current_revision AND mer.revoked_at IS NULL
-		WHERE wa.organization_id = $1::uuid AND wa.workspace_id = $2::uuid AND wa.enabled = true AND aa.status = 'active'
+		WHERE wa.organization_id = $1::uuid AND wa.workspace_id = $2::uuid AND wa.principal_type = 'agent' AND aa.status = 'active'
 		ORDER BY aa.name, aa.id
 	`, principal.OrganizationID, workspaceID)
 	if err != nil {

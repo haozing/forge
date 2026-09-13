@@ -307,7 +307,7 @@ func (s Service) ModerateComment(ctx context.Context, principal auth.Principal, 
 	if status != "visible" && status != "rejected" && status != "pending" {
 		return ErrInvalidInput
 	}
-	if err := s.require(ctx, principal, workspaceID, authz.ActionSiteManage); err != nil {
+	if err := s.require(ctx, principal, workspaceID, authz.ActionSiteDesign); err != nil {
 		return err
 	}
 	tag, err := s.Store.Pool.Exec(ctx, `
@@ -332,7 +332,7 @@ func (s Service) ModerateComment(ctx context.Context, principal auth.Principal, 
 
 // DeleteComment removes one comment behind site.manage.
 func (s Service) DeleteComment(ctx context.Context, principal auth.Principal, workspaceID, siteID, commentID string) error {
-	if err := s.require(ctx, principal, workspaceID, authz.ActionSiteManage); err != nil {
+	if err := s.require(ctx, principal, workspaceID, authz.ActionSiteDesign); err != nil {
 		return err
 	}
 	tag, err := s.Store.Pool.Exec(ctx, `
@@ -359,14 +359,10 @@ func (s Service) emitSiteCommentFact(ctx context.Context, principal auth.Princip
 		return
 	}
 	var item Site
-	if err := s.Store.Pool.QueryRow(ctx, `
+	if _, err := scanSiteRow(s.Store.Pool.QueryRow(ctx, `
 		SELECT `+siteColumns+` FROM site.public_sites
-		WHERE organization_id = $1::uuid AND workspace_id = $2::uuid AND id = $3::uuid
-	`, principal.OrganizationID, workspaceID, siteID).Scan(
-		&item.ID, &item.OrganizationID, &item.WorkspaceID, &item.Slug, &item.Name,
-		&item.Domain, &item.Template, &item.DefaultContentScope, &item.Status, &item.Revision,
-		&item.HomepageConfig, &item.NavigationConfig, &item.StyleConfig, &item.CustomCss,
-		&item.CommentsMode, &item.PublishedReleaseID, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		WHERE organization_id = $1::uuid AND workspace_id = $2::uuid AND id = $3::uuid`,
+		principal.OrganizationID, workspaceID, siteID)); err != nil {
 		return
 	}
 	tx, err := s.Store.Pool.Begin(ctx)

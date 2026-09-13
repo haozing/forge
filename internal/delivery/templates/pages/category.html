@@ -1,0 +1,18 @@
+{{define "content"}}
+<div class="category-layout">
+  <nav class="breadcrumbs" aria-label="面包屑">
+    {{range $i, $c := .Crumbs}}{{if $i}}<span aria-hidden="true">›</span>{{end}}<a href="{{.Href}}">{{.Name}}</a>{{end}}
+  </nav>
+  <header class="category-header"><h1 class="category-title">{{.Heading}}</h1></header>
+  {{if .Subcategories}}
+  <section class="subcategories"><h2>子分类</h2>
+    <ul>{{range .Subcategories}}<li><a href="{{.Href}}">{{.Name}}</a><span class="sub-count">{{.Count}}</span></li>{{end}}</ul>
+  </section>
+  {{end}}
+  {{if .Items}}
+  <section class="category-posts"><h2>内容</h2>
+    <div class="related-grid">{{range .Items}}{{template "card" .}}{{end}}</div>
+  </section>
+  {{else}}<p class="empty">该分类下还没有内容。</p>{{end}}
+</div>
+{{end}}

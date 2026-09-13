@@ -33,16 +33,43 @@ func (i *Invalidator) Process(ctx context.Context, organizationID, eventType str
 		if err != nil {
 			return err
 		}
-		// Every site the asset is bound to: detail pages, lists, home, tag
-		// pages, feeds — the union is the whole site, so one row per site.
+		// 1:1 站点（D1）：站点由资产的工作区唯一定位——下线/排除后资产会从
+		// 派生收录视图消失，若按"当前收录"反查会漏失效（缓存滞留旧内容）。
 		tag, err := i.Store.Pool.Exec(ctx, `
 			INSERT INTO delivery.cache_invalidations (organization_id, site_id)
-			SELECT $1::uuid, b.site_id
-			FROM site.site_content_bindings b
-			WHERE b.organization_id = $1::uuid AND b.asset_id = $2::uuid
-			GROUP BY b.site_id
+			SELECT $1::uuid, s.id
+			FROM site.public_sites s
+			WHERE s.organization_id = $1::uuid
+			  AND s.workspace_id = (SELECT workspace_id FROM asset.assets WHERE id = $2::uuid)
+			  AND s.status = 'active'
 		`, organizationID, assetID)
-		return logInvalidation(i.Logf, eventType, tag, err)
+		if err != nil {
+			return logInvalidation(i.Logf, eventType, tag, err)
+		}
+		// C6 反向传播：引用了该资产的页面随发布态变化一并失效。
+		refTag, err := i.Store.Pool.Exec(ctx, `
+			INSERT INTO delivery.cache_invalidations (organization_id, site_id)
+			SELECT DISTINCT $1::uuid, sl.site_id
+			FROM asset.assets target
+			JOIN asset.asset_versions tv
+			  ON tv.organization_id = target.organization_id AND tv.id = target.current_published_version_id
+			JOIN asset.asset_versions v
+			  ON v.organization_id = target.organization_id
+			 AND v.markdown LIKE '%chunzhi-asset://' || target.id::text || '%'
+			JOIN asset.assets src
+			  ON src.organization_id = v.organization_id AND src.id = v.asset_id
+			 AND src.deleted_at IS NULL AND src.current_published_version_id IS NOT NULL
+			JOIN site.site_slugs sl
+			  ON sl.organization_id = src.organization_id AND sl.asset_id = src.id
+			 AND sl.site_id IN (SELECT id FROM site.public_sites
+			                    WHERE organization_id = $1::uuid
+			                      AND workspace_id = src.workspace_id AND status = 'active')
+			WHERE target.id = $2::uuid
+		`, organizationID, assetID)
+		if err != nil {
+			return logInvalidation(i.Logf, eventType+" (references)", refTag, err)
+		}
+		return logInvalidation(i.Logf, eventType, tag, nil)
 	case eventing.EventSiteChanged, eventing.EventSiteBindingChanged, eventing.EventSiteCommentCreated:
 		siteID, err := payloadString(payload, "site_id")
 		if err != nil {

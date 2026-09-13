@@ -14,7 +14,7 @@ import (
 // route), a hard TTL ceiling as the missed-invalidation backstop and a
 // bounded entry count with insertion-order eviction.
 const (
-	CacheKeyPrefix = "page"
+	CacheKeyPrefix       = "page"
 	DefaultCacheTTL      = 300 * time.Second
 	DefaultCacheCapacity = 10000
 )

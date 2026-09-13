@@ -4,13 +4,17 @@
   <h1 class="article-title">{{.Title}}</h1>
   {{with .CoverURL}}<div class="article-cover"><img src="{{.}}?variant=full" srcset="{{.}}?variant=card 640w, {{.}}?variant=full 1280w, {{.}} 1600w" sizes="(max-width: 900px) 100vw, 860px" alt="{{if $.CoverAlt}}{{$.CoverAlt}}{{else}}{{$.Title}}{{end}}" loading="lazy"></div>{{end}}
   <footer class="card-meta article-meta">
-    {{with .PublishedOn}}<time>发布于 {{.}}</time>{{end}}
+    {{if gt .VersionNo 0}}<span class="article-version">v{{.VersionNo}}</span>{{end}}
+    {{with .PublishedOn}}<time datetime="{{.UpdatedISO}}">发布于 {{.}}</time>{{end}}
     {{with .Section}}{{if ne . ""}}<a href="{{$.SectionHref}}">{{.}}</a>{{end}}{{end}}
     {{template "tag_chips" .Tags}}
   </footer>
   {{if and (ne .Site.Style.Sidebar "toc") (gt (len .TOC) 1)}}<nav class="toc"><h2>目录</h2><ul>{{range .TOC}}<li class="toc-l{{.Level}}"><a href="#{{.ID}}">{{.Text}}</a></li>{{end}}</ul></nav>{{end}}
   <div class="article-body">{{noescape .ContentHTML}}</div>
-  {{if .Fields}}<section class="article-fields"><h2>结构化字段</h2><dl>{{range .Fields}}<div class="field-row"><dt>{{.Key}}</dt><dd>{{.Value}}</dd></div>{{end}}</dl></section>{{end}}
+  {{if .Fields}}<section class="article-fields"><h2>结构化字段</h2><dl>{{range .Fields}}<div class="field-row"><dt>{{if .Label}}{{.Label}}{{else}}{{.Key}}{{end}}</dt><dd>{{.Value}}</dd></div>{{end}}</dl></section>{{end}}
+  {{if ge (len .Publications) 2}}<details class="article-history"><summary>更新记录（{{len .Publications}}）</summary>
+    <ol class="history-list">{{range .Publications}}<li class="history-item"><span class="history-version">v{{.VersionNo}}</span><time>{{.PublishedOn}}</time>{{if .AILabel}}<span class="history-provenance">{{.AILabel}}</span>{{end}}{{if .ChangeNote}}<p class="history-note">{{.ChangeNote}}</p>{{end}}</li>{{end}}</ol>
+  </details>{{end}}
   {{if or .Prev .Next}}<nav class="post-neighbors">
     {{with .Prev}}<a class="neighbor prev" href="{{.Href}}" rel="prev"><span class="neighbor-label">上一篇</span><span class="neighbor-title">{{.Title}}</span></a>{{else}}<span></span>{{end}}
     {{with .Next}}<a class="neighbor next" href="{{.Href}}" rel="next"><span class="neighbor-label">下一篇</span><span class="neighbor-title">{{.Title}}</span></a>{{end}}
