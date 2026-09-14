@@ -59,11 +59,11 @@ func (s *Service) ThemePublishedFiles(ctx context.Context, principal auth.Princi
 // ThemeQuery 构造绑定到站点与访客身份的 query 原语实现（引擎 FuncMap 注入）。
 // 预算（调用次数/limit）由 theme.Queries 管；这里只负责数据面：
 // 查询走 latestPosts（绑定视图），模板拿到的每一条都已过三道闸。
-func (s *Service) ThemeQuery(ctx context.Context, principal auth.Principal, workspaceID, siteID string, reader *PublicReader) (theme.QueryFunc, error) {
+func (s *Service) ThemeQuery(ctx context.Context, principal auth.Principal, organizationID, workspaceID, siteID string, reader *PublicReader) (theme.QueryFunc, error) {
 	if reader == nil || s.Store == nil {
 		return nil, fmt.Errorf("theme query: store not wired")
 	}
-	item, err := reader.loadSiteByID(ctx, principal.OrganizationID, siteID)
+	item, err := reader.loadSiteByID(ctx, organizationID, siteID)
 	if err != nil {
 		return nil, err
 	}

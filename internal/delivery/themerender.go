@@ -82,7 +82,7 @@ func (s *Service) themeQueryFn(ctx context.Context, principal auth.Principal, si
 	if s.Sites == nil {
 		return nil
 	}
-	fn, err := s.Sites.ThemeQuery(ctx, principal, siteRow.WorkspaceID, siteRow.ID, s.Reader)
+	fn, err := s.Sites.ThemeQuery(ctx, principal, siteRow.OrganizationID, siteRow.WorkspaceID, siteRow.ID, s.Reader)
 	if err != nil {
 		return nil
 	}

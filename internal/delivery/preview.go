@@ -71,7 +71,7 @@ func (s *Service) RenderPreview(ctx context.Context, principal auth.Principal, w
 
 	// Previews bypass the page cache by construction (no pipeline).
 	render := func(kind string, vm any) (*Response, error) {
-		queryFn, qerr := s.Sites.ThemeQuery(ctx, principal, workspaceID, siteID, s.Reader)
+		queryFn, qerr := s.Sites.ThemeQuery(ctx, principal, row.OrganizationID, workspaceID, siteID, s.Reader)
 		if qerr != nil {
 			return nil, qerr
 		}
