@@ -119,12 +119,60 @@ func TestKnownCapabilitiesCoversG8Vocabulary(t *testing.T) {
 	for _, capability := range KnownCapabilities() {
 		known[capability] = true
 	}
-	for _, want := range []string{"query.read", "asset.read", "asset.write", "site.style", "model.manage", "content.patterns"} {
+	for _, want := range []string{"query.read", "asset.read", "asset.write", "site.style", "site.design", "model.manage", "content.patterns"} {
 		if !known[want] {
 			t.Errorf("KnownCapabilities missing %q", want)
 		}
 	}
 	if known["bogus.capability"] {
 		t.Error("KnownCapabilities must not contain unknown values")
+	}
+}
+
+// TestThemeDesignToolsRegister pins §7.2: the seven theme design tools
+// surface when their handlers are bound, gated on the site.design capability.
+func TestThemeDesignToolsRegister(t *testing.T) {
+	registry := NewRegistry()
+	err := RegisterBuiltins(registry, BuiltinHandlers{
+		ReadTheme:     func(context.Context, map[string]any) (any, error) { return nil, nil },
+		WriteTheme:    func(context.Context, map[string]any) (any, error) { return nil, nil },
+		RenderHTML:    func(context.Context, map[string]any) (any, error) { return nil, nil },
+		PreviewLink:   func(context.Context, map[string]any) (any, error) { return nil, nil },
+		ValidateTheme: func(context.Context, map[string]any) (any, error) { return nil, nil },
+		UpdateSite:    func(context.Context, map[string]any) (any, error) { return nil, nil },
+		ManagePages:   func(context.Context, map[string]any) (any, error) { return nil, nil },
+	})
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	policy := Policy{AllowedCapabilities: map[string]bool{"site.design": true}, AllowLowWrite: true}
+	available, err := registry.Tools(context.Background(), policy)
+	if err != nil {
+		t.Fatalf("tools: %v", err)
+	}
+	names := map[string]bool{}
+	for _, base := range available {
+		if named, ok := base.(tool.InvokableTool); ok {
+			info, _ := named.Info(context.Background())
+			names[info.Name] = true
+		}
+	}
+	for _, want := range []string{"read_theme", "write_theme", "render_html", "preview_link", "validate_theme", "update_site", "manage_pages"} {
+		if !names[want] {
+			t.Errorf("theme tool %q not available under site.design+low-write policy", want)
+		}
+	}
+	// 只读能力不给写工具。
+	readOnly, err := registry.Tools(context.Background(), Policy{AllowedCapabilities: map[string]bool{"site.design": true}})
+	if err != nil {
+		t.Fatalf("tools read-only: %v", err)
+	}
+	for _, base := range readOnly {
+		if named, ok := base.(tool.InvokableTool); ok {
+			info, _ := named.Info(context.Background())
+			if info.Name == "write_theme" || info.Name == "manage_pages" || info.Name == "update_site" {
+				t.Errorf("write tool %q surfaced without low-write grant", info.Name)
+			}
+		}
 	}
 }

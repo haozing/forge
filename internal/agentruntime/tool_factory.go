@@ -17,6 +17,8 @@ import (
 	"agentchunzhi/internal/content"
 	"agentchunzhi/internal/eventing"
 	agentquery "agentchunzhi/internal/query"
+	"agentchunzhi/internal/delivery"
+	"agentchunzhi/internal/site"
 	"agentchunzhi/internal/resourcemodel"
 	"agentchunzhi/internal/review"
 	"agentchunzhi/internal/store"
@@ -32,6 +34,10 @@ type DomainToolFactory struct {
 	// Models resolves the run's pinned structured-output endpoint for the
 	// suggest_display_path tool (nil disables the tool).
 	Models *ModelRegistry
+	// Sites carries the public-site domain surface for the §7.2 theme design
+	// tools (nil disables the whole set). Delivery backs render_html.
+	Sites    *site.Service
+	Delivery *delivery.Service
 	// Reviews carries the scheduled-publish registration for the
 	// publish_asset tool's scheduled_at parameter (nil disables deferral).
 	Reviews *review.Service
@@ -313,6 +319,8 @@ func (f DomainToolFactory) Build(ctx context.Context, scope ReActToolScope, rawP
 			return f.suggestDisplayPath(ctx, scope, stringValue(arguments["title"]), stringValue(arguments["asset_id"]))
 		}
 	}
+	// §7.2 主题设计工具集（Sites 未接线时整体跳过）。
+	f.applySiteThemeTools(&handlers, scope, allowed)
 	registry := runtimetools.NewRegistry()
 	if err := runtimetools.RegisterBuiltins(registry, handlers); err != nil {
 		return nil, runtimetools.Policy{}, err

@@ -29,6 +29,8 @@ type Service struct {
 	Store  *store.Store
 	Events *eventing.EventStore
 	Policy authz.WorkspacePolicyService
+	// PreviewHashSecret 一次性预览 token 的 HMAC 密钥（空 = 禁签发）。
+	PreviewHashSecret string
 }
 
 // Site is the workspace-scoped public site aggregate. HomepageConfig,

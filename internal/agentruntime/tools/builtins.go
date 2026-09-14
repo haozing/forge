@@ -52,6 +52,15 @@ type BuiltinHandlers struct {
 	// write path authorizes through workspace membership).
 	SaveContentPattern  JSONHandler
 	ListContentPatterns JSONHandler
+	// §7.2 theme design tools (站点主题化重构)：读写设计会话沙盒、沙盒渲染、
+	// 一次性预览链接、校验报告、站名、自定义页。发布不在工具集（human_only）。
+	ReadTheme     JSONHandler
+	WriteTheme    JSONHandler
+	RenderHTML    JSONHandler
+	PreviewLink   JSONHandler
+	ValidateTheme JSONHandler
+	UpdateSite    JSONHandler
+	ManagePages   JSONHandler
 }
 
 type builtinSpec struct {
@@ -107,6 +116,13 @@ func builtinSpecs(handlers BuiltinHandlers) []builtinSpec {
 		return &schema.ParameterInfo{Type: schema.String, Desc: description, Required: true}
 	}
 	return []builtinSpec{
+		{name: "read_theme", description: "读取站点设计会话的主题文件集（可按槽位取单文件）", risk: ReadOnly, capabilities: []string{"site.design"}, handler: handlers.ReadTheme, parameters: map[string]*schema.ParameterInfo{"site_id": id("Site ID"), "slot": {Type: schema.String, Desc: "槽位名，缺省返回全部"}}},
+		{name: "write_theme", description: "写入一个主题槽位到设计会话沙盒（整体替换该槽位），写后即编译+扫描并回显问题清单", risk: LowWrite, capabilities: []string{"site.design"}, handler: handlers.WriteTheme, parameters: map[string]*schema.ParameterInfo{"site_id": id("Site ID"), "slot": id("槽位名：layout/home/detail/about/list/section/category/tags/tag_page/search/archive/page/partials/tokens.css/theme.css"), "content": id("槽位完整源码")}},
+		{name: "render_html", description: "编译会话沙盒并渲染指定槽位的完整 HTML（供文本自检）", risk: ReadOnly, capabilities: []string{"site.design"}, handler: handlers.RenderHTML, parameters: map[string]*schema.ParameterInfo{"site_id": id("Site ID"), "slot": {Type: schema.String, Desc: "home | list | detail"}, "display_path": {Type: schema.String, Desc: "detail 槽位必填：内容显示路径"}}},
+		{name: "preview_link", description: "签发一次性预览 token（60 秒、单次消费），返回 iframe 直出路径", risk: ReadOnly, capabilities: []string{"site.design"}, handler: handlers.PreviewLink, parameters: map[string]*schema.ParameterInfo{"site_id": id("Site ID"), "slot": {Type: schema.String, Desc: "缺省 home"}}},
+		{name: "validate_theme", description: "主题编译/扫描/槽位完整性校验报告", risk: ReadOnly, capabilities: []string{"site.design"}, handler: handlers.ValidateTheme, parameters: map[string]*schema.ParameterInfo{"site_id": id("Site ID")}},
+		{name: "update_site", description: "更新站点名称", risk: LowWrite, capabilities: []string{"site.design"}, handler: handlers.UpdateSite, parameters: map[string]*schema.ParameterInfo{"site_id": id("Site ID"), "name": id("新站点名称")}},
+		{name: "manage_pages", description: "自定义页增删改（create/update/delete）", risk: LowWrite, capabilities: []string{"site.design"}, handler: handlers.ManagePages, parameters: map[string]*schema.ParameterInfo{"site_id": id("Site ID"), "action": id("create | update | delete"), "page_id": {Type: schema.String, Desc: "update/delete 必填"}, "slug": {Type: schema.String, Desc: "create 必填"}, "title": {Type: schema.String}, "body_markdown": {Type: schema.String}, "seo_description": {Type: schema.String}, "nav_hidden": {Type: schema.Boolean}, "nav_order": {Type: schema.Integer}}},
 		{name: "search_knowledge", description: "Search authorized published knowledge", risk: ReadOnly, capabilities: []string{"query.read"}, handler: handlers.SearchKnowledge, parameters: map[string]*schema.ParameterInfo{"query": id("Search query"), "limit": {Type: schema.Integer, Desc: "Maximum 50 results"}}},
 		{name: "query_assets", description: "Query authorized assets with server-validated filters", risk: ReadOnly, capabilities: []string{"asset.read"}, handler: handlers.QueryAssets, parameters: map[string]*schema.ParameterInfo{"query": {Type: schema.String}, "limit": {Type: schema.Integer}}},
 		{name: "get_asset", description: "Read one authorized asset", risk: ReadOnly, capabilities: []string{"asset.read"}, handler: handlers.GetAsset, parameters: map[string]*schema.ParameterInfo{"asset_id": id("Asset ID")}},

@@ -104,7 +104,8 @@ func designSessionEndpoints(deps Dependencies) (start, get, patch, apply func(w 
 		}
 }
 
-// previewTokenSign 签发一次性预览 token：HMAC 摘要入库，60 秒 TTL。
+// previewTokenSign 已下沉 site.Service.IssuePreviewToken（preview_token.go）；
+// 消费端校验仍在此处（deps.QueryHashSecret）。
 func previewTokenSign(deps Dependencies, sessionID, siteID, slot string) (nonce string, digest []byte, err error) {
 	nonceBytes := make([]byte, 16)
 	if _, err = crand.Read(nonceBytes); err != nil {
@@ -136,20 +137,12 @@ func previewLinkDesignSession(deps Dependencies) http.HandlerFunc {
 		if slot == "" {
 			slot = "home"
 		}
-		nonce, digest, err := previewTokenSign(deps, sessionID, siteID, slot)
+		token, err := deps.Sites.IssuePreviewToken(r.Context(), principal, workspaceID, siteID, sessionID, slot)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "internal_error")
+			SiteError(w, err, "preview_link_failed")
 			return
 		}
-		if _, err := deps.Store.Pool.Exec(r.Context(), `
-			INSERT INTO site.preview_tokens (digest, organization_id, session_id, site_id, slot, expires_at)
-			SELECT $1::bytea, organization_id, id, $3::uuid, $4, now() + interval '60 seconds'
-			FROM site.design_sessions WHERE id = $2::uuid
-		`, digest, sessionID, siteID, slot); err != nil {
-			writeError(w, http.StatusInternalServerError, "internal_error")
-			return
-		}
-		writeData(w, r, http.StatusOK, map[string]string{"token": nonce, "slot": slot})
+		writeData(w, r, http.StatusOK, map[string]string{"token": token, "slot": slot})
 	}
 }
 

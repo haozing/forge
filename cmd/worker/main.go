@@ -29,6 +29,7 @@ import (
 	"agentchunzhi/internal/retrieval"
 	"agentchunzhi/internal/review"
 	"agentchunzhi/internal/store"
+	"agentchunzhi/internal/site"
 	"agentchunzhi/internal/tag"
 	"agentchunzhi/internal/transcription"
 	"agentchunzhi/internal/worker"
@@ -163,10 +164,16 @@ func main() {
 		QueryTimeout:    cfg.RetrievalQueryTimeout,
 	}
 	reviewService := review.Service{Store: db, Events: &events, Policy: authz.WorkspacePolicyService{Store: db}}
+	// §7.2 主题设计工具集：runs 里 agent 需要 site 域（会话沙盒/预览 token/
+	// 自定义页）与 delivery 域（render_html 的沙盒渲染）。
+	workerSites := &site.Service{Store: db, Events: &events, Policy: authz.WorkspacePolicyService{Store: db}, PreviewHashSecret: cfg.QueryHashSecret}
+	workerReader := &site.PublicReader{Store: db, Query: queryService, Facets: tag.FacetService{Store: db}}
+	workerDelivery := delivery.NewService(db, workerReader, workerSites, 0, log.Printf)
 	reactProcessor := &agentruntime.PersistentReActService{
 		Store: db, Cipher: checkpointCipher, Models: modelRegistry,
 		ToolFactory: agentruntime.DomainToolFactory{
 			Store: db, Events: events, Query: queryService, Models: modelRegistry,
+			Sites: workerSites, Delivery: workerDelivery,
 		},
 		Coordinator: agentruntime.Coordinator{Store: db},
 	}
