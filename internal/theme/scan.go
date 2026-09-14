@@ -1,9 +1,10 @@
 package theme
 
 // scan.go — 模板/CSS 源码安全扫描（§5.3）。作用域：只扫 agent 写入与 apply
-// 的文件；内置默认主题是可信基线不参与。M1 用规则扫描（字符串 + 正则），
-// 错误按「文件:行:规则」结构化返回供 agent 自修复；误伤升级路径是换
-// golang.org/x/net/html 解析器，调用方无感。
+// 的文件；内置默认主题是可信基线不参与。主扫描走 HTML 解析器
+//（scan_html.go，§5.3.1：属性值按「浏览器解码后」语义判定，正文文字不误伤），
+// 叠加模板动作函数白名单与 noescape 禁令；错误按「文件:行:规则」结构化
+// 返回供 agent 自修复。
 
 import (
 	"regexp"
@@ -11,21 +12,6 @@ import (
 )
 
 var (
-	// sepScheme 匹配 scheme 与冒号之间「浏览器解码后」的变体：空白、HTML
-	// 字符引用（&#58; / &#x3a; / 无分号形式，常用于把冒号编码掉）、以及
-	// scheme 字母间的 \t\r\n（浏览器剥除 URL 内这些字符）。静态模板文本
-	// 不会被二次转义，扫描必须按解码后的视角看源码；结尾的字符引用本身
-	// 可以就是那个冒号。
-	sepScheme   = `(?:\s|&#[xX]?[0-9a-fA-F]+;?)*(?::|&#[xX]?[0-9a-fA-F]+;?)`
-	reScript    = regexp.MustCompile(`(?i)<\s*script`)
-	reEventAttr = regexp.MustCompile(`(?i)\son[a-z]+\s*=`)
-	// scheme 字母间允许 \t\r\n（浏览器剥除 URL 内这些字符后仍是 javascript:）。
-	reJSURL      = regexp.MustCompile(`(?i)j\s*a\s*v\s*a\s*s\s*c\s*r\s*i\s*p\s*t` + sepScheme)
-	reDataHTML   = regexp.MustCompile(`(?i)data` + sepScheme + `text\s*/\s*html`)
-	reDangerTag  = regexp.MustCompile(`(?i)<\s*(iframe|object|embed)\b`)
-	reFormTag    = regexp.MustCompile(`(?i)<\s*form\b`)
-	reFormGet    = regexp.MustCompile(`(?i)method\s*=\s*["']?get["']?`)
-	reFormAction = regexp.MustCompile(`(?i)action\s*=\s*["']?(/|\{\{)`)
 	reCSSImport  = regexp.MustCompile(`(?i)@\s*import`)
 	reCSSURL     = regexp.MustCompile(`(?i)url\s*\(\s*['"]?([^'")]+)`)
 	reNoescape   = regexp.MustCompile(`noescape`)
@@ -33,43 +19,18 @@ var (
 	reTemplateFn = regexp.MustCompile(`\{\{-?\s*([a-zA-Z_][a-zA-Z0-9_]*)`)
 )
 
-// blockedHandlers 是禁止出现的标签/属性规则（模板文件）。
-var blockedRules = []struct {
-	rule string
-	re   *regexp.Regexp
-	deny string
-}{
-	{"script_tag", reScript, "模板禁止 <script>（脚本经 {{searchIsland}} 白名单输出）"},
-	{"event_attr", reEventAttr, "模板禁止 on* 事件属性"},
-	{"js_url", reJSURL, "禁止 javascript: URL"},
-	{"data_html", reDataHTML, "禁止 data:text/html"},
-	{"danger_tag", reDangerTag, "模板禁止 iframe/object/embed"},
-}
-
 func lineOf(src string, offset int) int {
 	return 1 + strings.Count(src[:offset], "\n")
 }
 
 func scanTemplate(name, src string) []Problem {
 	var out []Problem
-	for _, rule := range blockedRules {
-		for _, loc := range rule.re.FindAllStringIndex(src, -1) {
-			out = append(out, Problem{File: name, Line: lineOf(src, loc[0]), Rule: rule.rule, Detail: rule.deny})
-		}
-	}
-	// <form>：仅允许 method=get + 站内相对 action（默认主题搜索框形态）。
-	for _, loc := range reFormTag.FindAllStringIndex(src, -1) {
-		end := loc[1]
-		if close := strings.Index(src[loc[1]:], ">"); close >= 0 {
-			end = loc[1] + close
-		}
-		tag := src[loc[0]:end]
-		if !reFormGet.MatchString(tag) || !reFormAction.MatchString(tag) {
-			out = append(out, Problem{File: name, Line: lineOf(src, loc[0]), Rule: "form_rule",
-				Detail: `<form> 仅允许 method="get" 且 action 为站内相对路径`})
-		}
-	}
-	// noescape 永久不在白名单（XSS 边界，§4.2）。
+	// §5.3.1：主扫描走 HTML 解析器——属性值已完成字符引用解码、事件属性
+	// /URL scheme/form 约束按语义判断。正文文字里的 "javascript:"、
+	// "onclick=" 不是威胁（浏览器只在属性/标签位解析它们），不叠加正则
+	// 兜底，避免把文档性文字误判为攻击。
+	out = append(out, scanTemplateParsed(name, src)...)
+	// noescape 永久不在白名单（XSS 边界，§4.2）：任何位置出现即拒。
 	for _, loc := range reNoescape.FindAllStringIndex(src, -1) {
 		out = append(out, Problem{File: name, Line: lineOf(src, loc[0]), Rule: "noescape_forbidden",
 			Detail: "正文 HTML 由服务端净化并已按 template.HTML 传入，禁止 noescape"})

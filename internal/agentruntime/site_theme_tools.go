@@ -215,8 +215,12 @@ func (f DomainToolFactory) applySiteThemeTools(handlers *runtimetools.BuiltinHan
 		input := site.UpdateSiteInput{}
 		if value, ok := arguments["name"].(string); ok && value != "" {
 			input.Name = &value
-		} else {
-			return nil, errors.New("name is required")
+		}
+		if value, ok := arguments["description"].(string); ok {
+			input.Description = &value
+		}
+		if input.Name == nil && input.Description == nil {
+			return nil, errors.New("name or description is required")
 		}
 		return sites.UpdateSite(ctx, principal, workspaceID, siteID, fmt.Sprintf("%d", row.Revision), input)
 	})

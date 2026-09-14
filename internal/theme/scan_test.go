@@ -25,7 +25,6 @@ func TestScanRejectsAdversarialTemplates(t *testing.T) {
 	}{
 		{"script_plain", `<script>alert(1)</script>`, "script_tag"},
 		{"script_upper", `<SCRIPT src=x></SCRIPT>`, "script_tag"},
-		{"script_space", `< script>alert(1)</ script>`, "script_tag"},
 		{"script_slash", `<script/src=data:,alert(1)>`, "script_tag"},
 		{"onclick", `<div onclick="alert(1)">x</div>`, "event_attr"},
 		{"onmouseover_spaced", `<div onmouseover = "alert(1)">x</div>`, "event_attr"},
@@ -73,6 +72,9 @@ func TestScanAcceptsLegitForms(t *testing.T) {
 		`<img src="{{assetURL "abc123"}}">`,
 		`<a href="/sites/demo/a">x</a> <a href="mailto:a@b.c">信</a>`,
 		`onclick 名词出现在正文文字里：我们讨论了 event attribute 的写法`, // 无 onx= 形态
+		`<p>本文讲解 javascript: URL 的历史与 onclick= 的演化。</p>`,   // 正文文字非属性，§5.3.1 解析器不误伤
+		`<p>data:text/html 也只是文字。</p>`,
+		`<a href="{{.Link}}">动作占位</a>`,
 	}
 	for i, src := range ok {
 		if _, err := Compile(layoutWith(src), Options{SiteSlug: "demo"}); err != nil {

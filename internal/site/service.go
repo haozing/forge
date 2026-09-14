@@ -52,6 +52,8 @@ type Site struct {
 	LogoAttachmentID        string `json:"logo_attachment_id"`
 	FaviconAttachmentID     string `json:"favicon_attachment_id"`
 	SocialImageAttachmentID string `json:"social_image_attachment_id"`
+	// 站点级描述（§1.3/§7.3）：公开首页 meta description 的兜底来源。
+	Description string `json:"description"`
 	// 多语言（D11）：默认语言 + 启用语言集合 + 回退开关。
 	DefaultLocale     string   `json:"default_locale"`
 	EnabledLocales    []string `json:"enabled_locales"`
@@ -89,6 +91,7 @@ type CreateSiteInput struct {
 // document deep-merged over the stored one (null leaves reset to preset).
 type UpdateSiteInput struct {
 	Name                *string
+	Description         *string
 	Domain              *string
 	DefaultContentScope *string
 	HomepageConfig      *json.RawMessage
@@ -157,7 +160,7 @@ func (s Service) require(ctx context.Context, principal auth.Principal, workspac
 	return nil
 }
 
-const siteColumns = `id::text, organization_id::text, workspace_id::text, slug, name,
+const siteColumns = `id::text, organization_id::text, workspace_id::text, slug, name, description,
 	COALESCE(domain, ''), default_content_scope, status, revision,
 	default_locale, enabled_locales, fallback_to_default, comments_mode,
 	published_release_id::text, created_at, updated_at,
@@ -168,7 +171,7 @@ const siteColumns = `id::text, organization_id::text, workspace_id::text, slug, 
 func scanSiteRow(row interface{ Scan(...any) error }) (Site, error) {
 	var item Site
 	err := row.Scan(&item.ID, &item.OrganizationID, &item.WorkspaceID, &item.Slug, &item.Name,
-		&item.Domain, &item.DefaultContentScope, &item.Status, &item.Revision,
+		&item.Description, &item.Domain, &item.DefaultContentScope, &item.Status, &item.Revision,
 		&item.DefaultLocale, &item.EnabledLocales, &item.FallbackToDefault,
 		&item.CommentsMode, &item.PublishedReleaseID, &item.CreatedAt, &item.UpdatedAt,
 		&item.LogoAttachmentID, &item.FaviconAttachmentID, &item.SocialImageAttachmentID,
@@ -521,6 +524,9 @@ func applySiteUpdate(ctx context.Context, tx pgx.Tx, principal auth.Principal, w
 	}
 	if input.Name != nil {
 		sets = append(sets, "name = "+arg(name))
+	}
+	if input.Description != nil {
+		sets = append(sets, "description = "+arg(strings.TrimSpace(*input.Description)))
 	}
 	if input.Domain != nil {
 		sets = append(sets, "domain = NULLIF("+arg(domain)+", '')")

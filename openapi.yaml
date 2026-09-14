@@ -6435,6 +6435,7 @@ components:
         workspace_id: { type: string, format: uuid }
         slug: { type: string }
         name: { type: string }
+        description: { type: string, description: '站点级描述：公开首页 meta description 兜底' }
         domain: { type: string }
         default_content_scope: { type: string, enum: [public, organization, workspace] }
         logo_attachment_id: { type: string, format: uuid, nullable: true, description: '站点 Logo 图片附件（image/*）' }

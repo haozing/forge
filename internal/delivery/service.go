@@ -352,7 +352,11 @@ func (s *Service) Home(ctx context.Context, addr string, principal auth.Principa
 		vm.Site = chrome(facts, "home")
 		vm.Queries = queries
 		vm.Title = facts.Site.Name
-		vm.Description = facts.Site.Name
+		// 站点描述（§7.3）优先；空则回退站点名（meta description 不留空）。
+		vm.Description = facts.Site.Description
+		if vm.Description == "" {
+			vm.Description = facts.Site.Name
+		}
 		vm.Canonical = baseURL + routePath
 		vm.NoIndex = !vm.Site.ScopePublic
 		return renderOutput{kind: "home", vm: vm, noIndex: vm.NoIndex}, nil

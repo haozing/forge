@@ -75,6 +75,7 @@ type CreateSiteRequest struct {
 
 type UpdateSiteRequest struct {
 	Name                    *string          `json:"name"`
+	Description             *string          `json:"description"`
 	Domain                  *string          `json:"domain"`
 	DefaultContentScope     *string          `json:"default_content_scope"`
 	DefaultLocale           *string          `json:"default_locale"`
@@ -173,6 +174,7 @@ func SiteResource(deps Dependencies) http.HandlerFunc {
 			item, err := deps.Sites.UpdateSite(r.Context(), principal, workspaceID, siteID,
 				expectedRevisionFromIfMatch(r), site.UpdateSiteInput{
 					Name:                    input.Name,
+					Description:             input.Description,
 					Domain:                  input.Domain,
 					DefaultContentScope:     input.DefaultContentScope,
 					DefaultLocale:           input.DefaultLocale,

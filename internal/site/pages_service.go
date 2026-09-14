@@ -240,7 +240,7 @@ func (s *Service) siteRowByID(ctx context.Context, organizationID, siteID string
 	err := s.Store.Pool.QueryRow(ctx, `SELECT `+siteColumns+`
 		FROM site.public_sites
 		WHERE organization_id = $1::uuid AND id = $2::uuid
-	`, organizationID, siteID).Scan(&item.ID, &item.OrganizationID, &item.WorkspaceID, &item.Slug, &item.Name,
+	`, organizationID, siteID).Scan(&item.ID, &item.OrganizationID, &item.WorkspaceID, &item.Slug, &item.Name, &item.Description,
 		&item.Domain, &item.DefaultContentScope, &item.Status, &item.Revision,
 		&item.DefaultLocale, &item.EnabledLocales, &item.FallbackToDefault,
 		&item.CommentsMode, &item.PublishedReleaseID, &item.CreatedAt, &item.UpdatedAt,
