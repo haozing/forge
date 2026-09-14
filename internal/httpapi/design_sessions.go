@@ -189,6 +189,7 @@ func previewDesignSession(deps Dependencies) http.HandlerFunc {
 			RETURNING session_id::text
 		`, digest, sessionID, siteID, slot).Scan(&sessionRef)
 		if errors.Is(err, pgx.ErrNoRows) {
+			log.Printf("preview token consumed 0 rows: session=%s slot=%s token=%s", sessionID, slot, token)
 			writeError(w, http.StatusUnauthorized, "preview_token_invalid")
 			return
 		}
