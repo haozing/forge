@@ -397,7 +397,10 @@ func (f DomainToolFactory) effectiveFloorRole(ctx context.Context, scope ReActTo
 		return role
 	}
 	agentRole := role("agent", scope.AgentUserID)
-	initiatorRole := role("member", scope.PrincipalID)
+	// principal_type 的词表是 human|agent（0031 CHECK）；发起人是 human。
+	// 曾经误写 'member' 导致永远查不到发起人成员行、floor 恒降级 viewer，
+	// 全部写能力工具（建模/资产/站点设计）被拒。
+	initiatorRole := role("human", scope.PrincipalID)
 	if rank[agentRole] <= rank[initiatorRole] {
 		return agentRole
 	}
