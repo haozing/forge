@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"time"
 
 	"agentchunzhi/internal/auth"
@@ -74,6 +75,8 @@ func (s *Service) ThemeQuery(ctx context.Context, principal auth.Principal, orga
 		}
 		visitor := reader.visitor(ctx, item, principal)
 		posts, err := reader.latestPosts(ctx, item, visitor, params.Model, params.Limit, "")
+		fmt.Fprintf(os.Stderr, "THEMEQ model=%s limit=%d posts=%d err=%v", params.Model, params.Limit, len(posts), err)
+
 		if err != nil {
 			return nil, err
 		}
