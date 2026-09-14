@@ -137,7 +137,12 @@ func validID(value string) bool {
 // workspace 404 from denial 403 through requireWorkspaceAction); every
 // site method calls it before touching SQL.
 func (s Service) require(ctx context.Context, principal auth.Principal, workspaceID, action string) error {
-	if principal.UserType != auth.UserTypeMember || s.Store == nil || s.Store.Pool == nil {
+	// agent 成员（统一方案 A/B）与人同域判权：agent 路径在 Require 内
+	// 走角色预设 ± 覆写并剥 human_only 动作；这里只拦未授权主体类型。
+	if principal.UserType != auth.UserTypeMember && principal.UserType != auth.UserTypeAgent {
+		return ErrForbidden
+	}
+	if s.Store == nil || s.Store.Pool == nil {
 		return ErrForbidden
 	}
 	if s.Policy.Store == nil {
