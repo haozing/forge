@@ -85,5 +85,9 @@ func TestDefaultThemeRendersEverySlot(t *testing.T) {
 		if strings.Contains(sb.String(), "//sites/") {
 			t.Errorf("slot %s produced protocol-relative //sites/ href (double-prefix bug)", tc.slot)
 		}
+		// SEO 基线：每个页面槽位恰好一个 h1（§9：SEO 回归必须绿）。
+		if h1 := strings.Count(sb.String(), "<h1"); h1 != 1 {
+			t.Errorf("slot %s renders %d h1 elements, want exactly 1", tc.slot, h1)
+		}
 	}
 }

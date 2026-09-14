@@ -1,5 +1,6 @@
 {{define "content"}}
 <div class="home">
+  <h1 class="home-title">{{.Site.Name}}</h1>
   {{if .Items}}
   <div class="cards">
     {{range .Items}}{{template "card" .}}{{end}}
