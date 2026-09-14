@@ -117,11 +117,16 @@ func (s Service) ListReleases(ctx context.Context, principal auth.Principal, wor
 // release and moves the published pointer. Publishing bumps the site revision
 // so D4 ETags and the delivery release_rev cache keys rotate. site.site_changed
 // is emitted with action "released"/"rolled_back".
-func (s Service) PublishRelease(ctx context.Context, principal auth.Principal, workspaceID, siteID, baseReleaseID string) (Release, error) {
+// explicitThemeRevID 携带可选 theme_revision_id（§8）：显式钉住某主题修订版；
+// 空值 = 沿用站点当前 published 指针（仅内容快照）。显式钉住时校验归属本站。
+func (s Service) PublishRelease(ctx context.Context, principal auth.Principal, workspaceID, siteID, baseReleaseID, explicitThemeRevID string) (Release, error) {
 	if !validID(workspaceID) || !validID(siteID) {
 		return Release{}, ErrInvalidInput
 	}
 	if baseReleaseID != "" && !validID(baseReleaseID) {
+		return Release{}, ErrInvalidInput
+	}
+	if explicitThemeRevID != "" && !validID(explicitThemeRevID) {
 		return Release{}, ErrInvalidInput
 	}
 	if err := s.require(ctx, principal, workspaceID, authz.ActionSiteDesign); err != nil {
@@ -159,8 +164,21 @@ func (s Service) PublishRelease(ctx context.Context, principal auth.Principal, w
 		}
 		action = "rolled_back"
 	} else {
+		themeRev := current.PublishedThemeRevisionID
+		if explicitThemeRevID != "" {
+			// 显式钉住：修订版必须属于本站（防跨站引用别人的主题）。
+			var owner string
+			if err := tx.QueryRow(ctx, `
+				SELECT site_id::text FROM site.site_theme_revisions WHERE id = $1::uuid
+			`, explicitThemeRevID).Scan(&owner); errors.Is(err, pgx.ErrNoRows) || (err == nil && owner != siteID) {
+				return Release{}, ErrInvalidInput
+			} else if err != nil {
+				return Release{}, fmt.Errorf("load theme revision: %w", err)
+			}
+			themeRev = explicitThemeRevID
+		}
 		snapshot = ReleaseConfig{
-			ThemeRevisionID: current.PublishedThemeRevisionID,
+			ThemeRevisionID: themeRev,
 			CommentsMode:    current.CommentsMode,
 		}
 	}

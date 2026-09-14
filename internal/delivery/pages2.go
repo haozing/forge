@@ -63,10 +63,7 @@ func (s *Service) Archive(ctx context.Context, addr string, principal auth.Princ
 			items = append(items, page.Items...)
 			cursor = page.NextCursor
 		}
-		vm := struct {
-			Page
-			Years []ArchiveYearVM
-		}{Page: Page{Kind: "archive"}}
+		vm := ArchiveVM{Page: Page{Kind: "archive"}}
 		vm.Years = groupArchive(slug, items, 160)
 		vm.Site = chrome(facts, "archive")
 		vm.Queries = queries

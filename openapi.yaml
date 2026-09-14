@@ -3245,7 +3245,7 @@ paths:
     post:
       tags: [sites]
       operationId: publishSiteRelease
-      description: 发布不可变配置快照（{homepage_config,navigation_config,style_config}）；带 base_release_id 时按历史快照重发（回退=拨指针，新 Release 留审计）。发布后公开渲染只读快照，缓存 release_rev 整体换代
+      description: 发布不可变内容快照（收录状态 + 主题修订版引用 + 评论策略）；带 base_release_id 时按历史快照重发（回退=拨指针，新 Release 留审计）。可选 theme_revision_id 显式钉住主题修订版；缺省沿用站点当前已发布主题。发布后公开渲染只读快照，缓存 release_rev 整体换代
       parameters:
         - $ref: '#/components/parameters/WorkspaceId'
         - $ref: '#/components/parameters/SiteId'
@@ -3258,6 +3258,7 @@ paths:
               type: object
               properties:
                 base_release_id: { type: string, format: uuid, description: 回退目标历史 Release；缺省取当前工作配置 }
+                theme_revision_id: { type: string, format: uuid, description: 可选；显式钉住的主题修订版（须属于本站）；缺省沿用当前已发布主题 }
       responses:
         '201': { description: 已发布, content: { application/json: { schema: { $ref: '#/components/schemas/Envelope' } } } }
         '404': { description: base_release_id 不存在（release_not_found） }

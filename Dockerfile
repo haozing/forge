@@ -18,11 +18,6 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/agentch
 
 FROM ${GO_BASE_IMAGE} AS runtime
 
-# D 截图池（方案 §10.2）：chromium 供 RENDERER_ENABLED=true 时设计会话
-# observe 截图；fonts-noto-cjk 保证中文内容截图不出现豆腐块。
-# chromium 以 --no-sandbox 运行（见 internal/screenshot），需 HOME 可写。
-RUN sed -i "s|deb.debian.org|mirrors.tuna.tsinghua.edu.cn|g" /etc/apt/sources.list /etc/apt/sources.list.d/*.sources || true; apt-get update     && apt-get install -y --no-install-recommends chromium fonts-noto-cjk     && rm -rf /var/lib/apt/lists/*
-
 ENV HOME=/tmp
 
 WORKDIR /app

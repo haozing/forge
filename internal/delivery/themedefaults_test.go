@@ -67,10 +67,7 @@ func TestDefaultThemeRendersEverySlot(t *testing.T) {
 		{theme.SlotTagPage, TagPageVM{Page: pageOf("tag_page"), TagKey: "go", TagName: "Go", Items: []CardVM{card()}}, "Go"},
 		{theme.SlotSearch, SearchVM{Page: pageOf("search"), Query: "镜头"}, "镜头"},
 		{theme.SlotPage, CustomPageVM{Page: pageOf("page"), Heading: "自定义页", ContentHTML: "<p>自定义内容</p>"}, "自定义内容"},
-		{theme.SlotArchive, struct {
-			Page
-			Years []ArchiveYearVM
-		}{Page: pageOf("archive"), Years: []ArchiveYearVM{{Year: "2026", Months: []ArchiveMonthVM{{Month: "2026-09", Label: "09 月", Items: []CardVM{card()}}}}}},
+		{theme.SlotArchive, ArchiveVM{Page: pageOf("archive"), Years: []ArchiveYearVM{{Year: "2026", Months: []ArchiveMonthVM{{Month: "2026-09", Label: "09 月", Items: []CardVM{card()}}}}}},
 			"2026"},
 	}
 	for _, tc := range cases {

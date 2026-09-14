@@ -221,6 +221,12 @@ type CommentVM struct {
 	Created string
 }
 
+// ArchiveVM renders the year/month archive page (§4.1 具名化).
+type ArchiveVM struct {
+	Page
+	Years []ArchiveYearVM
+}
+
 // ArchiveYearVM groups the archive listing (二期 §7.2).
 type ArchiveYearVM struct {
 	Year   string

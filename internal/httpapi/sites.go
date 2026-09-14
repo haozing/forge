@@ -393,12 +393,13 @@ func SiteReleases(deps Dependencies) http.HandlerFunc {
 				return
 			}
 			var input struct {
-				BaseReleaseID string `json:"base_release_id"`
+				BaseReleaseID   string `json:"base_release_id"`
+				ThemeRevisionID string `json:"theme_revision_id"`
 			}
 			if !decodeBody(w, r, &input, 4096) {
 				return
 			}
-			item, err := deps.Sites.PublishRelease(r.Context(), principal, workspaceID, siteID, input.BaseReleaseID)
+			item, err := deps.Sites.PublishRelease(r.Context(), principal, workspaceID, siteID, input.BaseReleaseID, input.ThemeRevisionID)
 			if err != nil {
 				SiteError(w, err, "slug_conflict")
 				return
