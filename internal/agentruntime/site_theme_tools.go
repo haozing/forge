@@ -41,12 +41,13 @@ func themeFilesMap(raw json.RawMessage) (map[string]string, error) {
 
 // applySiteThemeTools 在 Sites 域已接线时填充 §7.2 的七个工具 handler；
 // 每个工具先过 allowed("site.design") 交集再进域逻辑。
-func (f DomainToolFactory) applySiteThemeTools(handlers *runtimetools.BuiltinHandlers, scope ReActToolScope, allowed func(ctx context.Context, action string) ([]string, error)) {
+func (f DomainToolFactory) applySiteThemeTools(handlers *runtimetools.BuiltinHandlers, scope ReActToolScope, principal auth.Principal, allowed func(ctx context.Context, action string) ([]string, error)) {
 	if f.Sites == nil {
 		return
 	}
+	// principal 必须复用 Build 里已补载 Capabilities 的那个：站点域
+	// Require 的能力门会校验 principal.Capabilities。
 	sites := f.Sites
-	principal := auth.Principal{OrganizationID: scope.OrganizationID, UserID: scope.AgentUserID, UserType: "agent"}
 	workspaceID := scope.WorkspaceID
 	gate := func(handler runtimetools.JSONHandler) runtimetools.JSONHandler {
 		return func(ctx context.Context, arguments map[string]any) (any, error) {
