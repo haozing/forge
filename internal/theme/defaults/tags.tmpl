@@ -1,6 +1,6 @@
 {{define "content"}}
 <div class="tags-page">
   <h1>{{i18n "tags"}}</h1>
-  <div>{{range .Tags}}<a class="tag-chip" href="/{{.Href}}">{{.DisplayName}} <span class="count">{{.Count}}</span></a>{{end}}</div>
+  <div>{{range .Tags}}<a class="tag-chip" href="{{.Href}}">{{.DisplayName}} <span class="count">{{.Count}}</span></a>{{end}}</div>
 </div>
 {{end}}

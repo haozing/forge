@@ -8,7 +8,7 @@
   {{if .ShowTagCloud}}
   <section class="tag-cloud">
     <h2>{{i18n "tags"}}</h2>
-    {{range .TagCloud}}<a class="tag-chip" href="/{{.Href}}">{{.DisplayName}} <span class="count">{{.Count}}</span></a>{{end}}
+    {{range .TagCloud}}<a class="tag-chip" href="{{.Href}}">{{.DisplayName}} <span class="count">{{.Count}}</span></a>{{end}}
   </section>
   {{end}}
 </div>
