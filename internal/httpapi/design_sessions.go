@@ -203,7 +203,14 @@ func previewDesignSession(deps Dependencies) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		input := delivery.PreviewInput{Slot: slot}
+		// 沙盒文件集 = 会话的 files；缺失（理论不可达：token 消费已绑定
+		// 会话行）时回落 published 主题。
+		var files json.RawMessage
+		_ = deps.Store.Pool.QueryRow(r.Context(), `
+			SELECT files FROM site.design_sessions
+			WHERE id = $1::uuid AND site_id = $2::uuid
+		`, sessionID, siteID).Scan(&files)
+		input := delivery.PreviewInput{Slot: slot, Files: files}
 		resp, err := service.RenderPreview(r.Context(), principal, workspaceID, siteID, input)
 		if err != nil {
 			SiteError(w, err, "preview_failed")
