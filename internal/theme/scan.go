@@ -11,10 +11,17 @@ import (
 )
 
 var (
-	reScript     = regexp.MustCompile(`(?i)<\s*script`)
-	reEventAttr  = regexp.MustCompile(`(?i)\son[a-z]+\s*=`)
-	reJSURL      = regexp.MustCompile(`(?i)javascript\s*:`)
-	reDataHTML   = regexp.MustCompile(`(?i)data:\s*text/html`)
+	// sepScheme 匹配 scheme 与冒号之间「浏览器解码后」的变体：空白、HTML
+	// 字符引用（&#58; / &#x3a; / 无分号形式，常用于把冒号编码掉）、以及
+	// scheme 字母间的 \t\r\n（浏览器剥除 URL 内这些字符）。静态模板文本
+	// 不会被二次转义，扫描必须按解码后的视角看源码；结尾的字符引用本身
+	// 可以就是那个冒号。
+	sepScheme   = `(?:\s|&#[xX]?[0-9a-fA-F]+;?)*(?::|&#[xX]?[0-9a-fA-F]+;?)`
+	reScript    = regexp.MustCompile(`(?i)<\s*script`)
+	reEventAttr = regexp.MustCompile(`(?i)\son[a-z]+\s*=`)
+	// scheme 字母间允许 \t\r\n（浏览器剥除 URL 内这些字符后仍是 javascript:）。
+	reJSURL      = regexp.MustCompile(`(?i)j\s*a\s*v\s*a\s*s\s*c\s*r\s*i\s*p\s*t` + sepScheme)
+	reDataHTML   = regexp.MustCompile(`(?i)data` + sepScheme + `text\s*/\s*html`)
 	reDangerTag  = regexp.MustCompile(`(?i)<\s*(iframe|object|embed)\b`)
 	reFormTag    = regexp.MustCompile(`(?i)<\s*form\b`)
 	reFormGet    = regexp.MustCompile(`(?i)method\s*=\s*["']?get["']?`)
