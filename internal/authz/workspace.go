@@ -107,12 +107,9 @@ func (p WorkspacePolicyService) Require(ctx context.Context, principal auth.Prin
 			return Scope{}, fmt.Errorf("load agent membership: %w", err)
 		}
 		effective := EffectiveMemberActions(role, granted, revoked, principal.UserType)
-		if !containsAction(effective, action) {
-			// human_only 或预设/覆写未授予：单一答案来源，直接拒绝。
-			return Scope{}, ErrWorkspaceForbidden
-		}
-		// 模型级策略行（workspace 级优先于 org 级）与能力清单作为附加授予源
-		// ——保留既有 C11 语义；角色基线不满足时上面已经拒绝。
+		// 模型级策略行（workspace 级优先于 org 级）与能力清单是**附加授予
+		// 源**（并集），不是对角色预设的附加要求：此前实现成 AND 门，
+		// editor 预设的 site.read 等动作被自家能力清单反向卡死。
 		var policyActions []string
 		if resourceModelID != "" {
 			_ = p.Store.Pool.QueryRow(ctx, `
@@ -126,7 +123,13 @@ func (p WorkspacePolicyService) Require(ctx context.Context, principal auth.Prin
 				LIMIT 1
 			`, principal.OrganizationID, workspaceID, principal.UserID, resourceModelID).Scan(&policyActions)
 		}
-		if !containsAction(policyActions, action) && !containsAction(principal.Capabilities, action) {
+		if !containsAction(effective, action) &&
+			!containsAction(policyActions, action) &&
+			!containsAction(principal.Capabilities, action) {
+			return Scope{}, ErrWorkspaceForbidden
+		}
+		// human_only 是任何授予来源都不可越的底线。
+		if HumanOnlyAction(action) {
 			return Scope{}, ErrWorkspaceForbidden
 		}
 		return Scope{WorkspaceID: workspaceID, ResourceModelID: resourceModelID, Role: role, AllowedActions: effective}, nil
