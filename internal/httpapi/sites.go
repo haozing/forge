@@ -7,6 +7,7 @@ package httpapi
 // lives inside internal/site.
 
 import (
+	"log"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -58,6 +59,9 @@ func SiteError(w http.ResponseWriter, err error, conflictCode string) {
 	case errors.Is(err, site.ErrForbidden):
 		writeError(w, http.StatusForbidden, "action_not_allowed")
 	default:
+		// 未映射错误不留日志就是盲区（§7.2 工具链验收时因此排查过久）：
+		// 打出错误链与请求标识再返回 500。
+		log.Printf("site unmapped error: %v", err)
 		writeError(w, http.StatusInternalServerError, "internal_error")
 	}
 }
