@@ -51,6 +51,16 @@ func (f DomainToolFactory) Build(ctx context.Context, scope ReActToolScope, rawP
 		return nil, runtimetools.Policy{}, errors.New("domain tool factory is not initialized")
 	}
 	principal := auth.Principal{OrganizationID: scope.OrganizationID, UserID: scope.AgentUserID, UserType: "agent"}
+	// 能力清单（key/应用）是判权的附加授予源（authz A/B）：runs 通道的
+	// principal 不经过 api key 解析，这里从应用行补载 Capabilities，
+	// 否则站点域等按 Require 能力门判权的域会全部被拒。
+	var appCaps []string
+	if err := f.Store.Pool.QueryRow(ctx, `
+		SELECT capabilities FROM integration.agent_applications
+		WHERE id = $1::uuid AND organization_id = $2::uuid
+	`, scope.AgentApplicationID, scope.OrganizationID).Scan(&appCaps); err == nil {
+		principal.Capabilities = appCaps
+	}
 	scopeResolver := authz.ScopeResolver{Store: f.Store}
 	// 决策 D（防提权）：工具动作必须同时落在发起人与 agent 两套权限的交集内
 	// —— viewer 发起的会话里，editor agent 也只按 viewer 干活。任一侧无
