@@ -87,7 +87,8 @@ func (s *Service) GetSitePage(ctx context.Context, principal auth.Principal, wor
 	return scanSitePage(row)
 }
 
-// CreateSitePage 新建自定义页。
+// CreateSitePage 新建自定义页。写入与 site_changed 事件同事务提交，
+// 交付层缓存立即失效（页面/导航对外即时可见，不留滞留窗口）。
 func (s *Service) CreateSitePage(ctx context.Context, principal auth.Principal, workspaceID, siteID string, input CustomPageInput) (CustomPage, error) {
 	if err := s.require(ctx, principal, workspaceID, authz.ActionSiteDesign); err != nil {
 		return CustomPage{}, err
@@ -108,7 +109,16 @@ func (s *Service) CreateSitePage(ctx context.Context, principal auth.Principal, 
 	if input.Locale != nil {
 		locale = strings.ToLower(strings.TrimSpace(*input.Locale))
 	}
-	row := s.Store.Pool.QueryRow(ctx, `
+	siteRow, err := s.siteRowByID(ctx, principal.OrganizationID, siteID)
+	if err != nil {
+		return CustomPage{}, err
+	}
+	tx, err := s.Store.Pool.Begin(ctx)
+	if err != nil {
+		return CustomPage{}, err
+	}
+	defer tx.Rollback(ctx)
+	row := tx.QueryRow(ctx, `
 		INSERT INTO site.site_pages
 			(organization_id, workspace_id, site_id, slug, title, body_markdown, seo_description, locale, nav_order, nav_hidden)
 		VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7, NULLIF($8, ''), $9, $10)
@@ -117,14 +127,33 @@ func (s *Service) CreateSitePage(ctx context.Context, principal auth.Principal, 
 		derefPage(input.BodyMarkdown), derefPage(input.SEODescription), locale,
 		derefIntPage(input.NavOrder, 100), derefBoolPage(input.NavHidden, false),
 	)
-	return scanSitePage(row)
+	page, err := scanSitePage(row)
+	if err != nil {
+		return CustomPage{}, err
+	}
+	if err := appendSiteEvent(ctx, tx, s.Events, principal, workspaceID, siteRow, "site_page_created"); err != nil {
+		return CustomPage{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return CustomPage{}, err
+	}
+	return page, nil
 }
 
-// UpdateSitePage 更新自定义页（指针语义）。
-func (s *Service) UpdateSitePage(ctx context.Context, principal auth.Principal, workspaceID, siteID, pageID string, input CustomPageInput) (CustomPage, error) {
+// UpdateSitePage 更新自定义页（指针语义）+ 同事务失效事件。
+func (s *Service) UpdateSitePage(ctx context.Context, principal auth.Principal, workspaceID, siteID string, pageID string, input CustomPageInput) (CustomPage, error) {
 	if err := s.require(ctx, principal, workspaceID, authz.ActionSiteDesign); err != nil {
 		return CustomPage{}, err
 	}
+	siteRow, err := s.siteRowByID(ctx, principal.OrganizationID, siteID)
+	if err != nil {
+		return CustomPage{}, err
+	}
+	tx, err := s.Store.Pool.Begin(ctx)
+	if err != nil {
+		return CustomPage{}, err
+	}
+	defer tx.Rollback(ctx)
 	sets := []string{"updated_at = now()"}
 	args := []any{principal.OrganizationID, siteID, pageID}
 	next := func(v any) string {
@@ -156,21 +185,40 @@ func (s *Service) UpdateSitePage(ctx context.Context, principal auth.Principal, 
 	if input.Locale != nil {
 		sets = append(sets, "locale = NULLIF("+next(strings.ToLower(strings.TrimSpace(*input.Locale)))+", '')")
 	}
-	row := s.Store.Pool.QueryRow(ctx, `
+	row := tx.QueryRow(ctx, `
 		UPDATE site.site_pages SET `+strings.Join(sets, ", ")+`
 		WHERE organization_id = $1::uuid AND site_id = $2::uuid AND id = $3::uuid
 		RETURNING `+sitePageColumns,
 		args...,
 	)
-	return scanSitePage(row)
+	page, err := scanSitePage(row)
+	if err != nil {
+		return CustomPage{}, err
+	}
+	if err := appendSiteEvent(ctx, tx, s.Events, principal, workspaceID, siteRow, "site_page_updated"); err != nil {
+		return CustomPage{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return CustomPage{}, err
+	}
+	return page, nil
 }
 
-// DeleteSitePage 删除自定义页。
-func (s *Service) DeleteSitePage(ctx context.Context, principal auth.Principal, workspaceID, siteID, pageID string) error {
+// DeleteSitePage 删除自定义页 + 同事务失效事件（对外即时 404）。
+func (s *Service) DeleteSitePage(ctx context.Context, principal auth.Principal, workspaceID, siteID string, pageID string) error {
 	if err := s.require(ctx, principal, workspaceID, authz.ActionSiteDesign); err != nil {
 		return err
 	}
-	tag, err := s.Store.Pool.Exec(ctx, `
+	siteRow, err := s.siteRowByID(ctx, principal.OrganizationID, siteID)
+	if err != nil {
+		return err
+	}
+	tx, err := s.Store.Pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	tag, err := tx.Exec(ctx, `
 		DELETE FROM site.site_pages
 		WHERE organization_id = $1::uuid AND site_id = $2::uuid AND id = $3::uuid
 	`, principal.OrganizationID, siteID, pageID)
@@ -180,7 +228,25 @@ func (s *Service) DeleteSitePage(ctx context.Context, principal auth.Principal, 
 	if tag.RowsAffected() == 0 {
 		return ErrSiteNotFound
 	}
-	return nil
+	if err := appendSiteEvent(ctx, tx, s.Events, principal, workspaceID, siteRow, "site_page_deleted"); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// siteRowByID 按组织与站点 ID 加载站点行（页面域事件的聚合载体）。
+func (s *Service) siteRowByID(ctx context.Context, organizationID, siteID string) (Site, error) {
+	var item Site
+	err := s.Store.Pool.QueryRow(ctx, `SELECT `+siteColumns+`
+		FROM site.public_sites
+		WHERE organization_id = $1::uuid AND id = $2::uuid
+	`, organizationID, siteID).Scan(&item.ID, &item.OrganizationID, &item.WorkspaceID, &item.Slug, &item.Name,
+		&item.Domain, &item.DefaultContentScope, &item.Status, &item.Revision,
+		&item.DefaultLocale, &item.EnabledLocales, &item.FallbackToDefault,
+		&item.CommentsMode, &item.PublishedReleaseID, &item.CreatedAt, &item.UpdatedAt,
+		&item.LogoAttachmentID, &item.FaviconAttachmentID, &item.SocialImageAttachmentID,
+		&item.DraftThemeRevisionID, &item.PublishedThemeRevisionID)
+	return item, err
 }
 
 func derefPage(v *string) string {
