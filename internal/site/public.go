@@ -275,7 +275,7 @@ func (r *PublicReader) SiteFacts(ctx context.Context, slug string) (SiteFacts, e
 	return facts, nil
 }
 
-// deriveNav 构造数据化导航：固定路由 + 自定义页（nav_order）。
+// deriveNav 构造数据化导航：固定路由 + 顶级公开分类 + 自定义页（nav_order）。
 func (r *PublicReader) deriveNav(ctx context.Context, item Site) []NavEntry {
 	nav := []NavEntry{
 		{ID: "home", Name: "首页", Href: "/sites/" + item.Slug + "/"},
@@ -285,8 +285,29 @@ func (r *PublicReader) deriveNav(ctx context.Context, item Site) []NavEntry {
 	if r.Store == nil || r.Store.Pool == nil {
 		return nav
 	}
+	// 顶级公开分类（§4.4）：public_flag 树的第一层进导航。
+	catRows, err := r.Store.Pool.Query(ctx, `
+		SELECT slug, COALESCE(NULLIF(public_title, ''), title)
+		FROM content.containers
+		WHERE organization_id = $1::uuid AND workspace_id = $2::uuid
+		  AND public_flag = true AND status = 'active' AND parent_id IS NULL
+		ORDER BY sort_key, title
+	`, item.OrganizationID, item.WorkspaceID)
+	if err == nil {
+		defer catRows.Close()
+		for catRows.Next() {
+			var slug, title string
+			if err := catRows.Scan(&slug, &title); err == nil {
+				nav = append(nav, NavEntry{
+					ID:   "/sites/" + item.Slug + "/c/" + slug,
+					Name: title,
+					Href: "/sites/" + item.Slug + "/c/" + slug,
+				})
+			}
+		}
+	}
 	rows, err := r.Store.Pool.Query(ctx, `
-		SELECT title, '/' || slug AS href, nav_order
+		SELECT title, slug, nav_order
 		FROM site.site_pages
 		WHERE organization_id = $1::uuid AND site_id = $2::uuid AND nav_hidden = false
 		ORDER BY nav_order, slug
@@ -296,10 +317,14 @@ func (r *PublicReader) deriveNav(ctx context.Context, item Site) []NavEntry {
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var title, href string
+		var title, slug string
 		var order int
-		if err := rows.Scan(&title, &href, &order); err == nil {
-			nav = append(nav, NavEntry{ID: href, Name: title, Href: "/sites/" + item.Slug + href})
+		if err := rows.Scan(&title, &slug, &order); err == nil {
+			nav = append(nav, NavEntry{
+				ID:   "/sites/" + item.Slug + "/p/" + slug,
+				Name: title,
+				Href: "/sites/" + item.Slug + "/p/" + slug,
+			})
 		}
 	}
 	return nav
