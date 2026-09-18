@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"strconv"
 	"strings"
@@ -66,7 +67,15 @@ type PersistentReActService struct {
 
 // Process executes one claimed ReAct attempt. waiting is true when Eino saved
 // a checkpoint and the attempt was atomically moved to an interaction state.
+// Panic-safe (react 三纪律): a panicking attempt is converted into a run
+// error so the automation layer records the failure — the worker never dies
+// with the audit trail missing.
 func (s PersistentReActService) Process(ctx context.Context, claimed automation.ClaimedRun) (waiting bool, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			waiting, err = false, fmt.Errorf("react run panicked: %v", recovered)
+		}
+	}()
 	if s.Store == nil || s.Store.Pool == nil || s.Cipher == nil || s.Models == nil || s.ToolFactory == nil {
 		return false, errors.New("persistent ReAct service is not initialized")
 	}
@@ -195,7 +204,10 @@ func (s PersistentReActService) injectSiteBrief(ctx context.Context, run *persis
 		return nil
 	}
 	if err != nil {
-		return fmt.Errorf("load site brief: %w", err)
+		// react 三纪律「降级不阻断」：简报加载失败只损失定位一致性，
+		// 不能打死整个 run——降级为无简报继续执行并留日志。
+		log.Printf("site brief inject degraded (run %s): %v", run.Scope.RunID, err)
+		return nil
 	}
 	brief = strings.TrimSpace(brief)
 	if brief == "" {

@@ -1,0 +1,18 @@
+version: "2"
+sql:
+  - engine: "postgresql"
+    # 建模域是 sqlc 试点（技术架构借鉴，agentblog 式）：查询即契约，
+    # 访问代码全部生成，消灭手写 Scan 漂移。schema 只喂本域依赖的
+    # 迁移文件，避免无关 DDL 拖慢/卡死解析。
+    schema:
+      - db/migrations/0001_extensions.sql
+      - db/migrations/0002_organization_identity.sql
+      - db/migrations/0003_workspace.sql
+      - db/migrations/0044_modeling_plans.sql
+    queries: "internal/modeling/queries.sql"
+    gen:
+      go:
+        package: "store"
+        out: "internal/modeling/store"
+        sql_package: "pgx/v5"
+        emit_interface: true

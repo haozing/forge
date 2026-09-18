@@ -3,7 +3,16 @@ package modeling
 // modeling.go — 建模计划服务（内容治理四件套 F4）。计划 = 批量内容建模的
 // 人审分诊载体：第一步 analyze 工具纯计算产出计划 JSON（不落库），人经
 // HTTP 保存为本表行并逐条取舍（approve/reject），批准后的计划由 react run
-// 消费执行（产出全为草稿，发布仍走 human_only）。
+// 消费执行（产出全为草稿，发布仍走 human_only 门）。
+//
+// 技术架构借鉴（agentblog）三处落地：
+//   - sqlc（queries.sql → internal/modeling/store）：数据访问全部生成，
+//     queries.sql 即契约；
+//   - RLS 试点（0045）：content.modeling_plans 启用 FORCE ROW LEVEL
+//     SECURITY，本服务每个方法都在事务内 set_config('app.organization_id')
+//     —— 租户隔离是结构性约束而非应用层约定；
+//   - 事件接力：状态变更同事务落 outbox 事件（modeling.plan_changed），
+//     下游（通知/检索/回流）按 consumer manifest 陆续挂载。
 
 import (
 	"context"
@@ -14,9 +23,13 @@ import (
 
 	"agentchunzhi/internal/auth"
 	"agentchunzhi/internal/authz"
+	"agentchunzhi/internal/eventing"
+	modelingstore "agentchunzhi/internal/modeling/store"
 	"agentchunzhi/internal/store"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const (
@@ -42,7 +55,20 @@ const MaxPlanItems = 20
 type Service struct {
 	Store  *store.Store
 	Policy authz.WorkspacePolicyService
+	// Events 为空时 Patch 不发生命周期事件（测试/嵌入式构造场景）。
+	Events *eventing.EventStore
 }
+
+// Plans 是建模计划域的契约接口（契约投影模式）：适配层（react 工具、
+// 未来 MCP 工具）依赖接口而非具体 Service，可替换 Fake。
+type Plans interface {
+	Save(ctx context.Context, principal auth.Principal, workspaceID string, input SaveInput) (Plan, error)
+	List(ctx context.Context, principal auth.Principal, workspaceID string, limit int) ([]Plan, error)
+	Get(ctx context.Context, principal auth.Principal, workspaceID, planID string) (Plan, error)
+	Patch(ctx context.Context, principal auth.Principal, workspaceID, planID string, input PatchInput) (Plan, error)
+}
+
+var _ Plans = Service{}
 
 // Plan is one saved modeling plan row.
 type Plan struct {
@@ -65,15 +91,10 @@ type SaveInput struct {
 	Plan          json.RawMessage
 }
 
-const planColumns = `id::text, organization_id::text, workspace_id::text, intent,
-	COALESCE(target_model_id::text, ''), sources, plan, status, created_at, updated_at`
-
-func scanPlan(row interface{ Scan(...any) error }) (Plan, error) {
-	var item Plan
-	err := row.Scan(&item.ID, &item.OrganizationID, &item.WorkspaceID, &item.Intent,
-		&item.TargetModelID, &item.Sources, &item.Plan, &item.Status,
-		&item.CreatedAt, &item.UpdatedAt)
-	return item, err
+type PatchInput struct {
+	Status *string
+	// Plan 整体替换（分诊台行级编辑后保存）；nil = 不动。
+	Plan json.RawMessage
 }
 
 // require 让人与 agent 同域判权（asset.read 即可读写计划：计划是分诊台
@@ -109,8 +130,31 @@ func validID(value string) bool {
 	return true
 }
 
-// validatePlanShape 检查计划条目数组的基本形状：对象数组、上限、每条必带
-// source_asset_id 与 enabled 布尔。字段骨架等深校验留给执行链的既有校验器。
+// orgUUID 把 36 位 UUID 文本转成 pgtype.UUID；invalid 输入在上层已被
+// validID 拦截，这里 panic 属于编程错误。
+func orgUUID(value string) pgtype.UUID {
+	parsed := uuid.MustParse(value)
+	return pgtype.UUID{Bytes: parsed, Valid: true}
+}
+
+// withOrgTx 在事务内钉住 RLS 组织 GUC 后执行 fn（RLS 试点 0045）：
+// content.modeling_plans 已 FORCE ROW LEVEL SECURITY，未设置 GUC 的事务
+// 一行都看不见、也写不进——租户隔离由数据库结构性保证。
+func (s Service) withOrgTx(ctx context.Context, organizationID string, fn func(q *modelingstore.Queries, tx pgx.Tx) error) error {
+	tx, err := s.Store.Pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `SELECT set_config('app.organization_id', $1, true)`, organizationID); err != nil {
+		return err
+	}
+	if err := fn(modelingstore.New(tx), tx); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
 func validatePlanShape(plan json.RawMessage) error {
 	var items []map[string]any
 	if err := json.Unmarshal(plan, &items); err != nil {
@@ -150,18 +194,28 @@ func (s Service) Save(ctx context.Context, principal auth.Principal, workspaceID
 	if input.TargetModelID != "" && !validID(input.TargetModelID) {
 		return Plan{}, ErrInvalidInput
 	}
-	var target any
+	var target pgtype.UUID
 	if input.TargetModelID != "" {
-		target = input.TargetModelID
+		target = orgUUID(input.TargetModelID)
 	}
-	row := s.Store.Pool.QueryRow(ctx, `
-		INSERT INTO content.modeling_plans
-			(organization_id, workspace_id, intent, target_model_id, sources, plan, status, created_by)
-		VALUES ($1::uuid, $2::uuid, $3, $4::uuid, $5::jsonb, $6::jsonb, 'draft', $7::uuid)
-		RETURNING `+planColumns,
-		principal.OrganizationID, workspaceID, intent, target,
-		defaultJSON(input.Sources), input.Plan, principal.UserID)
-	item, err := scanPlan(row)
+	var item Plan
+	err := s.withOrgTx(ctx, principal.OrganizationID, func(q *modelingstore.Queries, _ pgx.Tx) error {
+		row, err := q.InsertPlan(ctx, modelingstore.InsertPlanParams{
+			OrgID:         orgUUID(principal.OrganizationID),
+			WorkspaceID:   orgUUID(workspaceID),
+			Intent:        intent,
+			TargetModelID: target,
+			Sources:       defaultJSON(input.Sources),
+			Plan:          input.Plan,
+			CreatedBy:     orgUUID(principal.UserID),
+		})
+		if err != nil {
+			return err
+		}
+		item = planFromRow(row.ID, row.OrganizationID, row.WorkspaceID, row.Intent,
+			targetText(row.TargetModelID), row.Sources, row.Plan, row.Status, row.CreatedAt, row.UpdatedAt)
+		return nil
+	})
 	if err != nil {
 		return Plan{}, err
 	}
@@ -186,26 +240,26 @@ func (s Service) List(ctx context.Context, principal auth.Principal, workspaceID
 	if limit <= 0 || limit > 100 {
 		limit = 50
 	}
-	rows, err := s.Store.Pool.Query(ctx, `
-		SELECT `+planColumns+`
-		FROM content.modeling_plans
-		WHERE organization_id = $1::uuid AND workspace_id = $2::uuid
-		ORDER BY created_at DESC
-		LIMIT $3::int
-	`, principal.OrganizationID, workspaceID, limit)
+	items := []Plan{}
+	err := s.withOrgTx(ctx, principal.OrganizationID, func(q *modelingstore.Queries, _ pgx.Tx) error {
+		rows, err := q.ListPlans(ctx, modelingstore.ListPlansParams{
+			OrgID:       orgUUID(principal.OrganizationID),
+			WorkspaceID: orgUUID(workspaceID),
+			RowLimit:    int32(limit),
+		})
+		if err != nil {
+			return err
+		}
+		for _, row := range rows {
+			items = append(items, planFromRow(row.ID, row.OrganizationID, row.WorkspaceID, row.Intent,
+				targetText(row.TargetModelID), row.Sources, row.Plan, row.Status, row.CreatedAt, row.UpdatedAt))
+		}
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	items := []Plan{}
-	for rows.Next() {
-		item, err := scanPlan(rows)
-		if err != nil {
-			return nil, err
-		}
-		items = append(items, item)
-	}
-	return items, rows.Err()
+	return items, nil
 }
 
 // Get reads one plan inside the workspace scope.
@@ -216,26 +270,37 @@ func (s Service) Get(ctx context.Context, principal auth.Principal, workspaceID,
 	if err := s.require(ctx, principal, workspaceID, authz.ActionAssetRead); err != nil {
 		return Plan{}, err
 	}
-	item, err := scanPlan(s.Store.Pool.QueryRow(ctx, `
-		SELECT `+planColumns+`
-		FROM content.modeling_plans
-		WHERE organization_id = $1::uuid AND workspace_id = $2::uuid AND id = $3::uuid
-	`, principal.OrganizationID, workspaceID, planID))
-	if errors.Is(err, pgx.ErrNoRows) {
-		return Plan{}, ErrNotFound
+	var item Plan
+	err := s.withOrgTx(ctx, principal.OrganizationID, func(q *modelingstore.Queries, _ pgx.Tx) error {
+		row, err := q.GetPlan(ctx, modelingstore.GetPlanParams{
+			OrgID:       orgUUID(principal.OrganizationID),
+			WorkspaceID: orgUUID(workspaceID),
+			PlanID:      orgUUID(planID),
+		})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return err
+		}
+		item = planFromRow(row.ID, row.OrganizationID, row.WorkspaceID, row.Intent,
+			targetText(row.TargetModelID), row.Sources, row.Plan, row.Status, row.CreatedAt, row.UpdatedAt)
+		return nil
+	})
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return Plan{}, ErrNotFound
+		}
+		return Plan{}, err
 	}
-	return item, err
-}
-
-type PatchInput struct {
-	Status *string
-	// Plan 整体替换（分诊台行级编辑后保存）；nil = 不动。
-	Plan json.RawMessage
+	return item, nil
 }
 
 // Patch transitions status (draft→approved|rejected, approved→applied|failed
 // by the executor) and optionally replaces the plan body. Approve/reject are
 // human decisions on the triage console; the service only guards the shape.
+// Status transitions emit a modeling.plan_changed outbox event in the same
+// transaction (事件接力 groundwork).
 func (s Service) Patch(ctx context.Context, principal auth.Principal, workspaceID, planID string, input PatchInput) (Plan, error) {
 	if !validID(workspaceID) || !validID(planID) {
 		return Plan{}, ErrInvalidInput
@@ -243,83 +308,128 @@ func (s Service) Patch(ctx context.Context, principal auth.Principal, workspaceI
 	if err := s.require(ctx, principal, workspaceID, authz.ActionAssetRead); err != nil {
 		return Plan{}, err
 	}
-	tx, err := s.Store.Pool.Begin(ctx)
-	if err != nil {
-		return Plan{}, err
-	}
-	defer tx.Rollback(ctx)
-	current, err := scanPlan(tx.QueryRow(ctx, `
-		SELECT `+planColumns+`
-		FROM content.modeling_plans
-		WHERE organization_id = $1::uuid AND workspace_id = $2::uuid AND id = $3::uuid
-		FOR UPDATE
-	`, principal.OrganizationID, workspaceID, planID))
-	if errors.Is(err, pgx.ErrNoRows) {
-		return Plan{}, ErrNotFound
-	}
-	if err != nil {
-		return Plan{}, err
-	}
-	sets := []string{"updated_at = now()"}
-	args := []any{principal.OrganizationID, workspaceID, planID}
-	arg := func(value any) string {
-		args = append(args, value)
-		return "$" + itoa(len(args))
-	}
 	if input.Plan != nil {
 		if err := validatePlanShape(input.Plan); err != nil {
 			return Plan{}, err
 		}
-		if current.Status != StatusDraft {
-			return Plan{}, ErrStatusInvalid
-		}
-		sets = append(sets, "plan = "+arg(string(input.Plan))+"::jsonb")
 	}
-	if input.Status != nil {
-		status := strings.TrimSpace(*input.Status)
-		allowed := map[string][]string{
-			StatusDraft:    {StatusApproved, StatusRejected},
-			StatusApproved: {StatusApplied, StatusFailed, StatusDraft},
-			StatusFailed:   {StatusApproved, StatusRejected},
+	var item Plan
+	changed := false
+	err := s.withOrgTx(ctx, principal.OrganizationID, func(q *modelingstore.Queries, tx pgx.Tx) error {
+		current, err := q.LockPlan(ctx, modelingstore.LockPlanParams{
+			OrgID:       orgUUID(principal.OrganizationID),
+			WorkspaceID: orgUUID(workspaceID),
+			PlanID:      orgUUID(planID),
+		})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
 		}
-		ok := false
-		for _, next := range allowed[current.Status] {
-			if next == status {
-				ok = true
-				break
+		if err != nil {
+			return err
+		}
+		if input.Plan != nil {
+			if current.Status != StatusDraft {
+				return ErrStatusInvalid
+			}
+			if err := q.UpdatePlanBody(ctx, modelingstore.UpdatePlanBodyParams{
+				OrgID:       orgUUID(principal.OrganizationID),
+				WorkspaceID: orgUUID(workspaceID),
+				PlanID:      orgUUID(planID),
+				Plan:        input.Plan,
+			}); err != nil {
+				return err
+			}
+			changed = true
+		}
+		if input.Status != nil {
+			status := strings.TrimSpace(*input.Status)
+			allowed := map[string][]string{
+				StatusDraft:    {StatusApproved, StatusRejected},
+				StatusApproved: {StatusApplied, StatusFailed, StatusDraft},
+				StatusFailed:   {StatusApproved, StatusRejected},
+			}
+			ok := false
+			for _, next := range allowed[current.Status] {
+				if next == status {
+					ok = true
+					break
+				}
+			}
+			if !ok {
+				return ErrStatusInvalid
+			}
+			row, err := q.UpdatePlanStatus(ctx, modelingstore.UpdatePlanStatusParams{
+				OrgID:       orgUUID(principal.OrganizationID),
+				WorkspaceID: orgUUID(workspaceID),
+				PlanID:      orgUUID(planID),
+				Status:      status,
+			})
+			if err != nil {
+				return err
+			}
+			item = planFromStatus(row)
+			changed = true
+			if s.Events != nil {
+				if _, err := s.Events.AppendTx(ctx, tx, eventing.Event{
+					OrganizationID:   principal.OrganizationID,
+					WorkspaceID:      workspaceID,
+					EventType:        eventing.EventModelingPlanChanged,
+					AggregateType:    "modeling_plan",
+					AggregateID:      planID,
+					AggregateVersion: 1,
+					PayloadVersion:   eventing.PayloadVersionV1,
+					Actor:            eventing.ActorFromPrincipal(principal),
+					Payload: eventing.ModelingPlanChangedPayload{
+						PlanID:      planID,
+						WorkspaceID: workspaceID,
+						Status:      status,
+						Action:      "status_transition",
+					},
+				}); err != nil {
+					return err
+				}
 			}
 		}
-		if !ok {
-			return Plan{}, ErrStatusInvalid
-		}
-		sets = append(sets, "status = "+arg(status))
-	}
-	item, err := scanPlan(tx.QueryRow(ctx, `
-		UPDATE content.modeling_plans SET `+strings.Join(sets, ", ")+`
-		WHERE organization_id = $1::uuid AND workspace_id = $2::uuid AND id = $3::uuid
-		RETURNING `+planColumns, args...))
+		return nil
+	})
 	if err != nil {
 		return Plan{}, err
 	}
-	return item, tx.Commit(ctx)
-}
-
-func itoa(value int) string {
-	if value == 0 {
-		return "0"
+	if !changed {
+		return s.Get(ctx, principal, workspaceID, planID)
 	}
-	digits := []byte{}
-	for value > 0 {
-		digits = append([]byte{byte('0' + value%10)}, digits...)
-		value /= 10
+	return item, nil
+}
+
+// planFromRow 组装服务层 Plan（sqlc 生成的各 Row 形状一致，共用组装器）。
+// targetText normalizes the sqlc narg-generated interface{} (nil or string).
+func targetText(value any) string {
+	text, _ := value.(string)
+	return text
+}
+
+func planFromRow(id, organizationID, workspaceID, intent, targetModelID string,
+	sources, plan []byte, status string, createdAt, updatedAt pgtype.Timestamptz) Plan {
+	item := Plan{
+		ID:             id,
+		OrganizationID: organizationID,
+		WorkspaceID:    workspaceID,
+		Intent:         intent,
+		TargetModelID:  targetModelID,
+		Sources:        json.RawMessage(defaultJSON(sources)),
+		Plan:           json.RawMessage(defaultJSON(plan)),
+		Status:         status,
 	}
-	return string(digits)
+	if createdAt.Valid {
+		item.CreatedAt = createdAt.Time
+	}
+	if updatedAt.Valid {
+		item.UpdatedAt = updatedAt.Time
+	}
+	return item
 }
 
-// RecordExecution flips a plan to applied/failed after the executor run
-// finishes; item-level outcomes live inside the plan jsonb itself.
-func (s Service) RecordExecution(ctx context.Context, principal auth.Principal, workspaceID, planID, status string) error {
-	return firstErr(s.Patch(ctx, principal, workspaceID, planID, PatchInput{Status: &status}))
+func planFromStatus(row modelingstore.UpdatePlanStatusRow) Plan {
+	return planFromRow(row.ID, row.OrganizationID, row.WorkspaceID, row.Intent,
+		targetText(row.TargetModelID), row.Sources, row.Plan, row.Status, row.CreatedAt, row.UpdatedAt)
 }
-
-func firstErr(_ any, err error) error { return err }

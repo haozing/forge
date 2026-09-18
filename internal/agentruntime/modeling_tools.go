@@ -45,7 +45,8 @@ func (f DomainToolFactory) applyModelingTools(handlers *runtimetools.BuiltinHand
 	if f.Store == nil || f.Store.Pool == nil || f.Models == nil {
 		return
 	}
-	plans := modeling.Service{Store: f.Store, Policy: authz.WorkspacePolicyService{Store: f.Store}}
+	// 契约投影：工具只依赖 modeling.Plans 接口，不感知具体实现。
+	var plans modeling.Plans = modeling.Service{Store: f.Store, Policy: authz.WorkspacePolicyService{Store: f.Store}}
 
 	handlers.PlanBatchModeling = func(ctx context.Context, arguments map[string]any) (any, error) {
 		if _, err := allowed(ctx, "asset.read"); err != nil {

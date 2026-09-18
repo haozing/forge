@@ -218,7 +218,7 @@ func main() {
 		// Phase 5 public-site management: workspace policy gate plus site
 		// events/audit inside the same transaction as the business write.
 		Sites: &site.Service{Store: db, Events: &events, Policy: authz.WorkspacePolicyService{Store: db}, PreviewHashSecret: cfg.QueryHashSecret},
-		ModelingPlans: modeling.Service{Store: db, Policy: authz.WorkspacePolicyService{Store: db}},
+		ModelingPlans: modeling.Service{Store: db, Policy: authz.WorkspacePolicyService{Store: db}, Events: &events},
 		// Phase 5 public-site read face: the unified query service (plan D2)
 		// plus the tag facet counter (B4); the anonymous IP budget reuses the
 		// same LoginThrottle instance as the login buckets (B5).

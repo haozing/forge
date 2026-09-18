@@ -50,6 +50,12 @@ const (
 	EventSiteChanged = "site.site_changed"
 )
 
+// Modeling plan lifecycle facts (内容治理四件套 F4): one plan status transition
+// per event; consumed by the outbox dispatch surface (no worker consumer yet).
+const (
+	EventModelingPlanChanged = "modeling.plan_changed"
+)
+
 // PublicSite binding facts.
 const (
 	EventSiteBindingChanged = "site.binding_changed"
@@ -192,6 +198,14 @@ type SiteCommentCreatedPayload struct {
 	AssetID string `json:"asset_id"`
 }
 
+// ModelingPlanChangedPayload marks one modeling plan status transition (F4).
+type ModelingPlanChangedPayload struct {
+	PlanID      string `json:"plan_id"`
+	WorkspaceID string `json:"workspace_id"`
+	Status      string `json:"status"`
+	Action      string `json:"action"`
+}
+
 // KnownEvents maps every catalog event to its payload version. The registry
 // refuses to dispatch events absent from this table.
 func KnownEvents() map[string]int {
@@ -215,5 +229,6 @@ func KnownEvents() map[string]int {
 		EventSiteBindingChanged:           PayloadVersionV1,
 		EventSiteCommentCreated:           PayloadVersionV1,
 		EventAgentProcessingCompleted:     PayloadVersionV1,
+		EventModelingPlanChanged:          PayloadVersionV1,
 	}
 }
