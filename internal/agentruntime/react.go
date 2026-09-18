@@ -192,8 +192,14 @@ func (r ReActExecutor) prepare(ctx context.Context, req ReActRequest) (preparedR
 		return preparedReAct{}, fmt.Errorf("build ReAct ChatModelAgent: %w", err)
 	}
 	duration := r.MaxTotalDuration
-	if duration <= 0 || duration > 90*time.Second {
+	if duration <= 0 {
 		duration = 90 * time.Second
+	}
+	// Hard ceiling 600s: multi-step modeling chains (analyze → create →
+	// update per entry) legitimately run past 90s on slow model endpoints;
+	// beyond this a run should be split instead of grown.
+	if duration > 600*time.Second {
+		duration = 600 * time.Second
 	}
 	runCtx, cancel := context.WithTimeout(ctx, duration)
 	return preparedReAct{ctx: runCtx, cancel: cancel, agent: agent, model: resolved}, nil

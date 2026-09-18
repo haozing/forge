@@ -201,6 +201,34 @@ func (s Service) Reference(ctx context.Context, principal auth.Principal, assetI
 		&result.SourceExcerpt, &result.UpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
+		// Draft fallback（两步建模 F4）：published 通道之外，持有该
+		// （工作区，模型）draft_scope=read|write 策略行的 agent 可读工作
+		// 版本草稿——analyze 读源、execute 回读在授权面保持一致。这条
+		// 分支完全由策略行显式授予，不放宽 published 通道的三闸。
+		err = s.Store.Pool.QueryRow(ctx, `
+			SELECT a.id::text, wv.id::text, COALESCE(wv.title, ''),
+			       LEFT(COALESCE(wv.markdown, ''), 500),
+			       a.updated_at::text
+			FROM asset.assets a
+			JOIN asset.asset_versions wv ON wv.organization_id = a.organization_id AND wv.id = a.current_working_version_id
+			WHERE a.id = $1::uuid
+			  AND a.organization_id = $2::uuid
+			  AND a.resource_model_id::text = ANY($3::text[])
+			  AND a.deleted_at IS NULL
+			  AND a.publication_status <> 'archived'
+			  AND EXISTS (
+			        SELECT 1 FROM content.agent_access_policies p
+			        WHERE p.organization_id = a.organization_id
+			          AND p.agent_user_id = $4::uuid
+			          AND p.workspace_id = a.workspace_id
+			          AND p.draft_scope IN ('read', 'write')
+			  )
+		`, assetID, principal.OrganizationID, allowedModelIDs, principal.UserID).Scan(
+			&result.AssetID, &result.AssetVersionID, &result.Title,
+			&result.SourceExcerpt, &result.UpdatedAt,
+		)
+	}
+	if errors.Is(err, pgx.ErrNoRows) {
 		return AssetReference{}, ErrReferenceNotFound
 	}
 	if err != nil {

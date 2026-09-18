@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"strconv"
 	"strings"
+	"time"
 
 	runtimecheckpoint "agentchunzhi/internal/agentruntime/checkpoint"
 	runtimetools "agentchunzhi/internal/agentruntime/tools"
@@ -16,6 +19,28 @@ import (
 
 	"github.com/jackc/pgx/v5"
 )
+
+// reactMaxTotalDuration bounds one ReAct attempt. Default 90s; operators can
+// raise it for long modeling/design chains via AGENT_RUN_MAX_SECONDS
+// (clamped to 30..600). The executor keeps its own hard ceiling.
+func reactMaxTotalDuration() time.Duration {
+	const def = 90 * time.Second
+	raw := strings.TrimSpace(os.Getenv("AGENT_RUN_MAX_SECONDS"))
+	if raw == "" {
+		return def
+	}
+	seconds, err := strconv.Atoi(raw)
+	if err != nil {
+		return def
+	}
+	if seconds < 30 {
+		return 30 * time.Second
+	}
+	if seconds > 600 {
+		return 600 * time.Second
+	}
+	return time.Duration(seconds) * time.Second
+}
 
 type ReActToolScope struct {
 	OrganizationID     string
@@ -59,7 +84,14 @@ func (s PersistentReActService) Process(ctx context.Context, claimed automation.
 	if err != nil {
 		return false, fmt.Errorf("build ReAct tools: %w", err)
 	}
-	policy.UsedCalls = run.ToolCallCount
+	// 预算按尝试重置：run 失败重试如果继承上一轮累计调用数，重试会在
+	// 第一次工具调用就 budget exceeded，多步建模链永远跑不完（resume
+	// 中断恢复除外——那是同一逻辑尝试的延续，预算必须延续）。
+	if run.Resume == nil {
+		policy.UsedCalls = 0
+	} else {
+		policy.UsedCalls = run.ToolCallCount
+	}
 	request := ReActRequest{
 		OrganizationID: run.Scope.OrganizationID, RunID: run.Scope.RunID,
 		AgentApplicationID: run.Scope.AgentApplicationID, ModelEndpointID: run.ModelEndpointID,
@@ -69,7 +101,7 @@ func (s PersistentReActService) Process(ctx context.Context, claimed automation.
 			Store: s.Store, Cipher: s.Cipher, OrganizationID: run.Scope.OrganizationID, RunID: run.Scope.RunID,
 		},
 	}
-	executor := ReActExecutor{Models: s.Models, Tools: registry}
+	executor := ReActExecutor{Models: s.Models, Tools: registry, MaxTotalDuration: reactMaxTotalDuration()}
 	emit := func(event ReActEvent) error { return s.persistEvent(ctx, run.Scope, event) }
 	var result ReActResult
 	if run.Resume == nil {

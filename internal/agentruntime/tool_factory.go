@@ -2,6 +2,8 @@ package agentruntime
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,7 +25,6 @@ import (
 	"agentchunzhi/internal/review"
 	"agentchunzhi/internal/store"
 
-	"github.com/cloudwego/eino/compose"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -78,12 +79,13 @@ func (f DomainToolFactory) Build(ctx context.Context, scope ReActToolScope, rawP
 	}
 	assets := assetservice.Service{Store: f.Store, Events: &f.Events}
 	tasks := agenttask.Service{Store: f.Store}
-	idempotencyKey := func(name string, ctx context.Context) string {
-		callID := compose.GetToolCallID(ctx)
-		if strings.TrimSpace(callID) == "" {
-			callID = "unknown"
-		}
-		return "react:" + scope.RunID + ":" + name + ":" + callID
+	idempotencyKey := func(name string, ctx context.Context, arguments map[string]any) string {
+		// 幂等键按 (run, tool, 参数指纹) 派生而非 call_id：run 重试时相同
+		// 参数的调用复用同一幂等键，create/update 不再产生重复草稿；参数
+		// 被模型修正后自然换新键。encoding/json 对 map 按键排序，指纹稳定。
+		argsJSON, _ := json.Marshal(arguments)
+		digest := sha256.Sum256(argsJSON)
+		return "react:" + scope.RunID + ":" + name + ":" + hex.EncodeToString(digest[:8])
 	}
 	handlers := runtimetools.BuiltinHandlers{
 		SearchKnowledge: func(ctx context.Context, arguments map[string]any) (any, error) {
@@ -182,12 +184,12 @@ func (f DomainToolFactory) Build(ctx context.Context, scope ReActToolScope, rawP
 			return version, nil
 		},
 		CreateInternalAsset: func(ctx context.Context, arguments map[string]any) (any, error) {
-			models, err := allowed(ctx, "asset.create")
+			models, err := allowed(ctx, "asset.write")
 			if err != nil {
 				return nil, err
 			}
 			fields, _ := arguments["fields"].(map[string]any)
-			return assets.Create(ctx, principal, models, idempotencyKey("create", ctx), assetservice.CreateInput{
+			input := assetservice.CreateInput{
 				// Run scope pins the target workspace: builtin models are
 				// organization-level (NULL workspace) and would otherwise be
 				// rejected as invalid input.
@@ -195,10 +197,19 @@ func (f DomainToolFactory) Build(ctx context.Context, scope ReActToolScope, rawP
 				WorkspaceID:     scope.WorkspaceID,
 				Fields:          fields,
 				TagIDs:          stringListValue(arguments["tag_ids"]),
-			})
+			}
+			// 文档/笔记类模型的内容载体是 title+markdown（字段 schema 可为
+			// 空）；record 类模型两者留空、只走 fields。
+			if value, ok := arguments["title"].(string); ok && strings.TrimSpace(value) != "" {
+				input.Title = &value
+			}
+			if value, ok := arguments["markdown"].(string); ok && value != "" {
+				input.Markdown = &value
+			}
+			return assets.Create(ctx, principal, models, idempotencyKey("create", ctx, arguments), input)
 		},
 		UpdateInternalAsset: func(ctx context.Context, arguments map[string]any) (any, error) {
-			models, err := allowed(ctx, "asset.edit")
+			models, err := allowed(ctx, "asset.write")
 			if err != nil {
 				return nil, err
 			}
@@ -216,11 +227,15 @@ func (f DomainToolFactory) Build(ctx context.Context, scope ReActToolScope, rawP
 				ids := value2stringList(items)
 				input.TagIDs = &ids
 			}
-			return assets.Update(ctx, principal, models, idempotencyKey("update", ctx),
-				stringValue(arguments["asset_id"]), stringValue(arguments["expected_version_id"]), input)
+			revision, err := f.resolveDraftRevision(ctx, principal, stringValue(arguments["asset_id"]), stringValue(arguments["expected_version_id"]), models)
+			if err != nil {
+				return nil, err
+			}
+			return assets.Update(ctx, principal, models, idempotencyKey("update", ctx, arguments),
+				stringValue(arguments["asset_id"]), revision, input)
 		},
 		CreateRelation: func(ctx context.Context, arguments map[string]any) (any, error) {
-			models, err := allowed(ctx, "asset.edit")
+			models, err := allowed(ctx, "asset.write")
 			if err != nil {
 				return nil, err
 			}
@@ -237,7 +252,7 @@ func (f DomainToolFactory) Build(ctx context.Context, scope ReActToolScope, rawP
 			}
 			return tasks.Create(ctx, principal, agenttask.CreateInput{
 				AgentApplicationID: scope.AgentApplicationID, Operation: stringValue(arguments["operation"]),
-				InputAssetIDs: []string{stringValue(arguments["asset_id"])}, IdempotencyKey: idempotencyKey("task", ctx),
+				InputAssetIDs: []string{stringValue(arguments["asset_id"])}, IdempotencyKey: idempotencyKey("task", ctx, arguments),
 			}, readable, editable)
 		},
 		PublishAsset: func(ctx context.Context, arguments map[string]any) (any, error) {
@@ -377,6 +392,40 @@ func parseToolPolicy(raw map[string]any) runtimetools.Policy {
 	return policy
 }
 
+// resolveDraftRevision accepts both optimistic-lock shapes update_internal_asset
+// may receive: the current working version UUID (what create_internal_asset
+// returns) or the asset's numeric draft_revision. A UUID is resolved — with
+// ownership checks (organization + asset + current working version + model
+// scope) — to the draft revision the service validates against; anything else
+// passes through and fails validation with the canonical error.
+func (f DomainToolFactory) resolveDraftRevision(ctx context.Context, principal auth.Principal, assetID, expectedVersionID string, models []string) (string, error) {
+	value := strings.TrimSpace(expectedVersionID)
+	if value == "" {
+		return "", errors.New("expected_version_id is required")
+	}
+	if len(value) != 36 {
+		return value, nil // already a draft revision number
+	}
+	if f.Store == nil || f.Store.Pool == nil {
+		return "", errors.New("tool factory is not initialized")
+	}
+	var revision string
+	err := f.Store.Pool.QueryRow(ctx, `
+		SELECT a.draft_revision::text
+		FROM asset.assets a
+		WHERE a.organization_id = $1::uuid AND a.id = $2::uuid
+		  AND a.current_working_version_id = $3::uuid
+		  AND a.resource_model_id::text = ANY($4::text[])
+	`, principal.OrganizationID, assetID, value, models).Scan(&revision)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", errors.New("expected_version_id does not match the asset's current working version")
+	}
+	if err != nil {
+		return "", fmt.Errorf("resolve draft revision: %w", err)
+	}
+	return revision, nil
+}
+
 // agentVisibilityBand resolves the agent's data_scope policy row into the
 // asset visibility band its read tools may touch. The tool SQL used to read
 // published relations/attachment text without any visibility narrowing, so a
@@ -441,7 +490,8 @@ func (f DomainToolFactory) getSchema(ctx context.Context, scope ReActToolScope, 
 	err := f.Store.Pool.QueryRow(ctx, `
 		SELECT rm.name, rm.content_kind, mv.id::text, mv.field_schema, mv.schema_checksum
 		FROM model.resource_models rm JOIN model.resource_model_versions mv ON mv.id = rm.current_version_id
-		WHERE rm.organization_id = $1::uuid AND rm.id = $2::uuid AND rm.workspace_id = $3::uuid
+		WHERE rm.organization_id = $1::uuid AND rm.id = $2::uuid
+		  AND (rm.workspace_id = $3::uuid OR rm.workspace_id IS NULL)
 		  AND rm.status = 'active' AND mv.status = 'published'
 	`, scope.OrganizationID, modelID, scope.WorkspaceID).Scan(&name, &kind, &versionID, &schema, &checksum)
 	if errors.Is(err, pgx.ErrNoRows) {
