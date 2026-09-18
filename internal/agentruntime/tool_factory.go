@@ -331,6 +331,8 @@ func (f DomainToolFactory) Build(ctx context.Context, scope ReActToolScope, rawP
 	}
 	// §7.2 主题设计工具集（Sites 未接线时整体跳过）。
 	f.applySiteThemeTools(&handlers, scope, principal, allowed)
+	// F4 两步建模工具（Models 未接线时整体跳过）。
+	f.applyModelingTools(&handlers, scope, principal, allowed)
 	registry := runtimetools.NewRegistry()
 	if err := runtimetools.RegisterBuiltins(registry, handlers); err != nil {
 		return nil, runtimetools.Policy{}, err

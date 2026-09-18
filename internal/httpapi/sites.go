@@ -7,9 +7,9 @@ package httpapi
 // lives inside internal/site.
 
 import (
-	"log"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"strings"
 
@@ -78,18 +78,19 @@ type CreateSiteRequest struct {
 }
 
 type UpdateSiteRequest struct {
-	Name                    *string          `json:"name"`
-	Description             *string          `json:"description"`
-	Domain                  *string          `json:"domain"`
-	DefaultContentScope     *string          `json:"default_content_scope"`
-	DefaultLocale           *string          `json:"default_locale"`
-	EnabledLocales          *[]string        `json:"enabled_locales"`
-	FallbackToDefault       *bool            `json:"fallback_to_default"`
-	CommentsMode            *string          `json:"comments_mode"`
-	Status                  *string          `json:"status"`
-	LogoAttachmentID        *string          `json:"logo_attachment_id"`
-	FaviconAttachmentID     *string          `json:"favicon_attachment_id"`
-	SocialImageAttachmentID *string          `json:"social_image_attachment_id"`
+	Name                    *string   `json:"name"`
+	Description             *string   `json:"description"`
+	Brief                   *string   `json:"brief"`
+	Domain                  *string   `json:"domain"`
+	DefaultContentScope     *string   `json:"default_content_scope"`
+	DefaultLocale           *string   `json:"default_locale"`
+	EnabledLocales          *[]string `json:"enabled_locales"`
+	FallbackToDefault       *bool     `json:"fallback_to_default"`
+	CommentsMode            *string   `json:"comments_mode"`
+	Status                  *string   `json:"status"`
+	LogoAttachmentID        *string   `json:"logo_attachment_id"`
+	FaviconAttachmentID     *string   `json:"favicon_attachment_id"`
+	SocialImageAttachmentID *string   `json:"social_image_attachment_id"`
 }
 
 // SitesCollection serves GET/POST /api/workspaces/{workspaceId}/sites.
@@ -179,6 +180,7 @@ func SiteResource(deps Dependencies) http.HandlerFunc {
 				expectedRevisionFromIfMatch(r), site.UpdateSiteInput{
 					Name:                    input.Name,
 					Description:             input.Description,
+					Brief:                   input.Brief,
 					Domain:                  input.Domain,
 					DefaultContentScope:     input.DefaultContentScope,
 					DefaultLocale:           input.DefaultLocale,
@@ -252,6 +254,75 @@ func SiteInclusionsCollection(deps Dependencies) http.HandlerFunc {
 			"items": page.Items,
 			"page":  cursorPageFrom(page.HasMore, page.NextCursor),
 		})
+	}
+}
+
+// SiteLint serves GET /api/workspaces/{workspaceId}/sites/{siteId}/lint:
+// 站点体检报告（F2）。只读 advisory——任何发现都不阻断发布。site.read 即可看。
+func SiteLint(deps Dependencies) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
+			return
+		}
+		principal, ok := sessionPrincipal(w, r, deps)
+		if !ok {
+			return
+		}
+		if !requireSiteService(w, deps) {
+			return
+		}
+		workspaceID := r.PathValue("workspaceId")
+		siteID := r.PathValue("siteId")
+		if !requirePathUUID(w, workspaceID, siteID) {
+			return
+		}
+		if !requireWorkspaceAction(w, r, deps, principal, workspaceID, authz.ActionSiteRead) {
+			return
+		}
+		report, err := deps.Sites.LintSite(r.Context(), principal, workspaceID, siteID)
+		if err != nil {
+			SiteError(w, err, "slug_conflict")
+			return
+		}
+		writeData(w, r, http.StatusOK, map[string]any{
+			"site_id":  report.SiteID,
+			"findings": report.Findings,
+			"counts":   report.Counts(),
+		})
+	}
+}
+
+// SiteActivity serves GET /api/workspaces/{workspaceId}/sites/{siteId}/activity:
+// 站点动态时间线（F3-D2）：治理审计 ∪ 发布史，合并时间线（新→旧）。
+func SiteActivity(deps Dependencies) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
+			return
+		}
+		principal, ok := sessionPrincipal(w, r, deps)
+		if !ok {
+			return
+		}
+		if !requireSiteService(w, deps) {
+			return
+		}
+		workspaceID := r.PathValue("workspaceId")
+		siteID := r.PathValue("siteId")
+		if !requirePathUUID(w, workspaceID, siteID) {
+			return
+		}
+		if !requireWorkspaceAction(w, r, deps, principal, workspaceID, authz.ActionSiteRead) {
+			return
+		}
+		items, err := deps.Sites.SiteActivity(r.Context(), principal, workspaceID, siteID,
+			atoiDefault(r.URL.Query().Get("limit"), 50))
+		if err != nil {
+			SiteError(w, err, "slug_conflict")
+			return
+		}
+		writeData(w, r, http.StatusOK, map[string]any{"items": items})
 	}
 }
 

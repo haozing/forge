@@ -11,6 +11,7 @@ import (
 	runtimetools "agentchunzhi/internal/agentruntime/tools"
 	"agentchunzhi/internal/automation"
 	"agentchunzhi/internal/modelendpoint"
+	"agentchunzhi/internal/site"
 	"agentchunzhi/internal/store"
 
 	"github.com/jackc/pgx/v5"
@@ -50,6 +51,9 @@ func (s PersistentReActService) Process(ctx context.Context, claimed automation.
 	}
 	if run.RuntimeMode != "react" || run.Status != "running" {
 		return false, ErrInvalidReActRequest
+	}
+	if err := s.injectSiteBrief(ctx, &run); err != nil {
+		return false, err
 	}
 	registry, policy, err := s.ToolFactory.Build(ctx, run.Scope, run.ToolPolicy)
 	if err != nil {
@@ -141,6 +145,39 @@ type persistentResume struct {
 	Approved    bool
 	Response    map[string]any
 }
+
+// injectSiteBrief appends the workspace site brief (F1, 0043) to the run
+// instruction so every modeling/design decision starts from the site's
+// positioning. Server-side trusted configuration (same band as the
+// application instruction), never model-visible untrusted data; empty brief
+// or no active site injects nothing.
+func (s PersistentReActService) injectSiteBrief(ctx context.Context, run *persistentRun) error {
+	var brief string
+	err := s.Store.Pool.QueryRow(ctx, `
+		SELECT brief FROM site.public_sites
+		WHERE organization_id = $1::uuid AND workspace_id = $2::uuid AND status = 'active'
+		ORDER BY created_at ASC
+		LIMIT 1
+	`, run.Scope.OrganizationID, run.Scope.WorkspaceID).Scan(&brief)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("load site brief: %w", err)
+	}
+	brief = strings.TrimSpace(brief)
+	if brief == "" {
+		return nil
+	}
+	if runes := []rune(brief); len(runes) > site.MaxBriefRunes {
+		brief = string(runes[:site.MaxBriefRunes])
+	}
+	run.Instruction = strings.TrimSpace(run.Instruction) + "\n\n" + siteBriefInstructionPrefix + brief
+	return nil
+}
+
+const siteBriefInstructionPrefix = `## 站点简报（本工作区公开站的定位说明，内容写作与设计决策须与之一致）
+`
 
 func (s PersistentReActService) loadRun(ctx context.Context, runID string) (persistentRun, error) {
 	var result persistentRun

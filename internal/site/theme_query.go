@@ -24,7 +24,7 @@ func (r *PublicReader) loadSiteByID(ctx context.Context, organizationID, id stri
 	err := r.Store.Pool.QueryRow(ctx, `SELECT `+siteColumns+`
 		FROM site.public_sites
 		WHERE organization_id = $1::uuid AND id = $2::uuid AND status = 'active'
-	`, organizationID, id).Scan(&item.ID, &item.OrganizationID, &item.WorkspaceID, &item.Slug, &item.Name, &item.Description,
+	`, organizationID, id).Scan(&item.ID, &item.OrganizationID, &item.WorkspaceID, &item.Slug, &item.Name, &item.Description, &item.Brief,
 		&item.Domain, &item.DefaultContentScope, &item.Status, &item.Revision,
 		&item.DefaultLocale, &item.EnabledLocales, &item.FallbackToDefault,
 		&item.CommentsMode, &item.PublishedReleaseID, &item.CreatedAt, &item.UpdatedAt,

@@ -141,7 +141,13 @@ func (s Service) ApplyDesignSession(ctx context.Context, principal auth.Principa
 	if _, err := s.SaveThemeDraft(ctx, principal, workspaceID, siteID, session.Files); err != nil {
 		return Site{}, err
 	}
-	tag, err := s.Store.Pool.Exec(ctx, `
+	// 会话写回的审计与状态翻转同事务（治理写不得在提交后丢审计行）。
+	tx, err := s.Store.Pool.Begin(ctx)
+	if err != nil {
+		return Site{}, err
+	}
+	defer tx.Rollback(ctx)
+	tag, err := tx.Exec(ctx, `
 		UPDATE site.design_sessions SET status = 'applied', updated_at = now()
 		WHERE organization_id = $1::uuid AND id = $2::uuid
 	`, principal.OrganizationID, sessionID)
@@ -150,6 +156,12 @@ func (s Service) ApplyDesignSession(ctx context.Context, principal auth.Principa
 	}
 	if tag.RowsAffected() == 0 {
 		return Site{}, ErrSiteNotFound
+	}
+	recordSiteAudit(ctx, tx, principal, workspaceID, "site.design_applied", siteID, map[string]any{
+		"session_id": sessionID,
+	})
+	if err := tx.Commit(ctx); err != nil {
+		return Site{}, err
 	}
 	return s.GetSite(ctx, principal, workspaceID, siteID)
 }

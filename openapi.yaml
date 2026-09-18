@@ -2894,6 +2894,150 @@ paths:
                       next_cursor: { type: string }
                       has_more: { type: boolean }
                   - $ref: '#/components/schemas/Envelope'
+  /api/workspaces/{workspaceId}/sites/{siteId}/lint:
+    get:
+      tags: [sites]
+      operationId: lintSite
+      description: 站点体检（F2）：死引用/301 失效/孤儿内容/空公开分类/SEO 基线/locale 断链/待发布积压/图片缺 alt。advisory——任何发现都不阻断发布。
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/SiteId'
+      responses:
+        '200':
+          description: 体检报告
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    properties:
+                      site_id: { type: string, format: uuid }
+                      findings:
+                        type: array
+                        items: { $ref: '#/components/schemas/LintFinding' }
+                      counts:
+                        type: object
+                        properties:
+                          error: { type: integer }
+                          warn: { type: integer }
+                          info: { type: integer }
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
+  /api/workspaces/{workspaceId}/sites/{siteId}/activity:
+    get:
+      tags: [sites]
+      operationId: siteActivity
+      description: 站点动态时间线（F3）：治理审计（site.*）与收录内容发布史合并，新→旧。内部消费面，不对外。
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/SiteId'
+        - name: limit
+          in: query
+          schema: { type: integer, maximum: 100, default: 50 }
+      responses:
+        '200':
+          description: 动态列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/SiteActivityItem' }
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
+  /api/workspaces/{workspaceId}/modeling-plans:
+    get:
+      tags: [sites]
+      operationId: listModelingPlans
+      description: 建模计划列表（F4 分诊台，新→旧）。
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - name: limit
+          in: query
+          schema: { type: integer, maximum: 100, default: 50 }
+      responses:
+        '200':
+          description: 计划列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    properties:
+                      items: { type: array, items: { $ref: '#/components/schemas/ModelingPlan' } }
+                  - $ref: '#/components/schemas/Envelope'
+    post:
+      tags: [sites]
+      operationId: saveModelingPlan
+      description: 保存 analyze 工具产出的建模计划（status=draft，等待人分诊）。
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ModelingPlanSave' }
+      responses:
+        '201':
+          description: 已保存
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ModelingPlan'
+                  - $ref: '#/components/schemas/Envelope'
+        '422': { $ref: '#/components/responses/Error' }
+  /api/workspaces/{workspaceId}/modeling-plans/{planId}:
+    get:
+      tags: [sites]
+      operationId: getModelingPlan
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - name: planId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: 计划详情
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ModelingPlan'
+                  - $ref: '#/components/schemas/Envelope'
+        '404': { $ref: '#/components/responses/Error' }
+    patch:
+      tags: [sites]
+      operationId: patchModelingPlan
+      description: 分诊转换（draft→approved|rejected；执行侧→applied|failed）或整体替换计划体（仅 draft）。
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - name: planId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                status: { type: string, enum: [draft, approved, rejected, applied, failed] }
+                plan: { type: array, description: "计划条目数组（整体替换；仅 draft 状态可改）" }
+      responses:
+        '200':
+          description: 已更新
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ModelingPlan'
+                  - $ref: '#/components/schemas/Envelope'
+        '422': { $ref: '#/components/responses/Error' }
   /api/workspaces/{workspaceId}/sites/{siteId}/inclusions/{assetId}/exclusion:
     put:
       tags: [sites]
@@ -6436,6 +6580,7 @@ components:
         slug: { type: string }
         name: { type: string }
         description: { type: string, description: '站点级描述：公开首页 meta description 兜底' }
+        brief: { type: string, description: '站点简报（F1）：站点的"为什么"（定位/受众/范围），注入 agent 建模指令；内部工作文档，不进公开渲染' }
         domain: { type: string }
         default_content_scope: { type: string, enum: [public, organization, workspace] }
         logo_attachment_id: { type: string, format: uuid, nullable: true, description: '站点 Logo 图片附件（image/*）' }
@@ -6451,6 +6596,53 @@ components:
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
         etag: { type: string, description: 表示版本（= revision），供 If-Match 使用 }
+    LintFinding:
+      type: object
+      required: [check, severity, resource_type, resource_id, message]
+      properties:
+        check: { type: string, description: "规则标识（dead_asset_ref/stale_redirect/orphan_content/empty_public_category/site_description_missing/page_seo_description_missing/page_body_h1/locale_group_gap/publish_backlog/image_missing_alt）" }
+        severity: { type: string, enum: [error, warn, info] }
+        resource_type: { type: string, description: "site/page/asset/container/redirect" }
+        resource_id: { type: string }
+        message: { type: string }
+        hint: { type: string }
+    SiteActivityItem:
+      type: object
+      required: [kind, time, action, actor_name, actor_type]
+      properties:
+        kind: { type: string, enum: [audit, publish], description: "audit=治理动作；publish=发布史" }
+        time: { type: string, format: date-time }
+        action: { type: string, description: "audit 的 action 词表（site.theme_saved/site.custom_page_created/...）或固定 asset.publish" }
+        actor_name: { type: string }
+        actor_type: { type: string, enum: [member, agent] }
+        resource_id: { type: string }
+        metadata: { type: string, description: "audit 元数据 JSON 文本（仅内部消费，不外溢公开面）" }
+        asset_id: { type: string, format: uuid }
+        version_no: { type: integer }
+        origin: { type: string }
+        confirmation_status: { type: string }
+        change_note: { type: string }
+    ModelingPlan:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        organization_id: { type: string, format: uuid }
+        workspace_id: { type: string, format: uuid }
+        intent: { type: string }
+        target_model_id: { type: string, format: uuid, nullable: true }
+        sources: { type: array, description: "源资产摘要" }
+        plan: { type: array, description: "计划条目（source_asset_id/title/summary/fields/link_targets/enabled/created_asset_id）" }
+        status: { type: string, enum: [draft, approved, rejected, applied, failed] }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    ModelingPlanSave:
+      type: object
+      required: [intent, plan]
+      properties:
+        intent: { type: string }
+        target_model_id: { type: string, format: uuid }
+        sources: { type: array }
+        plan: { type: array, description: "1-20 条，每条必须含 source_asset_id 与 enabled 布尔" }
     SiteCreate:
       type: object
       required: [slug, name]
@@ -6463,6 +6655,8 @@ components:
       type: object
       properties:
         name: { type: string, maxLength: 200 }
+        description: { type: string, description: '站点级描述' }
+        brief: { type: string, maxLength: 2000, description: '站点简报（F1）；空串清除' }
         domain: { type: string }
         default_content_scope: { type: string, enum: [public, organization, workspace] }
         default_locale: { type: string, description: '默认语言（ISO 639-1 两字母，E1/D11）；无前缀路由' }

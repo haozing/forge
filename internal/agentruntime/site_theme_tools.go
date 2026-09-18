@@ -219,8 +219,11 @@ func (f DomainToolFactory) applySiteThemeTools(handlers *runtimetools.BuiltinHan
 		if value, ok := arguments["description"].(string); ok {
 			input.Description = &value
 		}
-		if input.Name == nil && input.Description == nil {
-			return nil, errors.New("name or description is required")
+		if value, ok := arguments["brief"].(string); ok {
+			input.Brief = &value
+		}
+		if input.Name == nil && input.Description == nil && input.Brief == nil {
+			return nil, errors.New("name, description or brief is required")
 		}
 		return sites.UpdateSite(ctx, principal, workspaceID, siteID, fmt.Sprintf("%d", row.Revision), input)
 	})
@@ -269,4 +272,21 @@ func (f DomainToolFactory) applySiteThemeTools(handlers *runtimetools.BuiltinHan
 			return nil, errors.New("action must be create | update | delete")
 		}
 	})
+
+	// site_lint：站点体检（F2）。只读 advisory——发现清单供 agent 与人
+	// 对照修复，不阻断任何动作。权限比主题工具低一档（site.read 即可）。
+	handlers.SiteLint = func(ctx context.Context, arguments map[string]any) (any, error) {
+		if _, err := allowed(ctx, "site.read"); err != nil {
+			return nil, err
+		}
+		report, err := sites.LintSite(ctx, principal, workspaceID, stringValue(arguments["site_id"]))
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{
+			"site_id":  report.SiteID,
+			"findings": report.Findings,
+			"counts":   report.Counts(),
+		}, nil
+	}
 }

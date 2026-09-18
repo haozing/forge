@@ -30,6 +30,7 @@ import (
 	"agentchunzhi/internal/folder"
 	"agentchunzhi/internal/identity"
 	"agentchunzhi/internal/modelendpoint"
+	"agentchunzhi/internal/modeling"
 	"agentchunzhi/internal/organization"
 	agentquery "agentchunzhi/internal/query"
 	"agentchunzhi/internal/resourcemodel"
@@ -78,6 +79,8 @@ type Dependencies struct {
 	FolderService folder.Service
 	// Phase 5 public-site management service (site CRUD, bindings, preview).
 	Sites *site.Service
+	// F4 建模计划（两步建模）：人保存/分诊/执行的计划分诊台。
+	ModelingPlans modeling.Service
 	// Phase 5 public-site read face (anonymous/optional-member visitors):
 	// home/posts/detail/sections/tags/search with D4 ETags and the shared
 	// public_site_ip budget (B5).

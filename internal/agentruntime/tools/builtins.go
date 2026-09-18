@@ -61,6 +61,11 @@ type BuiltinHandlers struct {
 	ValidateTheme JSONHandler
 	UpdateSite    JSONHandler
 	ManagePages   JSONHandler
+	// F2 站点体检（只读 advisory，site.read 档）。
+	SiteLint JSONHandler
+	// F4 两步建模（只读，asset.read+schema.read 档）。
+	PlanBatchModeling JSONHandler
+	GetModelingPlan   JSONHandler
 }
 
 type builtinSpec struct {
@@ -121,8 +126,11 @@ func builtinSpecs(handlers BuiltinHandlers) []builtinSpec {
 		{name: "render_html", description: "编译会话沙盒并渲染指定槽位的完整 HTML（供文本自检）", risk: ReadOnly, capabilities: []string{"site.design"}, handler: handlers.RenderHTML, parameters: map[string]*schema.ParameterInfo{"site_id": id("Site ID"), "slot": {Type: schema.String, Desc: "home | list | detail"}, "display_path": {Type: schema.String, Desc: "detail 槽位必填：内容显示路径"}}},
 		{name: "preview_link", description: "签发一次性预览 token（60 秒、单次消费），返回 iframe 直出路径", risk: ReadOnly, capabilities: []string{"site.design"}, handler: handlers.PreviewLink, parameters: map[string]*schema.ParameterInfo{"site_id": id("Site ID"), "slot": {Type: schema.String, Desc: "缺省 home"}}},
 		{name: "validate_theme", description: "主题编译/扫描/槽位完整性校验报告", risk: ReadOnly, capabilities: []string{"site.design"}, handler: handlers.ValidateTheme, parameters: map[string]*schema.ParameterInfo{"site_id": id("Site ID")}},
-		{name: "update_site", description: "更新站点名称与描述", risk: LowWrite, capabilities: []string{"site.design"}, handler: handlers.UpdateSite, parameters: map[string]*schema.ParameterInfo{"site_id": id("Site ID"), "name": {Type: schema.String, Desc: "新站点名称"}, "description": {Type: schema.String, Desc: "站点描述（首页 meta description 兜底）"}}},
+		{name: "update_site", description: "更新站点名称、描述与站点简报（简报=站点定位说明，注入后续 agent 建模指令）", risk: LowWrite, capabilities: []string{"site.design"}, handler: handlers.UpdateSite, parameters: map[string]*schema.ParameterInfo{"site_id": id("Site ID"), "name": {Type: schema.String, Desc: "新站点名称"}, "description": {Type: schema.String, Desc: "站点描述（首页 meta description 兜底）"}, "brief": {Type: schema.String, Desc: "站点简报：定位/受众/范围（≤2000 字 markdown；空串清除）"}}},
 		{name: "manage_pages", description: "自定义页增删改（create/update/delete）", risk: LowWrite, capabilities: []string{"site.design"}, handler: handlers.ManagePages, parameters: map[string]*schema.ParameterInfo{"site_id": id("Site ID"), "action": id("create | update | delete"), "page_id": {Type: schema.String, Desc: "update/delete 必填"}, "slug": {Type: schema.String, Desc: "create 必填"}, "title": {Type: schema.String}, "body_markdown": {Type: schema.String}, "seo_description": {Type: schema.String}, "nav_hidden": {Type: schema.Boolean}, "nav_order": {Type: schema.Integer}}},
+		{name: "site_lint", description: "站点体检报告（死引用/301 失效/孤儿内容/空分类/SEO 基线/locale 断链/待发布积压/图片缺 alt）；只读 advisory，不阻断任何操作", risk: ReadOnly, capabilities: []string{"site.read"}, handler: handlers.SiteLint, parameters: map[string]*schema.ParameterInfo{"site_id": id("Site ID")}},
+		{name: "plan_batch_modeling", description: "两步建模第一步（analyze）：读取一批源资产，产出逐条建模计划 JSON（不落库；保存与批准由人完成）", risk: ReadOnly, capabilities: []string{"asset.read", "schema.read"}, handler: handlers.PlanBatchModeling, parameters: map[string]*schema.ParameterInfo{"source_asset_ids": {Type: schema.Array, Required: true, Desc: "源资产 ID（1-20 个）", ElemInfo: &schema.ParameterInfo{Type: schema.String}}, "intent": id("建模意图：这批内容要建成什么"), "target_model_id": {Type: schema.String, Desc: "可选目标模型 ID（缺省由计划建议）"}}},
+		{name: "get_modeling_plan", description: "两步建模第二步（generate）：按 ID 读取已批准的建模计划；产出只能建草稿，引用链接只允许计划内 ID", risk: ReadOnly, capabilities: []string{"asset.read"}, handler: handlers.GetModelingPlan, parameters: map[string]*schema.ParameterInfo{"plan_id": id("Modeling plan ID")}},
 		{name: "search_knowledge", description: "Search authorized published knowledge", risk: ReadOnly, capabilities: []string{"query.read"}, handler: handlers.SearchKnowledge, parameters: map[string]*schema.ParameterInfo{"query": id("Search query"), "limit": {Type: schema.Integer, Desc: "Maximum 50 results"}}},
 		{name: "query_assets", description: "Query authorized assets with server-validated filters", risk: ReadOnly, capabilities: []string{"asset.read"}, handler: handlers.QueryAssets, parameters: map[string]*schema.ParameterInfo{"query": {Type: schema.String}, "limit": {Type: schema.Integer}}},
 		{name: "get_asset", description: "Read one authorized asset", risk: ReadOnly, capabilities: []string{"asset.read"}, handler: handlers.GetAsset, parameters: map[string]*schema.ParameterInfo{"asset_id": id("Asset ID")}},

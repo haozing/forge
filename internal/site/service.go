@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"agentchunzhi/internal/auth"
 	"agentchunzhi/internal/authz"
@@ -54,6 +55,9 @@ type Site struct {
 	SocialImageAttachmentID string `json:"social_image_attachment_id"`
 	// 站点级描述（§1.3/§7.3）：公开首页 meta description 的兜底来源。
 	Description string `json:"description"`
+	// 站点简报（内容治理 F1，0043）：站点的"为什么"（定位/受众/范围），
+	// 注入 react run 指令供 agent 对齐；内部工作文档，不进公开渲染。
+	Brief string `json:"brief"`
 	// 多语言（D11）：默认语言 + 启用语言集合 + 回退开关。
 	DefaultLocale     string   `json:"default_locale"`
 	EnabledLocales    []string `json:"enabled_locales"`
@@ -92,6 +96,7 @@ type CreateSiteInput struct {
 type UpdateSiteInput struct {
 	Name                *string
 	Description         *string
+	Brief               *string
 	Domain              *string
 	DefaultContentScope *string
 	HomepageConfig      *json.RawMessage
@@ -160,7 +165,11 @@ func (s Service) require(ctx context.Context, principal auth.Principal, workspac
 	return nil
 }
 
-const siteColumns = `id::text, organization_id::text, workspace_id::text, slug, name, description,
+// MaxBriefRunes caps the site brief (F1): long enough for a real positioning
+// statement, short enough to inject verbatim into a react run instruction.
+const MaxBriefRunes = 2000
+
+const siteColumns = `id::text, organization_id::text, workspace_id::text, slug, name, description, brief,
 	COALESCE(domain, ''), default_content_scope, status, revision,
 	default_locale, enabled_locales, fallback_to_default, comments_mode,
 	published_release_id::text, created_at, updated_at,
@@ -171,7 +180,7 @@ const siteColumns = `id::text, organization_id::text, workspace_id::text, slug, 
 func scanSiteRow(row interface{ Scan(...any) error }) (Site, error) {
 	var item Site
 	err := row.Scan(&item.ID, &item.OrganizationID, &item.WorkspaceID, &item.Slug, &item.Name,
-		&item.Description, &item.Domain, &item.DefaultContentScope, &item.Status, &item.Revision,
+		&item.Description, &item.Brief, &item.Domain, &item.DefaultContentScope, &item.Status, &item.Revision,
 		&item.DefaultLocale, &item.EnabledLocales, &item.FallbackToDefault,
 		&item.CommentsMode, &item.PublishedReleaseID, &item.CreatedAt, &item.UpdatedAt,
 		&item.LogoAttachmentID, &item.FaviconAttachmentID, &item.SocialImageAttachmentID,
@@ -527,6 +536,12 @@ func applySiteUpdate(ctx context.Context, tx pgx.Tx, principal auth.Principal, w
 	}
 	if input.Description != nil {
 		sets = append(sets, "description = "+arg(strings.TrimSpace(*input.Description)))
+	}
+	if input.Brief != nil {
+		if utf8.RuneCountInString(*input.Brief) > MaxBriefRunes {
+			return Site{}, fmt.Errorf("%w: 站点简报不能超过 %d 字", ErrInvalidInput, MaxBriefRunes)
+		}
+		sets = append(sets, "brief = "+arg(strings.TrimSpace(*input.Brief)))
 	}
 	if input.Domain != nil {
 		sets = append(sets, "domain = NULLIF("+arg(domain)+", '')")

@@ -431,8 +431,14 @@ func (s Service) SetCategoryPublication(ctx context.Context, principal auth.Prin
 	if _, err := s.Get(ctx, principal, workspaceID, kind, containerID); err != nil {
 		return CategoryPublication{}, err
 	}
+	// 审计与业务 UPDATE 同事务（治理写不得在提交后丢审计行）。
+	tx, err := s.Store.Pool.Begin(ctx)
+	if err != nil {
+		return CategoryPublication{}, err
+	}
+	defer tx.Rollback(ctx)
 	var out CategoryPublication
-	err := s.Store.Pool.QueryRow(ctx, `
+	err = tx.QueryRow(ctx, `
 		UPDATE content.containers SET
 			public_flag = $5,
 			slug = CASE WHEN $5::bool THEN NULLIF($6, '') ELSE slug END,
@@ -449,6 +455,17 @@ func (s Service) SetCategoryPublication(ctx context.Context, principal auth.Prin
 		if err == pgx.ErrNoRows {
 			return CategoryPublication{}, ErrNotFound
 		}
+		return CategoryPublication{}, err
+	}
+	entry := store.NewAuditEntry("site.category_publication_changed",
+		principal.OrganizationID, principal.UserID, "site", containerID, map[string]any{
+			"container_id": containerID, "kind": string(kind),
+			"public_flag": out.PublicFlag, "slug": out.Slug,
+		})
+	if err := store.AppendAuditTx(ctx, tx, entry, workspaceID); err != nil {
+		return CategoryPublication{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
 		return CategoryPublication{}, err
 	}
 	return out, nil

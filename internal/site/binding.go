@@ -230,6 +230,9 @@ func (s Service) SetExcluded(ctx context.Context, principal auth.Principal, work
 	if err := appendSiteEvent(ctx, tx, s.Events, principal, workspaceID, site, action); err != nil {
 		return err
 	}
+	recordSiteAudit(ctx, tx, principal, workspaceID, "site.inclusion_changed", siteID, map[string]any{
+		"asset_id": assetID, "excluded": active,
+	})
 	return tx.Commit(ctx)
 }
 
@@ -271,5 +274,8 @@ func (s Service) SetFeatured(ctx context.Context, principal auth.Principal, work
 	if err := appendSiteEvent(ctx, tx, s.Events, principal, workspaceID, site, action); err != nil {
 		return err
 	}
+	recordSiteAudit(ctx, tx, principal, workspaceID, "site.featured_changed", siteID, map[string]any{
+		"asset_id": assetID, "featured": active,
+	})
 	return tx.Commit(ctx)
 }

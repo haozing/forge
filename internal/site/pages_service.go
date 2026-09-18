@@ -134,6 +134,9 @@ func (s *Service) CreateSitePage(ctx context.Context, principal auth.Principal, 
 	if err := appendSiteEvent(ctx, tx, s.Events, principal, workspaceID, siteRow, "site_page_created"); err != nil {
 		return CustomPage{}, err
 	}
+	recordSiteAudit(ctx, tx, principal, workspaceID, "site.custom_page_created", siteID, map[string]any{
+		"page_id": page.ID, "slug": page.Slug, "title": page.Title,
+	})
 	if err := tx.Commit(ctx); err != nil {
 		return CustomPage{}, err
 	}
@@ -198,6 +201,9 @@ func (s *Service) UpdateSitePage(ctx context.Context, principal auth.Principal, 
 	if err := appendSiteEvent(ctx, tx, s.Events, principal, workspaceID, siteRow, "site_page_updated"); err != nil {
 		return CustomPage{}, err
 	}
+	recordSiteAudit(ctx, tx, principal, workspaceID, "site.custom_page_updated", siteID, map[string]any{
+		"page_id": page.ID, "slug": page.Slug,
+	})
 	if err := tx.Commit(ctx); err != nil {
 		return CustomPage{}, err
 	}
@@ -231,6 +237,9 @@ func (s *Service) DeleteSitePage(ctx context.Context, principal auth.Principal, 
 	if err := appendSiteEvent(ctx, tx, s.Events, principal, workspaceID, siteRow, "site_page_deleted"); err != nil {
 		return err
 	}
+	recordSiteAudit(ctx, tx, principal, workspaceID, "site.custom_page_deleted", siteID, map[string]any{
+		"page_id": pageID,
+	})
 	return tx.Commit(ctx)
 }
 
@@ -240,7 +249,7 @@ func (s *Service) siteRowByID(ctx context.Context, organizationID, siteID string
 	err := s.Store.Pool.QueryRow(ctx, `SELECT `+siteColumns+`
 		FROM site.public_sites
 		WHERE organization_id = $1::uuid AND id = $2::uuid
-	`, organizationID, siteID).Scan(&item.ID, &item.OrganizationID, &item.WorkspaceID, &item.Slug, &item.Name, &item.Description,
+	`, organizationID, siteID).Scan(&item.ID, &item.OrganizationID, &item.WorkspaceID, &item.Slug, &item.Name, &item.Description, &item.Brief,
 		&item.Domain, &item.DefaultContentScope, &item.Status, &item.Revision,
 		&item.DefaultLocale, &item.EnabledLocales, &item.FallbackToDefault,
 		&item.CommentsMode, &item.PublishedReleaseID, &item.CreatedAt, &item.UpdatedAt,

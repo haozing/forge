@@ -169,6 +169,9 @@ func (s *Service) SaveThemeDraft(ctx context.Context, principal auth.Principal, 
 	if err := appendSiteEvent(ctx, tx, s.Events, principal, workspaceID, site, "theme_draft_saved"); err != nil {
 		return ThemeRevision{}, err
 	}
+	recordSiteAudit(ctx, tx, principal, workspaceID, "site.theme_saved", siteID, map[string]any{
+		"revision_id": draft.ID, "revision_no": draft.RevisionNo,
+	})
 	if err := tx.Commit(ctx); err != nil {
 		return ThemeRevision{}, err
 	}
