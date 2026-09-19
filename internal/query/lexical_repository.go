@@ -1,6 +1,9 @@
 package query
 
 import (
+	"log"
+	"os"
+
 	"context"
 	"fmt"
 	"strings"
@@ -62,6 +65,10 @@ func activeProfile(ctx context.Context, store *store.Store, organizationID strin
 // serving runs with PGroonga. Scope, policy, tag and field filters apply
 // before ranking; the caller collapses chunks per asset afterwards.
 func LexicalRecall(ctx context.Context, store *store.Store, scope QueryAccessScope, req Request, plan plan, profile retrieval.Profile, filters []compiledFieldFilter, tags resolvedTagFilter, window int) ([]chunkCandidate, error) {
+	if os.Getenv("QUERY_LEX_DEBUG") == "1" {
+		log.Printf("QUERY_LEX_DEBUG: fulltext_models=%v workspaces=%v vis=%v profile=%s query=%q window=%d",
+			plan.FulltextModels, scope.WorkspaceIDs, scope.AllowedVisibilities, profile.ID, req.Query, window)
+	}
 	if len(plan.FulltextModels) == 0 {
 		return []chunkCandidate{}, nil
 	}
