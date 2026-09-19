@@ -357,8 +357,14 @@ func (s MemberService) ListPage(ctx context.Context, principal auth.Principal, w
 		if !sortKey.Desc {
 			comparison = ">"
 		}
+		// cursor 的排序列值必须按排序键类型转型：updated_at 排序下按 text
+		// 比较会触发 timestamptz<text 运算符缺失（SQLSTATE 42883）。
+		valueCast := "::timestamptz"
+		if strings.HasPrefix(sortKey.Name, "title") {
+			valueCast = "::text"
+		}
 		where = append(where, fmt.Sprintf(
-			"(%s, a.id) %s (%s::text, %s::uuid)", cursorColumn, comparison, arg(cursor.Value), arg(cursor.ID)))
+			"(%s, a.id) %s (%s%s, %s::uuid)", cursorColumn, comparison, arg(cursor.Value), valueCast, arg(cursor.ID)))
 	}
 	query := fmt.Sprintf(`
 		SELECT a.id::text, a.workspace_id::text, a.resource_model_id::text,
