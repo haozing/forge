@@ -1,6 +1,6 @@
 {{define "content"}}
 <article class="article">
-  <h1 class="article-title">{{.Title}}</h1>
+  <h1 class="article-title">{{.Heading}}{{if not .Heading}}{{.Title}}{{end}}</h1>
   <footer class="article-meta">
     {{if gt .VersionNo 0}}<span class="article-version">v{{.VersionNo}}</span>{{end}}
     {{with .PublishedOn}}<time datetime="{{$.UpdatedISO}}">{{i18n "published"}} {{.}}</time>{{end}}
@@ -13,10 +13,10 @@
   {{if ge (len .Publications) 2}}<details class="article-history"><summary>更新记录（{{len .Publications}}）</summary>
     <ol>{{range .Publications}}<li>v{{.VersionNo}} <time>{{.PublishedOn}}</time>{{with .ChangeNote}} &mdash; {{.}}{{end}}</li>{{end}}</ol>
   </details>{{end}}
+  {{template "tag_chips" .Tags}}
   {{with .Related}}<section class="related-posts"><h2>相关文章</h2>
     <div class="cards">{{range .}}{{template "card" .}}{{end}}</div>
   </section>{{end}}
-  {{template "tag_chips" .Tags}}
   {{if or .Prev .Next}}<nav class="neighbors">
     {{with .Prev}}<a rel="prev" href="{{.Href}}">&larr; {{.Title}}</a>{{end}}
     {{with .Next}}<a rel="next" href="{{.Href}}">{{.Title}} &rarr;</a>{{end}}

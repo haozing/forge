@@ -185,6 +185,9 @@ type DetailVM struct {
 	AssetID     string
 	Section     string
 	SectionHref string
+	// Heading 是纯文章标题（h1 用）：Page.Title 带" · 站名"后缀，是给
+	// <title>/OG 用的，不能进 h1。
+	Heading     string
 	ContentHTML template.HTML
 	TOC         []Heading
 	Fields      []FieldValueVM
@@ -461,6 +464,7 @@ func ResolveDetailWithRefs(slug string, content site.PublicPostContent, authoriz
 	}
 	detail := DetailVM{
 		Page:         Page{Kind: "detail", Title: content.Title, Description: description},
+		Heading:      content.Title,
 		AssetID:      content.AssetID,
 		Section:      content.Section,
 		SectionHref:  sectionHref(slug, content.Section),
