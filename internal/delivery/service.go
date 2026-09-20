@@ -30,8 +30,6 @@ import (
 	"agentchunzhi/internal/store"
 	"agentchunzhi/internal/tag"
 
-	agentquery "agentchunzhi/internal/query"
-
 	"golang.org/x/sync/singleflight"
 )
 
@@ -404,9 +402,10 @@ func (s *Service) Posts(ctx context.Context, addr string, principal auth.Princip
 		}
 		page, err := s.Reader.Posts(ctx, addr, principal, slug, site.PublicPostQuery{Cursor: cursor, Limit: 12})
 		if err != nil {
-			// 无效/过期 cursor（会话级令牌）不回 422：301 到干净列表页
-			//（对标审计 P1-1/P3-4：cursor 不该成为可收录 URL）。
-			if cursor != "" && errors.Is(err, agentquery.ErrInvalidRequest) {
+			// 带 cursor 的列表页出错（无效/过期会话令牌等）一律 301 到干净
+			// 列表页：cursor 不是可收录 URL，也不该以 422/500 呈现给爬虫
+			//（对标审计 P1-1/P3-4）。
+			if cursor != "" {
 				return renderOutput{redirect: "/sites/" + slug + "/posts/"}, nil
 			}
 			return renderOutput{}, err
@@ -538,7 +537,7 @@ func (s *Service) TagPage(ctx context.Context, addr string, principal auth.Princ
 		page, err := s.Reader.TagPage(ctx, addr, principal, slug, key, site.PublicPostQuery{Cursor: cursor, Limit: 12})
 		if err != nil {
 			// 无效 cursor 同列表页：301 到干净标签页（对标审计 P1-1）。
-			if cursor != "" && errors.Is(err, agentquery.ErrInvalidRequest) {
+			if cursor != "" {
 				return renderOutput{redirect: "/sites/" + slug + "/tags/" + key}, nil
 			}
 			return renderOutput{}, err
@@ -871,7 +870,9 @@ func injectSEOMeta(body []byte, page Page) []byte {
 }
 
 // pageMetaFromVM 从任一页面 VM（均内嵌 Page）反射取页面元数据；非页面 VM
-// （gate/error 等）返回 false。
+// （gate/error 等）返回 false。注意部分 VM（CategoryVM/DetailVM）声明了自己的
+// Site 字段，handler 把 chrome() 赋给外层字段时 Page.Site 恒零值——这里做
+// 外层回退，否则 og:site_name 输出空串。
 func pageMetaFromVM(vm any) (Page, bool) {
 	if vm == nil {
 		return Page{}, false
@@ -885,5 +886,16 @@ func pageMetaFromVM(vm any) (Page, bool) {
 		return Page{}, false
 	}
 	page, ok := field.Interface().(Page)
-	return page, ok
+	if !ok {
+		return Page{}, false
+	}
+	if page.Site.Name == "" {
+		siteField := value.FieldByName("Site")
+		if siteField.IsValid() && siteField.Type() == reflect.TypeOf(Chrome{}) {
+			if chromeVal, ok := siteField.Interface().(Chrome); ok && chromeVal.Name != "" {
+				page.Site = chromeVal
+			}
+		}
+	}
+	return page, true
 }

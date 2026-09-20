@@ -348,8 +348,9 @@ func deliverySiteTagPage(deps Dependencies) http.HandlerFunc {
 		}
 		key := r.PathValue("key")
 		// 尾斜杠收敛（对标审计 P2-8）：标签页 canonical 无斜杠，带斜杠 301。
-		if trimmed := strings.TrimSuffix(key, "/"); trimmed != "" && trimmed != key {
-			http.Redirect(w, r, "/sites/"+slug+"/tags/"+trimmed, http.StatusMovedPermanently)
+		// {key} 段不含斜杠，须看原始路径是否以 / 结尾。
+		if strings.HasSuffix(r.URL.Path, "/") {
+			http.Redirect(w, r, "/sites/"+slug+"/tags/"+key, http.StatusMovedPermanently)
 			return
 		}
 		page, err := service.TagPage(r.Context(), effectiveClientAddr(r, deps.TrustedProxyCIDRs),
