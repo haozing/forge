@@ -529,8 +529,11 @@ func (s *Service) TagPage(ctx context.Context, addr string, principal auth.Princ
 			vm.Pagination.NextHref = "/sites/" + slug + "/tags/" + key + "/?cursor=" + page.NextCursor
 		}
 		vm.Title = "标签 " + key + " · " + facts.Site.Name
+		vm.Description = facts.Site.Name + " 中标签为 " + key + " 的文章合集。"
 		vm.Canonical = baseURL + routePath
-		vm.NoIndex = !vm.Site.ScopePublic
+		// 薄标签页（<3 篇且无下一页）noindex：标签聚合页天然薄内容/高重复，
+		// 业界惯例只把够分量的标签页留在索引里（对标分析 P3）。
+		vm.NoIndex = !vm.Site.ScopePublic || (!page.HasMore && len(page.Items) < 3)
 		return renderOutput{kind: "tag_page", vm: vm, noIndex: vm.NoIndex}, nil
 	})
 }
@@ -621,6 +624,10 @@ func (s *Service) Sitemap(ctx context.Context, addr string, principal auth.Princ
 			return renderOutput{}, err
 		}
 		for _, item := range tags {
+			// 薄标签页已 noindex（TagPage <3 篇），sitemap 不再列出。
+			if item.AssetCount < 3 {
+				continue
+			}
 			vm.URLs = append(vm.URLs, SitemapURL{Loc: baseURL + "/sites/" + slug + "/tags/" + item.Tag.Key + "/"})
 		}
 		cursor := ""
