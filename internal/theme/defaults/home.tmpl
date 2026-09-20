@@ -1,6 +1,7 @@
 {{define "content"}}
 <div class="home">
   <h1 class="home-title">{{.Site.Name}}</h1>
+  {{with .Description}}<p class="home-desc">{{.}}</p>{{end}}
   {{if .Categories}}
   <nav class="category-index" aria-label="分类导航">
     {{range .Categories}}<a class="category-chip" href="{{.Href}}">{{.Name}} <span class="count">{{.Count}}</span></a>{{end}}
