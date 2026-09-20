@@ -615,9 +615,12 @@ func robotsTxt(deps Dependencies) http.HandlerFunc {
 		}
 		slugs := []string{}
 		if deps.Store != nil && deps.Store.Pool != nil {
+			// 只聚合"正式对外"的站：active + 已发布 + public scope（内部/测试
+			// 站不进域级 robots，避免在搜索引擎面前暴露）。
 			rows, err := deps.Store.Pool.Query(r.Context(), `
 				SELECT slug FROM site.public_sites
 				WHERE status = 'active' AND published_release_id IS NOT NULL
+				  AND default_content_scope = 'public'
 				ORDER BY created_at, slug
 			`)
 			if err == nil {

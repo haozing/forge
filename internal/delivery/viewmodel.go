@@ -127,6 +127,8 @@ type HomeVM struct {
 	Items        []CardVM
 	TagCloud     []TagChip
 	ShowTagCloud bool
+	// Categories 是顶层公开分类入口（对标 Ahrefs/Backlinko 式首页分类区块）。
+	Categories []CategoryLinkVM
 }
 
 // BlockVM is one resolved pages_config v2 module (C1/D6/D10).
@@ -550,6 +552,10 @@ type CategoryVM struct {
 	Items         []CardVM
 	Crumbs        []CrumbVM
 	Subcategories []SubcategoryVM
+	// IsIndex 是 /c/ 总览模式：渲染全部分类入口而不是某个分类的内容
+	//（Categories 为数据源，Items/Crumbs/Subcategories 留空）。
+	IsIndex    bool
+	Categories []SubcategoryVM
 }
 
 // CrumbVM is one breadcrumb entry (name + public href).

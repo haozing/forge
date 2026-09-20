@@ -38,3 +38,17 @@ h1,h2,h3{font-family:var(--font-heading)}
 .neighbors{display:flex;justify-content:space-between;margin-top:26px}
 .site-footer{border-top:1px solid var(--c-border);padding:18px 24px;display:flex;justify-content:space-between;color:var(--c-muted);font-size:14px}
 .home-title { font-size: 1.6rem; margin: 0 0 1rem; }
+.category-index{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 1.4rem}
+.category-chip{display:inline-block;background:var(--c-surface);border:1px solid var(--c-border);border-radius:8px;padding:6px 14px;color:var(--c-text);font-size:14px}
+.category-chip:hover{border-color:var(--c-primary)}
+.category-chip .count{color:var(--c-muted);font-size:12px;margin-left:4px}
+.category-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px;margin:1rem 0}
+.category-card{display:flex;justify-content:space-between;align-items:baseline;gap:8px;background:var(--c-surface);border:1px solid var(--c-border);border-radius:8px;padding:14px 16px;color:var(--c-text)}
+.category-card:hover{border-color:var(--c-primary)}
+.category-card .name{font-weight:600}
+.category-card .count{color:var(--c-muted);font-size:13px;white-space:nowrap}
+.related-posts{margin-top:1.6rem}
+.related-posts h2{font-size:1.1em}
+.crumbs{color:var(--c-muted);font-size:13px;margin-bottom:8px}
+.subcategories ul{list-style:none;padding:0;display:flex;flex-wrap:wrap;gap:10px}
+.pager-next{display:inline-block;margin-top:1.2rem}

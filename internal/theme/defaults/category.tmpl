@@ -1,10 +1,19 @@
 {{define "content"}}
 <div class="category-page">
+  {{if .IsIndex}}
+  <h1>{{.Heading}}</h1>
+  {{with .Categories}}
+  <div class="category-grid">
+    {{range .}}<a class="category-card" href="{{.Href}}"><span class="name">{{.Name}}</span><span class="count">{{.Count}} 篇</span></a>{{end}}
+  </div>
+  {{end}}
+  {{else}}
   {{with .Crumbs}}<nav class="crumbs">{{range .}}<a href="{{.Href}}">{{.Name}}</a> / {{end}}</nav>{{end}}
-  <h1>{{.Title}}</h1>
+  <h1>{{.Heading}}</h1>
   {{if .Subcategories}}<section class="subcategories"><h2>子分类</h2>
     <ul>{{range .Subcategories}}<li><a href="{{.Href}}">{{.Name}}</a> <span class="count">{{.Count}}</span></li>{{end}}</ul>
   </section>{{end}}
   <div class="cards">{{range .Items}}{{template "card" .}}{{end}}</div>
+  {{end}}
 </div>
 {{end}}

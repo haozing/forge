@@ -8,6 +8,8 @@ package delivery
 // implementation exists here, design doc §4.2).
 
 import (
+	"html"
+	"reflect"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -238,6 +240,11 @@ func (s *Service) pipeline(ctx context.Context, addr string, principal auth.Prin
 		if alts := s.alternates(facts, routePath); len(alts) > 0 {
 			body = injectHeadTags(body, alts)
 		}
+		// OG / Twitter 卡 / JSON-LD 服务端注入（对标分析 P2）：任何主题
+		//（含存量自定义主题）都即时生效。
+		if page, ok := pageMetaFromVM(output.vm); ok {
+			body = injectSEOMeta(body, page)
+		}
 		cacheControl := publicCachePolicy
 		if band == "member" || facts.Site.DefaultContentScope != site.ScopePublic {
 			// Member-tier or gated representations never sit in shared caches.
@@ -349,6 +356,14 @@ func (s *Service) Home(ctx context.Context, addr string, principal auth.Principa
 			s.Logf("delivery: home tag cloud degraded slug=%s err=%v", slug, err)
 		}
 		vm := ResolveHome(view, facets)
+		// 顶层公开分类区块（对标分析 P2）：加载失败降级为不渲染。
+		if cats, err := s.Reader.PublicCategoryIndex(ctx, addr, principal, slug); err == nil {
+			for _, cat := range cats {
+				vm.Categories = append(vm.Categories, CategoryLinkVM{Name: cat.Name, Href: cat.Href, Count: cat.Count})
+			}
+		} else {
+			s.Logf("delivery: home categories degraded slug=%s err=%v", slug, err)
+		}
 		vm.Site = chrome(facts, "home")
 		vm.Queries = queries
 		vm.Title = facts.Site.Name
@@ -381,6 +396,7 @@ func (s *Service) Posts(ctx context.Context, addr string, principal auth.Princip
 		vm.Site = chrome(facts, "list")
 		vm.Queries = queries
 		vm.Title = "文章 · " + facts.Site.Name
+		vm.Description = facts.Site.Name + " 全部文章，按发布时间排列。"
 		vm.Canonical = baseURL + routePath
 		vm.NoIndex = !vm.Site.ScopePublic
 		return renderOutput{kind: "list", vm: vm, noIndex: vm.NoIndex}, nil
@@ -587,6 +603,12 @@ func (s *Service) Sitemap(ctx context.Context, addr string, principal auth.Princ
 		if _, err := s.Reader.About(ctx, addr, principal, slug); err == nil {
 			vm.URLs = append(vm.URLs, SitemapURL{Loc: baseURL + "/sites/" + slug + "/about/"})
 		}
+		// 分类页是关键词落地页（对标分析 P2）：顶层公开分类进 sitemap。
+		if cats, err := s.Reader.PublicCategoryIndex(ctx, addr, principal, slug); err == nil {
+			for _, cat := range cats {
+				vm.URLs = append(vm.URLs, SitemapURL{Loc: baseURL + cat.Href})
+			}
+		}
 		sections, err := s.Reader.SectionSlugs(ctx, addr, principal, slug)
 		if err != nil {
 			return renderOutput{}, err
@@ -603,15 +625,23 @@ func (s *Service) Sitemap(ctx context.Context, addr string, principal auth.Princ
 		}
 		cursor := ""
 		sitemapPosts := 0
-		for round := 0; round < 10; round++ {
+		// 40 轮 × 50 = 2000 条上限：列表页 cursor 全量可达的兜底（超出部分
+		// 仍可经 /posts/ 翻页被爬到）。
+		for round := 0; round < 40; round++ {
 			page, err := s.Reader.Posts(ctx, addr, principal, slug, site.PublicPostQuery{Cursor: cursor, Limit: 50})
 			if err != nil {
 				return renderOutput{}, err
 			}
 			for _, post := range page.Items {
+				// lastmod 用发布时间语义：可见性等运维操作会 bump updated_at，
+				// 用它会让全站 lastmod 被批量操作污染（2026-09-20 实测教训）。
+				modified := post.PublishedAt
+				if modified == nil {
+					modified = post.UpdatedAt
+				}
 				vm.URLs = append(vm.URLs, SitemapURL{
 					Loc:       baseURL + postHref(slug, post.DisplayPath),
-					LastmodOn: FormatISO(post.UpdatedAt),
+					LastmodOn: FormatISO(modified),
 				})
 				sitemapPosts++
 			}
@@ -765,4 +795,68 @@ func injectHeadTags(body []byte, alts []hreflangAlternate) []byte {
 		idx += len(closing)
 	}
 	return []byte(html[:idx] + builder.String() + html[idx:])
+}
+
+// injectSEOMeta 在 </head> 前注入 OG / Twitter 卡与 JSON-LD（对标分析 P2）。
+// 走管线后置注入而非主题模板：结构化数据是服务端关注点，且主题扫描器禁
+// 止模板出现 <script>（§5.3），存量自定义主题也因此即时受益。
+func injectSEOMeta(body []byte, page Page) []byte {
+	if page.Title == "" {
+		return body
+	}
+	var b strings.Builder
+	esc := html.EscapeString
+	b.WriteString(`<meta property="og:site_name" content="` + esc(page.Site.Name) + `">`)
+	b.WriteString(`<meta property="og:title" content="` + esc(page.Title) + `">`)
+	if page.Description != "" {
+		b.WriteString(`<meta property="og:description" content="` + esc(page.Description) + `">`)
+	}
+	if page.Canonical != "" {
+		b.WriteString(`<meta property="og:url" content="` + esc(page.Canonical) + `">`)
+	}
+	ogType := "website"
+	if page.Kind == "detail" {
+		ogType = "article"
+	}
+	b.WriteString(`<meta property="og:type" content="` + ogType + `">`)
+	card := "summary"
+	if page.CanonicalImage != "" {
+		card = "summary_large_image"
+		b.WriteString(`<meta property="og:image" content="` + esc(page.CanonicalImage) + `">`)
+		if page.CanonicalImageAlt != "" {
+			b.WriteString(`<meta property="og:image:alt" content="` + esc(page.CanonicalImageAlt) + `">`)
+		}
+	}
+	b.WriteString(`<meta name="twitter:card" content="` + card + `">`)
+	if page.ModifiedISO != "" {
+		b.WriteString(`<meta property="article:modified_time" content="` + esc(page.ModifiedISO) + `">`)
+	}
+	if page.JSONLD != "" && !page.NoIndex {
+		b.WriteString(`<script type="application/ld+json">` + string(page.JSONLD) + `</script>`)
+	}
+	htmlStr := string(body)
+	idx := strings.Index(strings.ToLower(htmlStr), "</head>")
+	if idx < 0 {
+		return body
+	}
+	// strings.Index 给的是小写化后的位置，需在原文中定位同一位置。
+	return []byte(htmlStr[:idx] + b.String() + htmlStr[idx:])
+}
+
+// pageMetaFromVM 从任一页面 VM（均内嵌 Page）反射取页面元数据；非页面 VM
+// （gate/error 等）返回 false。
+func pageMetaFromVM(vm any) (Page, bool) {
+	if vm == nil {
+		return Page{}, false
+	}
+	value := reflect.ValueOf(vm)
+	if value.Kind() != reflect.Struct {
+		return Page{}, false
+	}
+	field := value.FieldByName("Page")
+	if !field.IsValid() || field.Type() != reflect.TypeOf(Page{}) {
+		return Page{}, false
+	}
+	page, ok := field.Interface().(Page)
+	return page, ok
 }

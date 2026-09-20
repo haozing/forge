@@ -230,6 +230,69 @@ func (r *PublicReader) PublicCategoryPath(ctx context.Context, visitorAddr strin
 	}, nil
 }
 
+// PublicCategoryIndex lists the top-level public categories with their
+// included-post counts. It backs the home categories block, the /c/ overview
+// page and sitemap discovery. 计数谓词与分类页收录一致：资产级
+// category_container_id 与 container_assets 挂载都计入（避免"页内有文、
+// 计数为 0"的偏差），并同样排除 site_exclusions。
+func (r *PublicReader) PublicCategoryIndex(ctx context.Context, visitorAddr string, principal auth.Principal, siteSlug string) ([]CategoryLink, error) {
+	if err := r.allow(ctx, visitorAddr); err != nil {
+		return nil, err
+	}
+	item, err := r.loadSite(ctx, siteSlug)
+	if err != nil {
+		return nil, err
+	}
+	if r.Store == nil || r.Store.Pool == nil {
+		return []CategoryLink{}, nil
+	}
+	links := []CategoryLink{}
+	rows, err := r.Store.Pool.Query(ctx, `
+		WITH RECURSIVE tree AS (
+			SELECT id, id AS root_id, parent_id, public_flag, status, sort_key, title, public_title, slug
+			FROM content.containers
+			WHERE organization_id = $1::uuid AND workspace_id = $2::uuid AND parent_id IS NULL
+			UNION ALL
+			SELECT c.id, t.root_id, c.parent_id, c.public_flag, c.status, c.sort_key, c.title, c.public_title, c.slug
+			FROM content.containers c
+			JOIN tree t ON c.parent_id = t.id
+			WHERE c.public_flag = true AND c.status = 'active'
+		)
+		SELECT t.slug, COALESCE(NULLIF(t.public_title, ''), t.title), (
+			SELECT count(DISTINCT sl.asset_id)
+			FROM asset.assets a
+			JOIN site.site_slugs sl
+			  ON sl.organization_id = a.organization_id AND sl.asset_id = a.id
+			 AND sl.site_id = $3::uuid AND sl.is_current
+			WHERE a.organization_id = $1::uuid
+			  AND a.deleted_at IS NULL AND a.current_published_version_id IS NOT NULL
+			  AND NOT EXISTS (SELECT 1 FROM site.site_exclusions x
+			                  WHERE x.site_id = $3::uuid AND x.asset_id = a.id)
+			  AND (a.category_container_id IN (SELECT x.id FROM tree x WHERE x.root_id = t.root_id)
+			       OR EXISTS (SELECT 1 FROM content.container_assets ca
+			                  JOIN tree x ON x.id = ca.container_id AND x.root_id = t.root_id
+			                  WHERE ca.asset_id = a.id))
+		)
+		FROM tree t
+		WHERE t.parent_id IS NULL AND t.public_flag = true AND t.status = 'active'
+		ORDER BY t.sort_key, t.title
+	`, item.OrganizationID, item.WorkspaceID, item.ID)
+	if err != nil {
+		return nil, fmt.Errorf("load category index: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var link CategoryLink
+		var slug string
+		if err := rows.Scan(&slug, &link.Name, &link.Count); err != nil {
+			continue
+		}
+		link.Href = "/sites/" + item.Slug + "/c/" + slug
+		links = append(links, link)
+	}
+	return links, nil
+}
+
 // Authorize nothing here: the delivery category page is public-face read; the
 // inclusion derivation already gates content by the three doors.
 var _ = auth.Principal{}

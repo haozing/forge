@@ -387,6 +387,30 @@ func (s *Service) Category(ctx context.Context, addr string, principal auth.Prin
 		if gated(facts, band) {
 			return s.gateOutput(facts)
 		}
+		// /c/ 根路径 = 分类总览页：全部分类入口（对标分析的"分类导航落地页"）。
+		if strings.Trim(path, "/") == "" {
+			cats, err := s.Reader.PublicCategoryIndex(ctx, addr, principal, siteSlug)
+			if err != nil {
+				return renderOutput{}, err
+			}
+			vm := CategoryVM{
+				Page: Page{
+					Kind:        "category",
+					Title:       "分类 · " + facts.Site.Name,
+					Description: facts.Site.Name + " 内容分类总览。",
+					Canonical:   baseURL + "/sites/" + siteSlug + "/c/",
+					NoIndex:     facts.Site.DefaultContentScope != site.ScopePublic,
+				},
+				Site:       chrome(facts, "category"),
+				Heading:    "分类",
+				IsIndex:    true,
+				Categories: []SubcategoryVM{},
+			}
+			for _, cat := range cats {
+				vm.Categories = append(vm.Categories, SubcategoryVM{Name: cat.Name, Href: cat.Href, Count: cat.Count})
+			}
+			return renderOutput{kind: "category", vm: vm, noIndex: vm.NoIndex}, nil
+		}
 		category, err := s.Reader.PublicCategoryPath(ctx, addr, principal, siteSlug, path, locale)
 		if err != nil {
 			return renderOutput{}, err
