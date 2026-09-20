@@ -498,6 +498,7 @@ func (s *Service) Tags(ctx context.Context, addr string, principal auth.Principa
 		vm.Site = chrome(facts, "tags")
 		vm.Queries = queries
 		vm.Title = "标签 · " + facts.Site.Name
+		vm.Description = facts.Site.Name + " 的主题标签总览：按标签浏览全部文章。"
 		vm.Canonical = baseURL + routePath
 		vm.NoIndex = !vm.Site.ScopePublic
 		return renderOutput{kind: "tags", vm: vm, noIndex: vm.NoIndex}, nil
