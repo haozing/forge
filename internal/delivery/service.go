@@ -414,6 +414,10 @@ func (s *Service) Posts(ctx context.Context, addr string, principal auth.Princip
 		vm.Site = chrome(facts, "list")
 		vm.Queries = queries
 		vm.Title = "文章 · " + facts.Site.Name
+		if cursor != "" {
+			// 分页页与第一页共用 title 会判重复（审计 P2-7）：cursor 页加续页标识。
+			vm.Title = "文章（续页） · " + facts.Site.Name
+		}
 		vm.Description = facts.Site.Name + " 全部文章，按发布时间排列。"
 		// 分页页 canonical 固定指干净首页 URL：cursor 是会话级令牌，
 		// 自指等于把注定失效的 URL 交给搜索引擎（对标审计 P1-1）。
@@ -466,9 +470,18 @@ func (s *Service) Post(ctx context.Context, addr string, principal auth.Principa
 		}
 		vm.NoIndex = !vm.Site.ScopePublic
 		vm.ModifiedISO = vm.UpdatedISO
-		// 文章面包屑只留 首页→文章 两级：中间层曾是内部模型键
-		//（builtin_document，审计 P2-2），等文章分类面包屑数据就位再补。
-		vm.JSONLD = articleJSONLD(facts, content, vm.Canonical, baseURL+"/sites/"+slug, "", vm.CanonicalImage)
+		// 可见面包屑：首页 > 公开分类 > 文章（对标审计 P2-2）。分类取文章
+		// 挂载的第一个公开分类；JSON-LD 面包屑同步用真实分类替代内部模型键。
+		if catName, catSlug, ok := s.Reader.PostPrimaryCategory(ctx, facts.Site.OrganizationID, content.AssetID); ok {
+			href := "/sites/" + slug + "/c/" + catSlug
+			vm.Crumbs = []CrumbVM{{Name: facts.Site.Name, Href: "/sites/" + slug + "/"}, {Name: catName, Href: href}}
+			vm.JSONLD = articleJSONLD(facts, content, vm.Canonical, baseURL+"/sites/"+slug,
+				vm.CanonicalImage, catName, baseURL+href)
+		} else {
+			vm.Crumbs = []CrumbVM{{Name: facts.Site.Name, Href: "/sites/" + slug + "/"}}
+			vm.JSONLD = articleJSONLD(facts, content, vm.Canonical, baseURL+"/sites/"+slug,
+				vm.CanonicalImage, "", "")
+		}
 		// 附件下载列表与上/下篇导航（产品文档 §11.2）。
 		if attachments, err := s.postAttachments(ctx, facts, content.AssetID); err == nil && len(attachments) > 0 {
 			vm.Attachments = attachments
@@ -712,7 +725,7 @@ func rssDate(value *time.Time) string {
 // articleJSONLD builds the detail structured data: an Article document (with
 // cover image when present) plus a BreadcrumbList (home → section → post).
 // json.Marshal escapes <, > and & so the script context is closed.
-func articleJSONLD(facts site.SiteFacts, content site.PublicPostContent, canonical, homeURL, sectionURL, coverImage string) template.JS {
+func articleJSONLD(facts site.SiteFacts, content site.PublicPostContent, canonical, homeURL, coverImage, categoryName, categoryURL string) template.JS {
 	article := map[string]any{
 		"@context":         "https://schema.org",
 		"@type":            "Article",
@@ -734,8 +747,8 @@ func articleJSONLD(facts site.SiteFacts, content site.PublicPostContent, canonic
 		map[string]any{"@type": "ListItem", "position": 1, "name": facts.Site.Name, "item": homeURL},
 	}
 	position := 2
-	if sectionURL != "" {
-		crumbs = append(crumbs, map[string]any{"@type": "ListItem", "position": position, "name": content.Section, "item": sectionURL})
+	if categoryName != "" && categoryURL != "" {
+		crumbs = append(crumbs, map[string]any{"@type": "ListItem", "position": position, "name": categoryName, "item": categoryURL})
 		position++
 	}
 	crumbs = append(crumbs, map[string]any{"@type": "ListItem", "position": position, "name": content.Title, "item": canonical})
@@ -845,10 +858,19 @@ func injectSEOMeta(body []byte, page Page) []byte {
 		ogType = "article"
 	}
 	b.WriteString(`<meta property="og:type" content="` + ogType + `">`)
+	image := page.CanonicalImage
+	if image == "" {
+		// 无封面时回退站点社交图（绝对化：借 canonical 的 scheme+host）。
+		if page.Site.SocialImageURL != "" && page.Canonical != "" {
+			if idx := strings.Index(page.Canonical, "/sites/"); idx > 0 {
+				image = page.Canonical[:idx] + page.Site.SocialImageURL
+			}
+		}
+	}
 	card := "summary"
-	if page.CanonicalImage != "" {
+	if image != "" {
 		card = "summary_large_image"
-		b.WriteString(`<meta property="og:image" content="` + esc(page.CanonicalImage) + `">`)
+		b.WriteString(`<meta property="og:image" content="` + esc(image) + `">`)
 		if page.CanonicalImageAlt != "" {
 			b.WriteString(`<meta property="og:image:alt" content="` + esc(page.CanonicalImageAlt) + `">`)
 		}

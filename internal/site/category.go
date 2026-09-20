@@ -293,6 +293,28 @@ func (r *PublicReader) PublicCategoryIndex(ctx context.Context, visitorAddr stri
 	return links, nil
 }
 
+// PostPrimaryCategory 返回一篇文章挂载的第一个公开分类（名称+slug）。
+// 文章面包屑与 JSON-LD 中间层用真实分类替代内部模型键（对标审计 P2-2）。
+// 未挂公开分类时 ok=false。
+func (r *PublicReader) PostPrimaryCategory(ctx context.Context, organizationID, assetID string) (name, catSlug string, ok bool) {
+	if r.Store == nil || r.Store.Pool == nil {
+		return "", "", false
+	}
+	err := r.Store.Pool.QueryRow(ctx, `
+		SELECT COALESCE(NULLIF(c.public_title, ''), c.title), c.slug
+		FROM content.container_assets ca
+		JOIN content.containers c ON c.organization_id = ca.organization_id AND c.id = ca.container_id
+		WHERE ca.organization_id = $1::uuid AND ca.asset_id = $2::uuid
+		  AND c.public_flag = true AND c.status = 'active'
+		ORDER BY c.sort_key, c.title
+		LIMIT 1
+	`, organizationID, assetID).Scan(&name, &catSlug)
+	if err != nil {
+		return "", "", false
+	}
+	return name, catSlug, true
+}
+
 // Authorize nothing here: the delivery category page is public-face read; the
 // inclusion derivation already gates content by the three doors.
 var _ = auth.Principal{}

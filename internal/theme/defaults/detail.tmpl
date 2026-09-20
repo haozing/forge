@@ -1,5 +1,6 @@
 {{define "content"}}
 <article class="article">
+  {{with .Crumbs}}<nav class="crumbs">{{range .}}<a href="{{.Href}}">{{.Name}}</a> / {{end}}</nav>{{end}}
   <h1 class="article-title">{{.Heading}}{{if not .Heading}}{{.Title}}{{end}}</h1>
   <footer class="article-meta">
     {{if gt .VersionNo 0}}<span class="article-version">v{{.VersionNo}}</span>{{end}}

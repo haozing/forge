@@ -188,7 +188,10 @@ type DetailVM struct {
 	SectionHref string
 	// Heading 是纯文章标题（h1 用）：Page.Title 带" · 站名"后缀，是给
 	// <title>/OG 用的，不能进 h1。
-	Heading     string
+	Heading string
+	// Crumbs 是可见面包屑（首页 > 分类 > 文章）：分类来自文章挂载的
+	// 第一个公开分类（对标审计 P2-2），无分类时只有首页一级。
+	Crumbs      []CrumbVM
 	ContentHTML template.HTML
 	TOC         []Heading
 	Fields      []FieldValueVM
