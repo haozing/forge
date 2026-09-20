@@ -346,8 +346,14 @@ func deliverySiteTagPage(deps Dependencies) http.HandlerFunc {
 			writeDeliveryPage(w, r, service, service.ErrorPage(http.StatusNotFound))
 			return
 		}
+		key := r.PathValue("key")
+		// 尾斜杠收敛（对标审计 P2-8）：标签页 canonical 无斜杠，带斜杠 301。
+		if trimmed := strings.TrimSuffix(key, "/"); trimmed != "" && trimmed != key {
+			http.Redirect(w, r, "/sites/"+slug+"/tags/"+trimmed, http.StatusMovedPermanently)
+			return
+		}
 		page, err := service.TagPage(r.Context(), effectiveClientAddr(r, deps.TrustedProxyCIDRs),
-			publicVisitorPrincipal(r, deps), slug, r.PathValue("key"), r.URL.Query().Get("cursor"), deps.deliveryBaseURL(r))
+			publicVisitorPrincipal(r, deps), slug, key, r.URL.Query().Get("cursor"), deps.deliveryBaseURL(r))
 		if err != nil {
 			writeDeliveryError(w, r, service, err)
 			return
@@ -697,6 +703,12 @@ func deliverySiteCategory(deps Dependencies) http.HandlerFunc {
 			return
 		}
 		path := r.PathValue("path")
+		// 尾斜杠收敛（对标审计 P2-8）：/c/{path}/ 301 到 /c/{path}；分类
+		// 总览 /c/ 保留斜杠形态（它的 canonical 即带斜杠）。
+		if trimmed := strings.TrimSuffix(path, "/"); trimmed != "" && trimmed != path {
+			http.Redirect(w, r, "/sites/"+slug+"/c/"+trimmed, http.StatusMovedPermanently)
+			return
+		}
 		page, err := service.Category(r.Context(), effectiveClientAddr(r, deps.TrustedProxyCIDRs),
 			publicVisitorPrincipal(r, deps), slug, path, deps.deliveryBaseURL(r), deliveryLocale(r))
 		if err != nil {

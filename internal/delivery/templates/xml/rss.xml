@@ -1,7 +1,7 @@
 <rss version="2.0">
 <channel>
 <title>{{.Site.Name}}</title>
-<link>{{.Site.HomeHref}}</link>
+<link>{{.HomeURL}}</link>
 <description>{{.Site.Name}} 最新内容</description>
 <language>zh-cn</language>
 <lastBuildDate>{{.LastBuildOn}}</lastBuildDate>

@@ -7,6 +7,7 @@ package delivery
 
 import (
 	"encoding/json"
+	"regexp"
 	"strings"
 
 	"time"
@@ -289,6 +290,7 @@ type RSSItem struct {
 // RSSVM renders rss.xml.
 type RSSVM struct {
 	Site        Chrome
+	HomeURL     string
 	SelfURL     string
 	Items       []RSSItem
 	LastBuildOn string
@@ -455,9 +457,9 @@ func ResolveDetailWithRefs(slug string, content site.PublicPostContent, authoriz
 	// plain-text excerpt of the body, otherwise the title — a detail page
 	// without any description is the single most common on-page SEO defect,
 	// and field-only records (empty markdown) must still carry one.
-	description := strings.TrimSpace(content.Summary)
+	description := sanitizeMetaDescription(content.Summary)
 	if description == "" {
-		description = PlainTextExcerpt(content.Markdown, 150)
+		description = sanitizeMetaDescription(PlainTextExcerpt(content.Markdown, 220))
 	}
 	if description == "" {
 		description = content.Title
@@ -575,22 +577,59 @@ type SubcategoryVM struct {
 	Count int
 }
 
+// mdAssetLinkPattern 匹配指向资产引用的 markdown 链接（历史数据残留）。
+var mdAssetLinkPattern = regexp.MustCompile(`\[([^\]]*)\]\(\s*chunzhi-asset://[0-9a-fA-F-]{36}\s*\)`)
+
+// sanitizeMetaDescription 清洗 meta description 里的内部机制噪声（对标审计
+// P1-3）：剥掉 chunzhi-asset/chunzhi-media 协议 URI（含包裹它们的 markdown
+// 链接）、"（相似）/相似文档"去重元数据、内链小节标题，压缩空白。
+func sanitizeMetaDescription(text string) string {
+	if text == "" {
+		return ""
+	}
+	text = mdAssetLinkPattern.ReplaceAllString(text, "$1")
+	text = assetRefPattern.ReplaceAllString(text, "")
+	text = mediaRefPattern.ReplaceAllString(text, "")
+	if idx := strings.Index(text, "相似文档："); idx >= 0 {
+		text = text[:idx]
+	}
+	text = strings.ReplaceAll(text, "（相似）", "")
+	text = strings.ReplaceAll(text, "延伸阅读", "")
+	text = strings.Join(strings.Fields(text), " ")
+	return strings.TrimSpace(text)
+}
+
 // buildBreadcrumbItems emits BreadcrumbList itemListElement entries for the
-// trail plus the current page.
-func buildBreadcrumbItems(current string, crumbs []site.CategoryCrumb) []map[string]any {
+// trail plus the current page. schema.org 要求绝对 URL；与当前页同 URL 的
+// 尾项（分类路径天然包含自身）去重。
+func buildBreadcrumbItems(current, currentName string, crumbs []site.CategoryCrumb) []map[string]any {
 	items := []map[string]any{}
-	for i, crumb := range crumbs {
+	position := 0
+	for _, crumb := range crumbs {
+		href := crumb.Href
+		if href != "" && !strings.HasPrefix(href, "http://") && !strings.HasPrefix(href, "https://") {
+			// crumbs 的 href 是站内绝对路径；结构化数据里补域名前缀
+			//（current 带 scheme+host，借它还原绝对地址）。
+			if idx := strings.Index(current, "/sites/"); idx > 0 {
+				href = current[:idx] + href
+			}
+		}
+		if href == current {
+			continue // 当前页由尾部项表达，不在轨迹里重复
+		}
+		position++
 		items = append(items, map[string]any{
 			"@type":    "ListItem",
-			"position": i + 1,
+			"position": position,
 			"name":     crumb.Name,
-			"item":     crumb.Href,
+			"item":     href,
 		})
 	}
+	position++
 	items = append(items, map[string]any{
 		"@type":    "ListItem",
-		"position": len(crumbs) + 1,
-		"name":     "当前页",
+		"position": position,
+		"name":     currentName,
 		"item":     current,
 	})
 	return items

@@ -63,8 +63,8 @@ func (s *Service) Archive(ctx context.Context, addr string, principal auth.Princ
 			items = append(items, page.Items...)
 			cursor = page.NextCursor
 		}
-		vm := ArchiveVM{Page: Page{Kind: "archive"}}
-		vm.Years = groupArchive(slug, items, 160)
+	vm := ArchiveVM{Page: Page{Kind: "archive", Description: facts.Site.Name + " 全部文章按发布时间归档。"}}
+	vm.Years = groupArchive(slug, items, 160)
 		vm.Site = chrome(facts, "archive")
 		vm.Queries = queries
 		vm.Title = "归档 · " + facts.Site.Name
@@ -445,7 +445,7 @@ func (s *Service) Category(ctx context.Context, addr string, principal auth.Prin
 		breadcrumbs := map[string]any{
 			"@context":        "https://schema.org",
 			"@type":           "BreadcrumbList",
-			"itemListElement": buildBreadcrumbItems(baseURL+routePath, category.Crumbs),
+			"itemListElement": buildBreadcrumbItems(baseURL+routePath, category.Title, category.Crumbs),
 		}
 		ld, _ := json.Marshal([]map[string]any{
 			{"@context": "https://schema.org", "@type": "CollectionPage", "name": category.Title, "description": description},

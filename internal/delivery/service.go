@@ -30,6 +30,8 @@ import (
 	"agentchunzhi/internal/store"
 	"agentchunzhi/internal/tag"
 
+	agentquery "agentchunzhi/internal/query"
+
 	"golang.org/x/sync/singleflight"
 )
 
@@ -374,6 +376,18 @@ func (s *Service) Home(ctx context.Context, addr string, principal auth.Principa
 		}
 		vm.Canonical = baseURL + routePath
 		vm.NoIndex = !vm.Site.ScopePublic
+		// 首页结构化数据（对标审计 P1-4）：WebSite + Organization。
+		if !vm.NoIndex {
+			siteURL := baseURL + "/sites/" + slug + "/"
+			ld, _ := json.Marshal([]map[string]any{
+				{"@context": "https://schema.org", "@type": "WebSite",
+					"name": facts.Site.Name, "url": siteURL,
+					"description": vm.Description, "inLanguage": facts.Site.DefaultLocale},
+				{"@context": "https://schema.org", "@type": "Organization",
+					"name": facts.Site.Name, "url": siteURL},
+			})
+			vm.JSONLD = template.JS(ld)
+		}
 		return renderOutput{kind: "home", vm: vm, noIndex: vm.NoIndex}, nil
 	})
 }
@@ -390,6 +404,11 @@ func (s *Service) Posts(ctx context.Context, addr string, principal auth.Princip
 		}
 		page, err := s.Reader.Posts(ctx, addr, principal, slug, site.PublicPostQuery{Cursor: cursor, Limit: 12})
 		if err != nil {
+			// 无效/过期 cursor（会话级令牌）不回 422：301 到干净列表页
+			//（对标审计 P1-1/P3-4：cursor 不该成为可收录 URL）。
+			if cursor != "" && errors.Is(err, agentquery.ErrInvalidRequest) {
+				return renderOutput{redirect: "/sites/" + slug + "/posts/"}, nil
+			}
 			return renderOutput{}, err
 		}
 		vm := ResolveList(slug, "文章", "/sites/"+slug+"/posts/", page, page.NextCursor)
@@ -397,7 +416,9 @@ func (s *Service) Posts(ctx context.Context, addr string, principal auth.Princip
 		vm.Queries = queries
 		vm.Title = "文章 · " + facts.Site.Name
 		vm.Description = facts.Site.Name + " 全部文章，按发布时间排列。"
-		vm.Canonical = baseURL + routePath
+		// 分页页 canonical 固定指干净首页 URL：cursor 是会话级令牌，
+		// 自指等于把注定失效的 URL 交给搜索引擎（对标审计 P1-1）。
+		vm.Canonical = baseURL + "/sites/" + slug + "/posts/"
 		vm.NoIndex = !vm.Site.ScopePublic
 		return renderOutput{kind: "list", vm: vm, noIndex: vm.NoIndex}, nil
 	})
@@ -446,11 +467,9 @@ func (s *Service) Post(ctx context.Context, addr string, principal auth.Principa
 		}
 		vm.NoIndex = !vm.Site.ScopePublic
 		vm.ModifiedISO = vm.UpdatedISO
-		sectionURL := ""
-		if content.Section != "" {
-			sectionURL = baseURL + "/sites/" + slug + "/sections/" + content.Section + "/"
-		}
-		vm.JSONLD = articleJSONLD(facts, content, vm.Canonical, baseURL+"/sites/"+slug, sectionURL, vm.CanonicalImage)
+		// 文章面包屑只留 首页→文章 两级：中间层曾是内部模型键
+		//（builtin_document，审计 P2-2），等文章分类面包屑数据就位再补。
+		vm.JSONLD = articleJSONLD(facts, content, vm.Canonical, baseURL+"/sites/"+slug, "", vm.CanonicalImage)
 		// 附件下载列表与上/下篇导航（产品文档 §11.2）。
 		if attachments, err := s.postAttachments(ctx, facts, content.AssetID); err == nil && len(attachments) > 0 {
 			vm.Attachments = attachments
@@ -478,7 +497,8 @@ func (s *Service) Section(ctx context.Context, addr string, principal auth.Princ
 		vm.Queries = queries
 		vm.Title = sectionSlug + " · " + facts.Site.Name
 		vm.Canonical = baseURL + routePath
-		vm.NoIndex = !vm.Site.ScopePublic
+		// 模型键集合页是实现细节面（审计 P2-2）：恒 noindex，靠分类页承担聚合。
+		vm.NoIndex = true
 		return renderOutput{kind: "list", vm: vm, noIndex: vm.NoIndex}, nil
 	})
 }
@@ -507,7 +527,7 @@ func (s *Service) Tags(ctx context.Context, addr string, principal auth.Principa
 
 // TagPage serves one tag archive.
 func (s *Service) TagPage(ctx context.Context, addr string, principal auth.Principal, slug, key, cursor, baseURL string) (*Response, error) {
-	routePath := "/sites/" + slug + "/tags/" + key + "/"
+	routePath := "/sites/" + slug + "/tags/" + key
 	if cursor != "" {
 		routePath += "?cursor=" + cursor
 	}
@@ -517,6 +537,10 @@ func (s *Service) TagPage(ctx context.Context, addr string, principal auth.Princ
 		}
 		page, err := s.Reader.TagPage(ctx, addr, principal, slug, key, site.PublicPostQuery{Cursor: cursor, Limit: 12})
 		if err != nil {
+			// 无效 cursor 同列表页：301 到干净标签页（对标审计 P1-1）。
+			if cursor != "" && errors.Is(err, agentquery.ErrInvalidRequest) {
+				return renderOutput{redirect: "/sites/" + slug + "/tags/" + key}, nil
+			}
 			return renderOutput{}, err
 		}
 		vm := TagPageVM{Page: Page{Kind: "tag_page"}, TagKey: key, TagName: key,
@@ -531,6 +555,7 @@ func (s *Service) TagPage(ctx context.Context, addr string, principal auth.Princ
 		}
 		vm.Title = "标签 " + key + " · " + facts.Site.Name
 		vm.Description = facts.Site.Name + " 中标签为 " + key + " 的文章合集。"
+		// canonical 无尾斜杠（与 posts/分类一致）；cursor 不进 canonical。
 		vm.Canonical = baseURL + routePath
 		// 薄标签页（<3 篇且无下一页）noindex：标签聚合页天然薄内容/高重复，
 		// 业界惯例只把够分量的标签页留在索引里（对标分析 P3）。
@@ -574,7 +599,7 @@ func (s *Service) RSS(ctx context.Context, addr string, principal auth.Principal
 		if err != nil {
 			return renderOutput{}, err
 		}
-		vm := RSSVM{Site: chrome(facts, "rss"), Items: []RSSItem{}}
+		vm := RSSVM{Site: chrome(facts, "rss"), Items: []RSSItem{}, HomeURL: baseURL + "/sites/" + slug + "/"}
 		for _, post := range page.Items {
 			vm.Items = append(vm.Items, RSSItem{
 				Title:       post.Title,
@@ -613,13 +638,7 @@ func (s *Service) Sitemap(ctx context.Context, addr string, principal auth.Princ
 				vm.URLs = append(vm.URLs, SitemapURL{Loc: baseURL + cat.Href})
 			}
 		}
-		sections, err := s.Reader.SectionSlugs(ctx, addr, principal, slug)
-		if err != nil {
-			return renderOutput{}, err
-		}
-		for _, section := range sections {
-			vm.URLs = append(vm.URLs, SitemapURL{Loc: baseURL + "/sites/" + slug + "/sections/" + section + "/"})
-		}
+		// sections（模型键集合页）已 noindex（审计 P2-2），不入 sitemap。
 		tags, err := s.Reader.Tags(ctx, addr, principal, slug, 100)
 		if err != nil {
 			return renderOutput{}, err

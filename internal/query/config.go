@@ -16,7 +16,7 @@ const (
 	// MaxFieldFilters caps the typed field_filters array.
 	MaxFieldFilters = 40
 	// MaxSessionAssets caps the frozen asset-level snapshot per session.
-	MaxSessionAssets = 500
+	MaxSessionAssets = 3000
 	// MaxCandidateWindow is the upper bound of the recall window.
 	MaxCandidateWindow = 1000
 	// MinCandidateWindow is the lower bound of the recall window.

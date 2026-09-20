@@ -1,6 +1,6 @@
 {{define "card"}}
 <article class="card">
-  <h3><a href="{{.Href}}">{{.Title}}</a></h3>
+  <h2 class="card-title"><a href="{{.Href}}">{{.Title}}</a></h2>
   {{with .Summary}}<p class="card-summary">{{.}}</p>{{end}}
   <footer class="card-meta">
     {{with .PublishedOn}}<time>{{.}}</time>{{end}}

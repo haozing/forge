@@ -16,8 +16,9 @@ h1,h2,h3{font-family:var(--font-heading)}
 .cards{display:grid;gap:14px}
 .card{background:var(--c-surface);border:1px solid var(--c-border);border-radius:6px;padding:16px 18px;transition:border-color .15s ease,box-shadow .15s ease}
 .card:hover{border-color:var(--c-primary);box-shadow:0 1px 6px rgba(35,31,32,.06)}
-.card h3 a{color:var(--c-text);transition:color .15s ease}
-.card h3 a:hover{color:var(--c-primary)}
+.card h2.card-title{font-size:1.05em;margin:.2em 0}
+.card h2.card-title a{color:var(--c-text);transition:color .15s ease}
+.card h2.card-title a:hover{color:var(--c-primary)}
 .card-summary{color:var(--c-muted);margin:6px 0}
 .card-meta{color:var(--c-muted);font-size:13px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
 .tag-chip{display:inline-block;border:1px solid var(--c-border);border-radius:999px;padding:1px 10px;font-size:13px;color:var(--c-muted);margin:2px}
