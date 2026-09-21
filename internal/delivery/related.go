@@ -46,19 +46,22 @@ func (s *Service) relatedCandidates(ctx context.Context, addr string, principal 
 			cards = append(cards, cardVM(slug, post, 120))
 		}
 	}
-	// Tier 1: fulltext recall over the title (+summary head) through the
+	// 层序（2026-09-21 调整）：同分类优先——分类数据齐了之后它又快（一条
+	// 索引 SQL）又准；全文检索要建完整检索会话（实测详情页冷渲染 2-5s 的
+	// 主因），降为分类不足时的兜底。
+	// Tier 1 (C8): 同分类——把权重优先导向同主题聚类。
+	if posts, err := s.Reader.SameCategoryPosts(ctx, addr, principal, slug, content.AssetID, relatedMaxItems+3, ""); err == nil {
+		add(site.PublicPostPage{Items: posts})
+	}
+	if len(cards) >= relatedMaxItems {
+		return cards
+	}
+	// Tier 2: fulltext recall over the title (+summary head) through the
 	// unified query service — the same visibility scope as the page itself.
 	if query := relatedQuery(content); query != "" {
 		if page, err := s.Reader.Search(ctx, addr, principal, slug, query, "fulltext", site.PublicPostQuery{Limit: relatedMaxItems + 3}); err == nil {
 			add(page)
 		}
-	}
-	if len(cards) >= relatedMaxItems {
-		return cards
-	}
-	// Tier 2 (C8): 同分类——把权重优先导向同主题聚类。
-	if posts, err := s.Reader.SameCategoryPosts(ctx, addr, principal, slug, content.AssetID, relatedMaxItems+3, ""); err == nil {
-		add(site.PublicPostPage{Items: posts})
 	}
 	if len(cards) >= relatedMaxItems {
 		return cards
