@@ -123,6 +123,26 @@ h1,h2,h3{font-family:var(--font-heading)}
 .pn-link:hover{border-color:var(--c-primary);color:var(--c-primary)}
 .pn-current{color:var(--c-muted)}
 .empty-hint{color:var(--c-muted);padding:2rem 0;text-align:center}
+/* ---- 出海agent 聊天窗 ---- */
+.ask-page .chat-window{background:var(--c-surface);border:1px solid var(--c-border);border-radius:12px;display:flex;flex-direction:column;height:calc(100vh - 330px);min-height:420px;overflow:hidden}
+.chat-messages{flex:1;overflow-y:auto;padding:18px;display:flex;flex-direction:column;gap:12px}
+.chat-msg{max-width:80%;padding:10px 14px;border-radius:12px;font-size:15px;line-height:1.65;white-space:pre-wrap}
+.chat-msg-ai{align-self:flex-start;background:var(--c-surface);border:1px solid var(--c-border);border-top-left-radius:4px}
+.chat-msg-user{align-self:flex-end;background:var(--c-primary);color:#fff;border-bottom-right-radius:4px}
+.chat-sources{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;align-self:flex-start;max-width:80%}
+.chat-sources a{display:inline-block;background:var(--c-surface);border:1px solid var(--c-border);border-radius:999px;padding:2px 10px;font-size:12px;color:var(--c-primary)}
+.chat-sources a:hover{border-color:var(--c-primary)}
+.chat-input-row{display:flex;gap:10px;align-items:flex-end;border-top:1px solid var(--c-border);padding:14px 16px;background:var(--c-surface)}
+.chat-input{flex:1;resize:none;border:1px solid var(--c-border);border-radius:8px;padding:10px 12px;font:inherit;font-size:15px;background:var(--c-bg);color:var(--c-text);min-height:44px}
+.chat-input:focus{outline:2px solid var(--c-primary);outline-offset:-1px}
+.chat-send{background:var(--c-accent);color:#fff;border:none;border-radius:8px;padding:10px 24px;font:inherit;font-size:15px;cursor:pointer;transition:opacity .15s ease}
+.chat-send:hover{opacity:.88}
+.chat-send:disabled{opacity:.45;cursor:not-allowed}
+.ask-note{color:var(--c-muted);font-size:14px;margin:0 0 12px}
+.ask-quota{display:inline-block;background:var(--c-surface);border:1px solid var(--c-border);border-radius:999px;padding:1px 10px;font-size:12px}
+@media (max-width: 720px){
+  .chat-window{height:calc(100vh - 300px);min-height:360px}
+}
 @media (max-width: 760px){
   .list-layout{grid-template-columns:1fr}
   .filter-panel{position:static;order:-1}
