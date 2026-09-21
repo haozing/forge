@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"agentchunzhi/internal/auth"
+	"agentchunzhi/internal/retrieval/textutil"
 	"agentchunzhi/internal/site"
 	"agentchunzhi/internal/theme"
 
@@ -201,32 +202,49 @@ func (s *Service) PublicChatStream(ctx context.Context, addr string, principal a
 		return fmt.Errorf("chat session unavailable")
 	}
 	// 检索：本站已收录公开内容（复用站点搜索面，三道闸同边界）。
-	page, err := s.Reader.Search(ctx, addr, principal, slug, question, "fulltext", site.PublicPostQuery{Limit: 8})
+	// 自然语言问句先提取关键词（textutil 二元组），再以 OR 组合检索——
+	// 整句 AND 匹配对口语化问句几乎必空（2026-09-21 实测）。
+	searchQuery := question
+	if terms := textutil.ExtractTerms(question, 6); len(terms) > 0 {
+		searchQuery = strings.Join(terms, " OR ")
+	}
+	page, err := s.Reader.Search(ctx, addr, principal, slug, searchQuery, "fulltext", site.PublicPostQuery{Limit: 8})
 	if err != nil {
 		return err
 	}
-	// 上下文与引用（[S1]… 标签 → 站内链接）。
+	// 上下文与引用（[S1]… 标签 → 站内链接）。文章 summary 普遍为空，
+	// 逐篇加载正文取纯文本摘录（前 6 篇，每篇 ≤1200 字），否则模型只有
+	// 标题可看，无法回答（2026-09-21 实测）。
 	var contextBuilder strings.Builder
 	type chatSource struct {
-		label, title, href string
-		assetID            string
+		label, title, href, excerpt string
+		assetID                     string
 	}
 	sources := []chatSource{}
-	for i, post := range page.Items {
-		if post.Title == "" {
+	for _, post := range page.Items {
+		if post.Title == "" || len(sources) >= 6 {
 			continue
 		}
-		label := fmt.Sprintf("S%d", i+1)
-		title := post.Title
-		excerpt := post.Summary
-		if len([]rune(excerpt)) > 400 {
-			excerpt = string([]rune(excerpt)[:400])
+		excerpt := strings.TrimSpace(post.Summary)
+		if excerpt == "" {
+			if content, err := s.Reader.Post(ctx, addr, principal, slug, post.DisplayPath, ""); err == nil {
+				excerpt = PlainTextExcerpt(content.Markdown, 1200)
+			}
 		}
-		contextBuilder.WriteString(fmt.Sprintf("[%s]\nTitle: %s\nExcerpt: %s\n", label, title, excerpt))
-		sources = append(sources, chatSource{label: label, title: title, href: "/sites/" + slug + "/posts/" + post.DisplayPath, assetID: post.AssetID})
-		if len(sources) >= 6 {
-			break
+		if strings.TrimSpace(excerpt) == "" {
+			continue
 		}
+		excerpt = strings.ReplaceAll(excerpt, "\n", " ")
+		sources = append(sources, chatSource{
+			label:   fmt.Sprintf("S%d", len(sources)+1),
+			title:   post.Title,
+			href:    "/sites/" + slug + "/posts/" + post.DisplayPath,
+			excerpt: excerpt,
+			assetID: post.AssetID,
+		})
+	}
+	for _, source := range sources {
+		contextBuilder.WriteString(fmt.Sprintf("[%s]\nTitle: %s\nExcerpt: %s\n", source.label, source.title, source.excerpt))
 	}
 	chatAppID, ok := s.Reader.ChatConfig(ctx, slug)
 	if !ok || s.ChatModels == nil {
