@@ -434,7 +434,9 @@ func (s *Service) Post(ctx context.Context, addr string, principal auth.Principa
 		if gated(facts, band) {
 			return s.gateOutput(facts)
 		}
+		t0 := time.Now()
 		content, err := s.Reader.Post(ctx, addr, principal, slug, displayPath, locale)
+		s.Logf("detail-t: post-load %v", time.Since(t0))
 		if err != nil {
 			// A path with no live binding may have been renamed: answer one
 			// hop 301 to the moved target (G2) before giving up on the 404.
@@ -446,6 +448,7 @@ func (s *Service) Post(ctx context.Context, addr string, principal auth.Principa
 			return renderOutput{}, err
 		}
 		// D13: 解析正文引用 —— 公开目标转站内 dofollow 链接，其余剥除。
+		t1 := time.Now()
 		refs := map[string]AssetRefView{}
 		if ids := AssetRefIDs(content.Markdown); len(ids) > 0 {
 			lookup := s.Reader.AssetRefLookup(ctx, addr, principal, slug, ids)
@@ -453,7 +456,10 @@ func (s *Service) Post(ctx context.Context, addr string, principal auth.Principa
 				refs[id] = AssetRefView{Title: target.Title, Href: "/sites/" + slug + "/posts/" + target.Slug}
 			}
 		}
+		s.Logf("detail-t: refs %v", time.Since(t1))
+		t2 := time.Now()
 		vm := ResolveDetailWithRefs(slug, content, s.authorizedBodyImages(ctx, facts, content.Markdown), refs)
+		s.Logf("detail-t: markdown+vm %v (md=%dB html=%dB)", time.Since(t2), len(content.Markdown), len(vm.ContentHTML))
 		vm.Site = chrome(facts, "detail")
 		vm.Queries = queries
 		vm.Title = content.Title + " · " + facts.Site.Name
@@ -483,12 +489,19 @@ func (s *Service) Post(ctx context.Context, addr string, principal auth.Principa
 				vm.CanonicalImage, "", "")
 		}
 		// 附件下载列表与上/下篇导航（产品文档 §11.2）。
+		t3 := time.Now()
 		if attachments, err := s.postAttachments(ctx, facts, content.AssetID); err == nil && len(attachments) > 0 {
 			vm.Attachments = attachments
 		}
 		vm.Prev, vm.Next = s.postNeighbors(ctx, facts, content.AssetID)
+		s.Logf("detail-t: attachments+neighbors %v", time.Since(t3))
+		t4 := time.Now()
 		s.attachDetailComments(ctx, &vm, facts, band, slug)
+		s.Logf("detail-t: comments %v", time.Since(t4))
+		t5 := time.Now()
 		s.attachDetailRelated(ctx, addr, principal, slug, content, &vm)
+		s.Logf("detail-t: related %v", time.Since(t5))
+		s.Logf("detail-t: TOTAL-build %v", time.Since(t0))
 		return renderOutput{kind: "detail", vm: vm, noIndex: vm.NoIndex}, nil
 	})
 }
