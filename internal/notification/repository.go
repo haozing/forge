@@ -177,11 +177,14 @@ type TemplateRenderer interface {
 	Render(template, organizationName string, payload map[string]any) (Message, error)
 }
 
-// ProcessOnce claims and sends at most one delivery.
+// ProcessOnce claims and sends at most one delivery. 队列为空时返回
+// ErrNoPendingDelivery——Run 靠它退出内层排空循环：吞掉这个哨兵会让空队列
+// 时循环永不停（2026-09-21 线上事故：worker 空转刷库占满 2 核机器，
+// 全站渲染被 CPU 饥饿拖慢数秒）。
 func (w Worker) ProcessOnce(ctx context.Context) error {
 	claim, err := Claim(ctx, w.Store, w.WorkerID)
 	if errors.Is(err, ErrNoPendingDelivery) {
-		return nil
+		return ErrNoPendingDelivery
 	}
 	if err != nil {
 		return err
