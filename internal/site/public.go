@@ -1670,7 +1670,7 @@ func (r *PublicReader) SameCategoryPosts(ctx context.Context, visitorAddr string
 	}
 	rows, err := r.Store.Pool.Query(ctx, `
 		SELECT sl.slug, COALESCE(pv.title, ''), COALESCE(pv.summary, ''),
-		       COALESCE(a.updated_at, now()), a.published_at
+		       COALESCE(a.updated_at, now()), a.published_at, a.id::text
 		FROM site.site_slugs sl
 		JOIN asset.assets a
 		  ON a.organization_id = sl.organization_id AND a.id = sl.asset_id
@@ -1709,10 +1709,12 @@ func (r *PublicReader) SameCategoryPosts(ctx context.Context, visitorAddr string
 		var slug, title, summary string
 		var updated time.Time
 		var published *time.Time
-		if err := rows.Scan(&slug, &title, &summary, &updated, &published); err != nil {
+		var assetID string
+		if err := rows.Scan(&slug, &title, &summary, &updated, &published, &assetID); err != nil {
 			continue
 		}
 		out = append(out, PublicPost{
+			AssetID:     assetID,
 			DisplayPath: slug,
 			Title:       title,
 			Summary:     SafeSummary(summary, 120),
