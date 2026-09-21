@@ -96,6 +96,8 @@ h1,h2,h3{font-family:var(--font-heading)}
 .kb-stats{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:13px;color:var(--c-muted);margin:.2em 0 1em}
 .kb-cats{display:inline-block;margin-left:12px;font-size:14px}
 .kb-latest .cards{margin-top:.8rem}
+/* 首页“最新出海观察”只展示 3 篇（后端默认带 10 篇，多余的不出屏） */
+.kb-latest .cards .card:nth-child(n+4){display:none}
 .kb-all{display:inline-block;margin-top:.8rem;font-size:14px}
 .about-strip{padding:1.6rem 0 2rem;border-bottom:1px solid var(--c-border)}
 .about-strip p{margin:.6em 0}
