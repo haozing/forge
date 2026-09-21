@@ -442,6 +442,7 @@ func (s *Service) Category(ctx context.Context, addr string, principal auth.Prin
 		for _, post := range category.Posts {
 			vm.Items = append(vm.Items, cardVM(siteSlug, post, 160))
 		}
+		vm.Filter = s.buildFilterPanel(ctx, addr, principal, siteSlug, strings.Trim(path, "/"), nil)
 		breadcrumbs := map[string]any{
 			"@context":        "https://schema.org",
 			"@type":           "BreadcrumbList",

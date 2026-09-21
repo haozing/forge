@@ -1782,3 +1782,136 @@ func (item Site) localeMatchesDetail(assetLocale, locale string) bool {
 	}
 	return assetLocale == locale
 }
+
+// FilteredPostsResult 是组合筛选列表页的一页数据。
+type FilteredPostsResult struct {
+	Items []PublicPost
+	Total int
+}
+
+// FilteredPosts 返回"分类(可空,单层) × 多标签(AND)"组合筛选的文章列表
+//（知识库筛选页，2026-09-21 设计）。收录谓词与分类页一致：site_slugs
+// is_current + 已发布 + 未删除 + 未排除 + 分类子树（资产级挂载或
+// container_assets 双路径）；标签按 normalized_key 全部命中（AND）。
+// 分页用页码（LIMIT/OFFSET），组合空间大、页深有限，OFFSET 可接受。
+func (r *PublicReader) FilteredPosts(ctx context.Context, visitorAddr string, principal auth.Principal, siteSlug, categorySlug string, tagKeys []string, page, limit int) (FilteredPostsResult, error) {
+	if err := r.allow(ctx, visitorAddr); err != nil {
+		return FilteredPostsResult{}, err
+	}
+	item, err := r.loadSite(ctx, siteSlug)
+	if err != nil {
+		return FilteredPostsResult{}, err
+	}
+	if page < 1 {
+		page = 1
+	}
+	if limit < 1 || limit > 50 {
+		limit = 12
+	}
+	where := []string{
+		"sl.organization_id = $1::uuid",
+		"sl.site_id = $2::uuid",
+		"sl.is_current",
+		"a.organization_id = sl.organization_id",
+		"a.id = sl.asset_id",
+		"a.deleted_at IS NULL",
+		"a.current_published_version_id IS NOT NULL",
+		`NOT EXISTS (SELECT 1 FROM site.site_exclusions x
+		             WHERE x.site_id = $2::uuid AND x.asset_id = a.id)`,
+	}
+	args := []any{item.OrganizationID, item.ID}
+	arg := func(v any) string {
+		args = append(args, v)
+		return fmt.Sprintf("$%d", len(args))
+	}
+	if categorySlug != "" {
+		where = append(where, `(
+			a.category_container_id IN (
+				SELECT c.id FROM content.containers c
+				WHERE c.organization_id = $1::uuid
+				  AND c.public_flag = true AND c.status = 'active'
+				  AND c.slug = `+arg(categorySlug)+`
+				  AND c.workspace_id = `+arg(item.WorkspaceID)+`
+			)
+			OR EXISTS (
+				SELECT 1 FROM content.container_assets ca
+				JOIN content.containers c
+				  ON c.organization_id = ca.organization_id AND c.id = ca.container_id
+				 AND c.public_flag = true AND c.status = 'active'
+				 AND c.slug = `+arg(categorySlug)+`
+				 AND c.workspace_id = `+arg(item.WorkspaceID)+`
+				WHERE ca.organization_id = a.organization_id AND ca.asset_id = a.id
+			))`)
+	}
+	if len(tagKeys) > 0 {
+		where = append(where, `(
+			SELECT count(DISTINCT t.normalized_key)
+			FROM asset.asset_version_tags avt
+			JOIN asset.tags t
+			  ON t.organization_id = avt.organization_id AND t.id = avt.tag_id
+			WHERE avt.asset_version_id = a.current_published_version_id
+			  AND t.normalized_key = ANY(`+arg(tagKeys)+`) AND t.status = 'active'
+		) = `+arg(len(tagKeys)))
+	}
+	query := fmt.Sprintf(`
+		SELECT sl.slug, COALESCE(pv.title, ''), COALESCE(pv.summary, ''),
+		       COALESCE(a.updated_at, now()), a.published_at, a.id::text
+		FROM site.site_slugs sl
+		JOIN asset.assets a ON a.organization_id = sl.organization_id AND a.id = sl.asset_id
+		LEFT JOIN asset.asset_versions pv
+		  ON pv.organization_id = a.organization_id AND pv.id = a.current_published_version_id
+		WHERE %s
+		ORDER BY a.published_at DESC, a.id DESC
+		LIMIT %d OFFSET %d
+	`, strings.Join(where, " AND "), limit, (page-1)*limit)
+	rows, err := r.Store.Pool.Query(ctx, query, args...)
+	if err != nil {
+		return FilteredPostsResult{}, fmt.Errorf("filtered posts: %w", err)
+	}
+	defer rows.Close()
+	result := FilteredPostsResult{Items: []PublicPost{}}
+	for rows.Next() {
+		var postSlug, title, summary, assetID string
+		var updated time.Time
+		var published *time.Time
+		if err := rows.Scan(&postSlug, &title, &summary, &updated, &published, &assetID); err != nil {
+			continue
+		}
+		result.Items = append(result.Items, PublicPost{
+			AssetID: assetID, DisplayPath: postSlug, Title: title,
+			Summary: SafeSummary(summary, 160), UpdatedAt: &updated, PublishedAt: published,
+		})
+	}
+	// 总数（分页导航用）：同 WHERE 计数。参数复用至 OFFSET 之前。
+	countArgs := args
+	countQuery := fmt.Sprintf(`
+		SELECT count(*)
+		FROM site.site_slugs sl
+		JOIN asset.assets a ON a.organization_id = sl.organization_id AND a.id = sl.asset_id
+		WHERE %s
+	`, strings.Join(where, " AND "))
+	if err := r.Store.Pool.QueryRow(ctx, countQuery, countArgs...).Scan(&result.Total); err != nil {
+		result.Total = len(result.Items)
+	}
+	return result, nil
+}
+
+// CategoryNameBySlug 返回一个公开分类的展示名（筛选面板/组合页标题用）；
+// 不存在或未公开时 ok=false。
+func (r *PublicReader) CategoryNameBySlug(ctx context.Context, siteSlug, categorySlug string) (string, bool) {
+	item, err := r.loadSite(ctx, siteSlug)
+	if err != nil {
+		return "", false
+	}
+	var name string
+	err = r.Store.Pool.QueryRow(ctx, `
+		SELECT COALESCE(NULLIF(public_title, ''), title)
+		FROM content.containers
+		WHERE organization_id = $1::uuid AND workspace_id = $2::uuid
+		  AND slug = $3 AND public_flag = true AND status = 'active'
+	`, item.OrganizationID, item.WorkspaceID, categorySlug).Scan(&name)
+	if err != nil {
+		return "", false
+	}
+	return name, true
+}

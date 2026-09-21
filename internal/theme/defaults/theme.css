@@ -101,7 +101,33 @@ h1,h2,h3{font-family:var(--font-heading)}
 .kb-all{display:inline-block;margin-top:.8rem;font-size:14px}
 .about-strip{padding:1.6rem 0 2rem;border-bottom:1px solid var(--c-border)}
 .about-strip p{margin:.6em 0}
+/* ---- 知识库筛选页：左右布局 ---- */
+.list-layout{display:grid;grid-template-columns:220px minmax(0,1fr);gap:28px;align-items:start}
+.filter-panel{position:sticky;top:16px;background:var(--c-surface);border:1px solid var(--c-border);border-radius:8px;padding:14px 16px}
+.fp-title{font-size:14px;margin:0 0 10px;color:var(--c-muted)}
+.fp-group{margin-bottom:14px}
+.fp-group h3{font-size:13px;margin:0 0 6px;color:var(--c-muted);font-weight:600}
+.fp-hint{font-weight:400;opacity:.7;font-size:11px}
+.fp-item{display:flex;justify-content:space-between;gap:6px;padding:4px 8px;margin:1px -8px;border-radius:6px;font-size:14px;color:var(--c-text);text-decoration:none}
+.fp-item:hover{background:var(--c-bg)}
+.fp-item.active{background:var(--c-primary);color:#fff}
+.fp-item.active .count{color:rgba(255,255,255,.75)}
+.fp-item .count{color:var(--c-muted);font-size:12px;white-space:nowrap}
+.fp-clear{display:block;margin-top:4px;font-size:13px;color:var(--c-muted)}
+.fp-clear:hover{color:var(--c-primary)}
+.active-filters{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 1rem}
+.af-chip{display:inline-block;background:var(--c-surface);border:1px solid var(--c-primary);border-radius:999px;padding:2px 12px;font-size:13px;color:var(--c-primary)}
+.af-chip.af-cat{border-color:var(--c-accent);color:var(--c-accent)}
+.page-nav{display:flex;align-items:center;gap:14px;margin-top:1.2rem;font-size:14px}
+.pn-link{border:1px solid var(--c-border);border-radius:6px;padding:5px 12px;color:var(--c-text);background:var(--c-surface)}
+.pn-link:hover{border-color:var(--c-primary);color:var(--c-primary)}
+.pn-current{color:var(--c-muted)}
+.empty-hint{color:var(--c-muted);padding:2rem 0;text-align:center}
 @media (max-width: 760px){
+  .list-layout{grid-template-columns:1fr}
+  .filter-panel{position:static;order:-1}
+}
+@media (max-width: 720px){
   .kb-zone{grid-template-columns:1fr}
 }
 @media (max-width: 720px){

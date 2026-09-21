@@ -169,6 +169,10 @@ type ListVM struct {
 	Heading    string
 	Items      []CardVM
 	Pagination PaginationVM
+	// Filter 是左侧筛选面板（知识库筛选页）；nil = 不渲染（section 页等）。
+	Filter *FilterPanelVM
+	// PageNav 是页码分页（组合筛选页）；零值 = 不渲染。
+	PageNav PageNavVM
 }
 
 // DetailVM renders one post detail page.
@@ -262,6 +266,8 @@ type TagPageVM struct {
 	TagName    string
 	Items      []CardVM
 	Pagination PaginationVM
+	// Filter 是左侧筛选面板（标签页也挂，当前标签高亮）。
+	Filter *FilterPanelVM
 }
 
 // SearchVM renders the search shell (results arrive via the JS island).
@@ -565,6 +571,8 @@ type CategoryVM struct {
 	//（Categories 为数据源，Items/Crumbs/Subcategories 留空）。
 	IsIndex    bool
 	Categories []SubcategoryVM
+	// Filter 是左侧筛选面板（分类页也挂，当前分类高亮）。
+	Filter *FilterPanelVM
 }
 
 // CrumbVM is one breadcrumb entry (name + public href).
@@ -653,4 +661,32 @@ func (p Page) Query(params map[string]any) (*theme.QueryResult, error) {
 		return &theme.QueryResult{}, nil
 	}
 	return p.Queries.Run(params)
+}
+
+// FilterLinkVM 是筛选面板里一个可点的筛选项（预计算好的 href 与选中态）。
+type FilterLinkVM struct {
+	Name  string
+	Href  string
+	Count int64
+	Active bool
+}
+
+// FilterPanelVM 是列表族页面左侧的筛选面板（分类单选 × 标签多选，全部
+// 服务端链接，无 JS 依赖）。href 由 Go 侧按"当前分类 × 标签集 toggle"
+// 预生成，模板只渲染。
+type FilterPanelVM struct {
+	Categories []FilterLinkVM
+	AllCategory FilterLinkVM
+	Tags       []FilterLinkVM
+	ActiveCategoryName string
+	ActiveTagNames     []string
+	ClearHref          string
+}
+
+// PageNavVM 是页码式分页导航（组合筛选页用；cursor 分页沿用 PaginationVM）。
+type PageNavVM struct {
+	Page       int
+	TotalPages int
+	PrevHref   string
+	NextHref   string
 }

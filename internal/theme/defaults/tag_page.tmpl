@@ -1,6 +1,12 @@
 {{define "content"}}
-<div class="tag-page">
-  <h1>{{.TagName}}</h1>
-  <div class="cards">{{range .Items}}{{template "card" .}}{{end}}</div>
+<div class="tag-page{{if .Filter}} list-layout{{end}}">
+  {{template "filter_panel" .Filter}}
+  <div class="list-body">
+    <h1>{{.TagName}}</h1>
+    {{if .Filter}}{{template "active_filters" .}}{{end}}
+    <div class="cards">{{range .Items}}{{template "card" .}}{{end}}</div>
+    {{if .Items}}{{else}}<p class="empty-hint">没有符合条件的文章，试试减少筛选条件。</p>{{end}}
+    {{template "pager" .}}
+  </div>
 </div>
 {{end}}

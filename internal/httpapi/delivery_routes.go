@@ -12,6 +12,7 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -351,6 +352,28 @@ func deliverySiteTagPage(deps Dependencies) http.HandlerFunc {
 		// {key} 段不含斜杠，须看原始路径是否以 / 结尾。
 		if strings.HasSuffix(r.URL.Path, "/") {
 			http.Redirect(w, r, "/sites/"+slug+"/tags/"+key, http.StatusMovedPermanently)
+			return
+		}
+		// 多标签（a+b+…）：组合筛选页（知识库筛选页设计 §2）。
+		if strings.Contains(key, "+") {
+			tagKeys, canonical := normalizeTagSegment(key)
+			if len(tagKeys) == 0 {
+				http.Redirect(w, r, "/sites/"+slug+"/posts/", http.StatusMovedPermanently)
+				return
+			}
+			if !canonical {
+				sort.Strings(tagKeys)
+				http.Redirect(w, r, "/sites/"+slug+"/tags/"+strings.Join(tagKeys, "+"), http.StatusMovedPermanently)
+				return
+			}
+			pageNo := pageParam(r)
+			page, err := service.FilteredList(r.Context(), effectiveClientAddr(r, deps.TrustedProxyCIDRs),
+				publicVisitorPrincipal(r, deps), slug, "", tagKeys, pageNo, deps.deliveryBaseURL(r))
+			if err != nil {
+				writeDeliveryError(w, r, service, err)
+				return
+			}
+			writeDeliveryPage(w, r, service, page)
 			return
 		}
 		page, err := service.TagPage(r.Context(), effectiveClientAddr(r, deps.TrustedProxyCIDRs),
@@ -710,6 +733,35 @@ func deliverySiteCategory(deps Dependencies) http.HandlerFunc {
 			http.Redirect(w, r, "/sites/"+slug+"/c/"+trimmed, http.StatusMovedPermanently)
 			return
 		}
+		// 组合筛选段：/c/{cat}/t/{t1+t2+…}（知识库筛选页设计 §2）。
+		segments := strings.Split(strings.Trim(path, "/"), "/")
+		if len(segments) == 3 && segments[1] == "t" {
+			cat := segments[0]
+			tagKeys, canonical := normalizeTagSegment(segments[2])
+			if len(tagKeys) == 0 {
+				http.Redirect(w, r, "/sites/"+slug+"/c/"+cat, http.StatusMovedPermanently)
+				return
+			}
+			if !canonical {
+				sort.Strings(tagKeys)
+				http.Redirect(w, r, "/sites/"+slug+"/c/"+cat+"/t/"+strings.Join(tagKeys, "+"), http.StatusMovedPermanently)
+				return
+			}
+			pageNo := pageParam(r)
+			page, err := service.FilteredList(r.Context(), effectiveClientAddr(r, deps.TrustedProxyCIDRs),
+				publicVisitorPrincipal(r, deps), slug, cat, tagKeys, pageNo, deps.deliveryBaseURL(r))
+			if err != nil {
+				writeDeliveryError(w, r, service, err)
+				return
+			}
+			writeDeliveryPage(w, r, service, page)
+			return
+		}
+		if len(segments) > 1 {
+			// {cat}/t/{tags} 之外的多段路径不是合法分类路径（当前分类树单层）。
+			writeDeliveryPage(w, r, service, service.ErrorPage(http.StatusNotFound))
+			return
+		}
 		page, err := service.Category(r.Context(), effectiveClientAddr(r, deps.TrustedProxyCIDRs),
 			publicVisitorPrincipal(r, deps), slug, path, deps.deliveryBaseURL(r), deliveryLocale(r))
 		if err != nil {
@@ -718,6 +770,33 @@ func deliverySiteCategory(deps Dependencies) http.HandlerFunc {
 		}
 		writeDeliveryPage(w, r, service, page)
 	}
+}
+
+// normalizeTagSegment 解析 "t1+t2+…" 标签段：去空、去重（保序首个），
+// 返回标签列表与"是否已是规范形"（无空、无重复、字典序）。
+func normalizeTagSegment(segment string) ([]string, bool) {
+	seen := map[string]bool{}
+	keys := []string{}
+	for _, part := range strings.Split(segment, "+") {
+		key := strings.TrimSpace(part)
+		if key == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		keys = append(keys, key)
+	}
+	canonical := sort.StringsAreSorted(keys)
+	return keys, canonical
+}
+
+// pageParam 读取 ?page= 页码（1 起，非法回 1）。
+func pageParam(r *http.Request) int {
+	if raw := r.URL.Query().Get("page"); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 && n <= 1000 {
+			return n
+		}
+	}
+	return 1
 }
 
 // deliverySiteCustomPage serves /sites/{slug}/p/{pageSlug}: pages_config v2

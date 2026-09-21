@@ -418,6 +418,7 @@ func (s *Service) Posts(ctx context.Context, addr string, principal auth.Princip
 			vm.Title = "知识库（续页） · " + facts.Site.Name
 		}
 		vm.Description = facts.Site.Name + " 全部文章，按发布时间排列。"
+		vm.Filter = s.buildFilterPanel(ctx, addr, principal, slug, "", nil)
 		// 分页页 canonical 固定指干净首页 URL：cursor 是会话级令牌，
 		// 自指等于把注定失效的 URL 交给搜索引擎（对标审计 P1-1）。
 		vm.Canonical = baseURL + "/sites/" + slug + "/posts/"
@@ -566,6 +567,7 @@ func (s *Service) TagPage(ctx context.Context, addr string, principal auth.Princ
 		}
 		vm.Title = "标签 " + key + " · " + facts.Site.Name
 		vm.Description = facts.Site.Name + " 中标签为 " + key + " 的文章合集。"
+		vm.Filter = s.buildFilterPanel(ctx, addr, principal, slug, "", []string{key})
 		// canonical 无尾斜杠（与 posts/分类一致）；cursor 不进 canonical。
 		vm.Canonical = baseURL + routePath
 		// 薄标签页（<3 篇且无下一页）noindex：标签聚合页天然薄内容/高重复，
@@ -919,4 +921,155 @@ func pageMetaFromVM(vm any) (Page, bool) {
 		}
 	}
 	return page, true
+}
+
+// buildFilterPanel 构造列表族左侧筛选面板（分类单选 × 标签多选，全链接式）。
+// curCat 为当前分类 slug（空=全部）；curTags 为当前选中的标签 key 列表
+//（已规范化有序）。href 规则：分类链接保持当前标签集；标签链接对当前
+// 标签集做 toggle 后重排序，与分类组合成规范 URL。
+func (s *Service) buildFilterPanel(ctx context.Context, addr string, principal auth.Principal, slug, curCat string, curTagKeys []string) *FilterPanelVM {
+	panel := &FilterPanelVM{ActiveTagNames: []string{}}
+	base := "/sites/" + slug
+	selected := map[string]bool{}
+	tagDisplay := map[string]string{}
+	for _, key := range curTagKeys {
+		selected[key] = true
+	}
+	tagPath := func(cat string, keys []string) string {
+		if len(keys) == 0 {
+			if cat == "" {
+				return base + "/posts/"
+			}
+			return base + "/c/" + cat
+		}
+		joined := strings.Join(keys, "+")
+		if cat == "" {
+			return base + "/tags/" + joined
+		}
+		return base + "/c/" + cat + "/t/" + joined
+	}
+	panel.ClearHref = tagPath("", nil)
+	panel.AllCategory = FilterLinkVM{Name: "全部分类", Href: tagPath("", curTagKeys), Active: curCat == ""}
+	if cats, err := s.Reader.PublicCategoryIndex(ctx, addr, principal, slug); err == nil {
+		for _, cat := range cats {
+			panel.Categories = append(panel.Categories, FilterLinkVM{
+				Name: cat.Name, Href: tagPath(catSlugOf(cat.Href), curTagKeys),
+				Count: int64(cat.Count), Active: curCat != "" && catSlugOf(cat.Href) == curCat,
+			})
+		}
+	}
+	if facets, err := s.Reader.Tags(ctx, addr, principal, slug, 40); err == nil {
+		for _, item := range facets {
+			key := item.Tag.Key
+			tagDisplay[key] = item.Tag.DisplayName
+			next := make([]string, 0, len(curTagKeys)+1)
+			if selected[key] {
+				for _, k := range curTagKeys {
+					if k != key {
+						next = append(next, k)
+					}
+				}
+			} else {
+				next = append(next, curTagKeys...)
+				next = append(next, key)
+				sort.Strings(next)
+			}
+			panel.Tags = append(panel.Tags, FilterLinkVM{
+				Name: displayNameOf(item.Tag.DisplayName, key), Href: tagPath(curCat, next),
+				Count: item.AssetCount, Active: selected[key],
+			})
+		}
+	}
+	if curCat != "" {
+		if name, ok := s.Reader.CategoryNameBySlug(ctx, slug, curCat); ok {
+			panel.ActiveCategoryName = name
+		} else {
+			panel.ActiveCategoryName = curCat
+		}
+	}
+	for _, key := range curTagKeys {
+		panel.ActiveTagNames = append(panel.ActiveTagNames, displayNameOf(tagDisplay[key], key))
+	}
+	return panel
+}
+
+func catSlugOf(href string) string {
+	if idx := strings.LastIndex(href, "/c/"); idx >= 0 {
+		return href[idx+3:]
+	}
+	return href
+}
+
+func displayNameOf(display, fallback string) string {
+	if strings.TrimSpace(display) != "" {
+		return display
+	}
+	return fallback
+}
+
+// FilteredList serves /c/{cat}/t/{t1+t2} 与 /tags/{k1+k2}（多标签）：
+// 分类(可空) × 标签(AND) 组合筛选列表，页码分页。组合页 noindex,follow
+//（收录策略见 docs/知识库筛选页设计-2026-09-21 §2）。
+func (s *Service) FilteredList(ctx context.Context, addr string, principal auth.Principal, slug, categorySlug string, tagKeys []string, pageNo int, baseURL string) (*Response, error) {
+	routePath := "/sites/" + slug
+	if categorySlug != "" {
+		routePath += "/c/" + categorySlug
+	}
+	if len(tagKeys) > 0 {
+		if categorySlug != "" {
+			routePath += "/t/" + strings.Join(tagKeys, "+")
+		} else {
+			routePath += "/tags/" + strings.Join(tagKeys, "+")
+		}
+	}
+	return s.pipeline(ctx, addr, principal, slug, routePath, baseURL, func(ctx context.Context, facts site.SiteFacts, band string, queries *theme.Queries) (renderOutput, error) {
+		if gated(facts, band) {
+			return s.gateOutput(facts)
+		}
+		result, err := s.Reader.FilteredPosts(ctx, addr, principal, slug, categorySlug, tagKeys, pageNo, 12)
+		if err != nil {
+			return renderOutput{}, err
+		}
+		vm := ListVM{Page: Page{Kind: "list"}, Items: []CardVM{}}
+		vm.Heading = "知识库"
+		for _, post := range result.Items {
+			vm.Items = append(vm.Items, cardVM(slug, post, 160))
+		}
+		vm.Site = chrome(facts, "list")
+		vm.Queries = queries
+		vm.Filter = s.buildFilterPanel(ctx, addr, principal, slug, categorySlug, tagKeys)
+		// 标题/描述：分类名 × 标签名组合。
+		titleParts := []string{}
+		if vm.Filter.ActiveCategoryName != "" {
+			titleParts = append(titleParts, vm.Filter.ActiveCategoryName)
+		}
+		for _, name := range vm.Filter.ActiveTagNames {
+			titleParts = append(titleParts, name)
+		}
+		pageTitle := "知识库"
+		if len(titleParts) > 0 {
+			pageTitle = strings.Join(titleParts, " × ") + " · 知识库"
+		}
+		vm.Title = pageTitle + " · " + facts.Site.Name
+		vm.Description = facts.Site.Name + " 知识库筛选：" + strings.Join(titleParts, "、") + "。"
+		vm.Canonical = baseURL + routePath
+		if pageNo > 1 {
+			vm.Canonical = baseURL + routePath // 分页 canonical 指基础组合 URL
+		}
+		// 组合页（多标签或分类×标签）noindex,follow：防组合排列稀释收录。
+		vm.NoIndex = len(tagKeys) > 1 || (categorySlug != "" && len(tagKeys) > 0)
+		// 页码导航。
+		totalPages := (result.Total + 11) / 12
+		if totalPages < 1 {
+			totalPages = 1
+		}
+		vm.PageNav = PageNavVM{Page: pageNo, TotalPages: totalPages}
+		if pageNo > 1 {
+			vm.PageNav.PrevHref = routePath + fmt.Sprintf("?page=%d", pageNo-1)
+		}
+		if pageNo < totalPages {
+			vm.PageNav.NextHref = routePath + fmt.Sprintf("?page=%d", pageNo+1)
+		}
+		return renderOutput{kind: "list", vm: vm, noIndex: vm.NoIndex}, nil
+	})
 }

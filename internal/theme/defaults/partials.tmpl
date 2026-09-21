@@ -16,3 +16,44 @@
 {{define "pager"}}
 {{with .Pagination.NextHref}}<a class="pager-next" href="{{.}}">{{i18n "next"}} &rarr;</a>{{end}}
 {{end}}
+{{define "filter_panel"}}
+{{with .}}
+<aside class="filter-panel">
+  <h2 class="fp-title">筛选</h2>
+  {{if .ActiveCategoryName}}{{else}}{{end}}
+  <section class="fp-group">
+    <h3>分类</h3>
+    <a class="fp-item{{if .AllCategory.Active}} active{{end}}" href="{{.AllCategory.Href}}">{{.AllCategory.Name}}</a>
+    {{range .Categories}}<a class="fp-item{{if .Active}} active{{end}}" href="{{.Href}}">{{.Name}} <span class="count">{{.Count}}</span></a>{{end}}
+  </section>
+  <section class="fp-group">
+    <h3>标签 <span class="fp-hint">可多选</span></h3>
+    {{range .Tags}}<a class="fp-item{{if .Active}} active{{end}}" href="{{.Href}}">{{if .Active}}✕ {{end}}{{.Name}} <span class="count">{{.Count}}</span></a>{{end}}
+  </section>
+  {{if or .ActiveCategoryName .ActiveTagNames}}
+  <a class="fp-clear" href="{{.ClearHref}}">清除全部筛选</a>
+  {{end}}
+</aside>
+{{end}}
+{{end}}
+
+{{define "active_filters"}}
+{{if or .Filter.ActiveCategoryName .Filter.ActiveTagNames}}
+<div class="active-filters">
+  {{with .Filter.ActiveCategoryName}}<span class="af-chip af-cat">{{.}}</span>{{end}}
+  {{range .Filter.ActiveTagNames}}<span class="af-chip">{{.}}</span>{{end}}
+</div>
+{{end}}
+{{end}}
+
+{{define "page_nav"}}
+{{with .}}
+{{if gt .TotalPages 1}}
+<nav class="page-nav">
+  {{with .PrevHref}}<a class="pn-link" href="{{.}}">‹ 上一页</a>{{end}}
+  <span class="pn-current">{{.Page}} / {{.TotalPages}}</span>
+  {{with .NextHref}}<a class="pn-link" href="{{.}}">下一页 ›</a>{{end}}
+</nav>
+{{end}}
+{{end}}
+{{end}}

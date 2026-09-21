@@ -9,11 +9,17 @@
   {{end}}
   {{else}}
   {{with .Crumbs}}<nav class="crumbs">{{range .}}<a href="{{.Href}}">{{.Name}}</a> / {{end}}</nav>{{end}}
+  <div class="list-layout">
+  {{template "filter_panel" .Filter}}
+  <div class="list-body">
   <h1>{{.Heading}}</h1>
+  {{if .Filter}}{{template "active_filters" .}}{{end}}
   {{if .Subcategories}}<section class="subcategories"><h2>子分类</h2>
     <ul>{{range .Subcategories}}<li><a href="{{.Href}}">{{.Name}}</a> <span class="count">{{.Count}}</span></li>{{end}}</ul>
   </section>{{end}}
   <div class="cards">{{range .Items}}{{template "card" .}}{{end}}</div>
+  </div>
+  </div>
   {{end}}
 </div>
 {{end}}

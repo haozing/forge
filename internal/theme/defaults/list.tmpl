@@ -1,7 +1,13 @@
 {{define "content"}}
-<div class="list-page">
-  <h1>{{.Heading}}</h1>
-  <div class="cards">{{range .Items}}{{template "card" .}}{{end}}</div>
-  {{template "pager" .}}
+<div class="list-page{{if .Filter}} list-layout{{end}}">
+  {{template "filter_panel" .Filter}}
+  <div class="list-body">
+    <h1>{{.Heading}}</h1>
+    {{if .Filter}}{{template "active_filters" .}}{{end}}
+    <div class="cards">{{range .Items}}{{template "card" .}}{{end}}</div>
+    {{if .Items}}{{else}}<p class="empty-hint">没有符合条件的文章，试试减少筛选条件。</p>{{end}}
+    {{template "pager" .}}
+    {{template "page_nav" .PageNav}}
+  </div>
 </div>
 {{end}}
