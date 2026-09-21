@@ -50,7 +50,11 @@ func (s *Service) relatedCandidates(ctx context.Context, addr string, principal 
 	// 索引 SQL）又准；全文检索要建完整检索会话（实测详情页冷渲染 2-5s 的
 	// 主因），降为分类不足时的兜底。
 	// Tier 1 (C8): 同分类——把权重优先导向同主题聚类。
-	if posts, err := s.Reader.SameCategoryPosts(ctx, addr, principal, slug, content.AssetID, relatedMaxItems+3, ""); err == nil {
+	posts, catErr := s.Reader.SameCategoryPosts(ctx, addr, principal, slug, content.AssetID, relatedMaxItems+3, "")
+	if catErr != nil {
+		s.Logf("delivery: related tier1 same-category ERROR slug=%s asset=%s err=%v", slug, content.AssetID, catErr)
+	} else {
+		s.Logf("delivery: related tier1 same-category slug=%s asset=%s posts=%d", slug, content.AssetID, len(posts))
 		add(site.PublicPostPage{Items: posts})
 	}
 	if len(cards) >= relatedMaxItems {
@@ -80,6 +84,7 @@ func (s *Service) relatedCandidates(ctx context.Context, addr string, principal 
 	if page, err := s.Reader.Posts(ctx, addr, principal, slug, site.PublicPostQuery{Limit: relatedMaxItems + 3}); err == nil {
 		add(page)
 	}
+	s.Logf("delivery: related resolved slug=%s asset=%s cards=%d", slug, content.AssetID, len(cards))
 	return cards
 }
 
