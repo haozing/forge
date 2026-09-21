@@ -1680,13 +1680,22 @@ func (r *PublicReader) SameCategoryPosts(ctx context.Context, visitorAddr string
 		  ON pv.organization_id = a.organization_id AND pv.id = a.current_published_version_id
 		WHERE sl.organization_id = $1::uuid AND sl.site_id = $2::uuid AND sl.is_current
 		  AND `+item.localePredicate("a", locale)+`
-		  AND a.category_container_id IS NOT NULL
-		  AND a.category_container_id IN (
-		      SELECT c2.id FROM asset.assets cur
+		  AND (
+		    a.category_container_id IN (
+		      SELECT c.id FROM asset.assets cur
 		      JOIN content.containers c ON c.id = cur.category_container_id
-		      JOIN content.containers c2
-		        ON c2.id = c.id OR c2.parent_id = c.id
-		      WHERE cur.id = $3::uuid
+		      WHERE cur.id = $3::uuid AND c.public_flag = true AND c.status = 'active'
+		    )
+		    OR EXISTS (
+		      SELECT 1 FROM content.container_assets mine
+		      JOIN content.container_assets other
+		        ON other.container_id = mine.container_id
+		       AND other.organization_id = mine.organization_id
+		       AND other.asset_id = $3::uuid
+		      JOIN content.containers c ON c.id = mine.container_id
+		       AND c.public_flag = true AND c.status = 'active'
+		      WHERE mine.organization_id = a.organization_id AND mine.asset_id = a.id
+		    )
 		  )
 		ORDER BY a.published_at DESC
 		LIMIT $4::int
