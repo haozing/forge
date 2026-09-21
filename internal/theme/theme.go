@@ -176,11 +176,11 @@ func Compile(files map[string]string, opts Options) (*Theme, error) {
 			return out
 		},
 		"query": opts.Query,
-		SearchIslandFn: func() string {
-			return `<script src="/static/delivery-search.js" defer></script>`
+		SearchIslandFn: func() template.HTML {
+			return template.HTML(`<script src="/static/delivery-search.js" defer></script>`)
 		},
-		ChatIslandFn: func() string {
-			return `<script src="/static/delivery-chat.js" defer></script>`
+		ChatIslandFn: func() template.HTML {
+			return template.HTML(`<script src="/static/delivery-chat.js" defer></script>`)
 		},
 	}
 
