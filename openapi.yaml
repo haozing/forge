@@ -3583,6 +3583,48 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/PublicPostPage' }
         '404': { $ref: '#/components/responses/Error' }
+  /api/public/sites/{slug}/chat:
+    post:
+      tags: [sites-public]
+      operationId: publicSiteChat
+      description: 登录成员的站点 AI 问答（SSE 流式）；每日额度按成员计。
+      parameters:
+        - $ref: '#/components/parameters/PublicSiteSlug'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message]
+              properties:
+                session_id: { type: string }
+                message: { type: string, maxLength: 1000 }
+      responses:
+        '200':
+          description: SSE 流（delta* → done，done 携带引用与剩余额度）
+        '401': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+
+  /api/public/sites/{slug}/chat/quota:
+    get:
+      tags: [sites-public]
+      operationId: publicSiteChatQuota
+      description: 当前成员在站点的今日问答额度使用量。
+      parameters:
+        - $ref: '#/components/parameters/PublicSiteSlug'
+      responses:
+        '200':
+          description: 额度
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  used: { type: integer }
+                  limit: { type: integer }
+        '401': { $ref: '#/components/responses/Error' }
+
   /api/public/sites/{slug}/search:
     get:
       tags: [sites-public]
@@ -6032,6 +6074,49 @@ paths:
         '404': { $ref: '#/components/responses/Error' }
         '409': { $ref: '#/components/responses/Error' }
   /api/admin/agent-users:
+    get:
+      tags: [admin]
+      operationId: listAgentUsers
+      summary: List agent users with keys, application and model policies
+      description: 管理台发钥 UI 的列表（agent.manage 门禁；不含密钥明文）
+      responses:
+        '200':
+          description: Agent 用户与密钥/授权
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        agent_user_id: { type: string, format: uuid }
+                        display_name: { type: string }
+                        status: { type: string }
+                        created_at: { type: string, format: date-time }
+                        application_name: { type: string }
+                        runtime_mode: { type: string }
+                        keys:
+                          type: array
+                          items:
+                            type: object
+                            properties:
+                              key_id: { type: string }
+                              name: { type: string }
+                              prefix: { type: string }
+                              expires_at: { type: string, format: date-time, nullable: true }
+                              revoked: { type: boolean }
+                              capabilities: { type: array, items: { type: string } }
+                        policies:
+                          type: array
+                          items:
+                            type: object
+                            properties:
+                              resource_model_id: { type: string, format: uuid }
+                              actions: { type: array, items: { type: string } }
+                              data_scope: { type: string }
     post:
       tags: [admin]
       operationId: registerAgentUser

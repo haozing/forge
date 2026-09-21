@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -47,6 +48,18 @@ import (
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/riverdriver/riverpgxv5"
 )
+
+// chatModelResolverAdapter 把 ModelRegistry 适配为公开问答的模型解析器
+// （delivery 不导入 agentruntime，避免与 site_theme_tools 成环）。
+type chatModelResolverAdapter struct{ registry *agentruntime.ModelRegistry }
+
+func (a chatModelResolverAdapter) Resolve(ctx context.Context, applicationID string) (delivery.ChatResolvedModel, error) {
+	resolved, err := a.registry.Resolve(ctx, applicationID)
+	if err != nil {
+		return delivery.ChatResolvedModel{}, err
+	}
+	return delivery.ChatResolvedModel{StreamModel: resolved.Model, EndpointID: resolved.EndpointID}, nil
+}
 
 func main() {
 	cfg := config.Load()
@@ -217,7 +230,7 @@ func main() {
 		FacetService:         tag.FacetService{Store: db},
 		// Phase 5 public-site management: workspace policy gate plus site
 		// events/audit inside the same transaction as the business write.
-		Sites: &site.Service{Store: db, Events: &events, Policy: authz.WorkspacePolicyService{Store: db}, PreviewHashSecret: cfg.QueryHashSecret},
+		Sites:         &site.Service{Store: db, Events: &events, Policy: authz.WorkspacePolicyService{Store: db}, PreviewHashSecret: cfg.QueryHashSecret},
 		ModelingPlans: modeling.Service{Store: db, Policy: authz.WorkspacePolicyService{Store: db}, Events: &events},
 		// Phase 5 public-site read face: the unified query service (plan D2)
 		// plus the tag facet counter (B4); the anonymous IP budget reuses the
@@ -266,6 +279,20 @@ func main() {
 	// the page cache, StyleEngine and the real-render preview (wired after
 	// the dependencies literal so it can reference the reader and service).
 	deps.Delivery = delivery.NewService(db, deps.PublicSites, deps.Sites, 0, log.Printf)
+	// 公开站 AI 问答（/ask）装配：CHAT_AGENT_APPLICATION_ID 指向品牌问答
+	// 绑定的 agent 应用（模型经 ModelRegistry 解析）；未配置时问答端点
+	// 返回明确降级。CHAT_DAILY_QUOTA 为每成员每日提问上限（默认 20）。
+	if chatAppID := strings.TrimSpace(os.Getenv("CHAT_AGENT_APPLICATION_ID")); chatAppID != "" {
+		deps.Delivery.ChatModels = chatModelResolverAdapter{registry: modelRegistry}
+		deps.Delivery.ChatAgentApplicationID = chatAppID
+		quota := 20
+		if raw := strings.TrimSpace(os.Getenv("CHAT_DAILY_QUOTA")); raw != "" {
+			if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+				quota = parsed
+			}
+		}
+		deps.Delivery.ChatDailyQuota = quota
+	}
 	// The delivery face pins canonical/og:url/sitemap to the configured
 	// public origin: rendered pages are cached Host-agnostically, so a
 	// request-Host-derived prefix would poison the cache on internal probes.

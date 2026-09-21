@@ -53,6 +53,14 @@ func i18nText(key string) string {
 		"empty_list":  "暂无内容",
 		"back_home":   "返回首页",
 		"comment":     "评论",
+		"ask":              "出海agent",
+		"ask_note":         "基于本站公开文章回答，回答下方标注来源。",
+		"ask_quota_label":  "今日额度",
+		"ask_greeting":     "你好！我是七渡出海的 AI 助手，基于本站 755+ 篇实战文章回答问题。输入你的问题开始。",
+		"ask_placeholder":  "输入你的问题…",
+		"ask_send":         "发送",
+		"ask_login_required": "AI 问答需要登录后使用。登录后每位成员每日可提问 20 次。",
+		"ask_go_login":     "登录后使用",
 		"attachments": "附件",
 	}
 	if text, ok := table[key]; ok {

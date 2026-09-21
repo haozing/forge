@@ -69,7 +69,7 @@ func Scan(name, src string) []Problem {
 		switch fn {
 		case "if", "else", "end", "range", "with", "template", "define", "block",
 			"assetURL", "absURL", "dateFmt", "truncate", "json", "i18n", "dict", "themeCSS",
-			SearchIslandFn, "query", "printf", "print", "println", "len", "index",
+			SearchIslandFn, ChatIslandFn, "query", "printf", "print", "println", "len", "index",
 			"slice", "not", "and", "or", "eq", "ne", "lt", "le", "gt", "ge", "urlquery", "html", "js":
 			continue
 		}

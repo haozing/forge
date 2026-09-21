@@ -127,3 +127,12 @@ func SharedRenderer() *Renderer {
 	rendererOnce.Do(func() { rendererOnce.renderer = NewRenderer() })
 	return rendererOnce.renderer
 }
+
+// ChatJavaScript serves the chat island script bytes.
+func ChatJavaScript() []byte {
+	body, err := templateFS.ReadFile("templates/static/chat.js")
+	if err != nil {
+		panic("delivery: chat island script missing: " + err.Error())
+	}
+	return body
+}

@@ -690,3 +690,9 @@ type PageNavVM struct {
 	PrevHref   string
 	NextHref   string
 }
+
+// ChatTurn 是公开问答的一条历史消息。
+type ChatTurn struct {
+	Role    string
+	Content string
+}

@@ -73,6 +73,10 @@ func registerDeliveryRoutes(deps Dependencies, mux *http.ServeMux) {
 	mux.HandleFunc("/sites/{slug}/archive/", deliverySiteArchive(deps))
 	mux.HandleFunc("/sites/{slug}/media/{attachmentId}", deliverySiteMedia(deps))
 	mux.HandleFunc("/static/delivery-search.js", deliverySearchScript(deps))
+	mux.HandleFunc("/static/delivery-chat.js", deliveryChatScript(deps))
+	mux.HandleFunc("/sites/{slug}/ask", deliverySiteAsk(deps))
+	mux.HandleFunc("/api/public/sites/{slug}/chat", publicSiteChat(deps))
+	mux.HandleFunc("/api/public/sites/{slug}/chat/quota", publicSiteChatQuota(deps))
 	mux.HandleFunc("/static/delivery-carousel.js", deliveryCarouselScript(deps))
 }
 

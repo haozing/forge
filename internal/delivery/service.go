@@ -50,6 +50,14 @@ const (
 	contentJS   = "text/javascript; charset=utf-8"
 )
 
+// ErrChatLoginRequired / ErrChatInvalidMessage / ErrChatQuotaExhausted 是
+// 公开 AI 问答的终端错误（httpapi 映射 401/422/429）。
+var (
+	ErrChatLoginRequired  = fmt.Errorf("delivery: chat login required")
+	ErrChatInvalidMessage = fmt.Errorf("delivery: invalid chat message")
+	ErrChatQuotaExhausted = fmt.Errorf("delivery: chat quota exhausted")
+)
+
 // Service is the wired delivery face: reader, cache, renderer and the
 // management service used by previews.
 type Service struct {
@@ -62,11 +70,18 @@ type Service struct {
 	// media route (404 parity).
 	Objects objectstore.ObjectStore
 	Logf    func(string, ...any)
+	// ChatModels / ChatAgentApplicationID / ChatDailyQuota：公开 AI 问答
+	//（/ask）的可选装配；未配置时问答端点明确降级不可用。
+	ChatModels              ChatModelResolver
+	ChatAgentApplicationID string
+	ChatDailyQuota         int
 	// group collapses concurrent cold-key renders.
 	group singleflight.Group
 }
 
 // NewService wires the delivery service with a fresh cache and renderer.
+// ChatModels/ChatAgentApplicationID/ChatDailyQuota 为公开 AI 问答的可选
+// 装配（未配置时 /ask 端点明确降级），由 cmd/api 在构造后注入。
 func NewService(database *store.Store, reader *site.PublicReader, sites *site.Service, cacheCapacity int, logf func(string, ...any)) *Service {
 	if logf == nil {
 		logf = log.Printf
@@ -1072,4 +1087,9 @@ func (s *Service) FilteredList(ctx context.Context, addr string, principal auth.
 		}
 		return renderOutput{kind: "list", vm: vm, noIndex: vm.NoIndex}, nil
 	})
+}
+
+// ChatScript serves the chat island JavaScript (公开 AI 问答，同搜索岛模式).
+func (s *Service) ChatScript() *Response {
+	return &Response{Body: ChatJavaScript(), ContentType: "text/javascript; charset=utf-8", CacheControl: "public, max-age=3600", Status: 200}
 }

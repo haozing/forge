@@ -31,17 +31,19 @@ const (
 	SlotArchive    = "archive"
 	SlotPage       = "page"
 	SlotPartials   = "partials"
+	SlotAsk        = "ask"
 	SlotTokensCSS  = "tokens.css"
 	SlotThemeCSS   = "theme.css"
 	ContentDefine  = "content" // layout 必须定义的挂载点名
 	SearchIslandFn = "searchIsland"
+	ChatIslandFn   = "chatIsland"
 )
 
 // Slots 是主题可提供的全部槽位（CSS 与模板分列；partials 可选）。
 var Slots = []string{
 	SlotLayout, SlotHome, SlotDetail, SlotAbout, SlotList, SlotSection,
 	SlotCategory, SlotTags, SlotTagPage, SlotSearch, SlotArchive, SlotPage,
-	SlotPartials,
+	SlotPartials, SlotAsk,
 }
 
 // MaxFileBytes / MaxTotalBytes 是文件集大小上限（§3 要点）。
@@ -176,6 +178,9 @@ func Compile(files map[string]string, opts Options) (*Theme, error) {
 		"query": opts.Query,
 		SearchIslandFn: func() string {
 			return `<script src="/static/delivery-search.js" defer></script>`
+		},
+		ChatIslandFn: func() string {
+			return `<script src="/static/delivery-chat.js" defer></script>`
 		},
 	}
 
