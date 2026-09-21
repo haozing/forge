@@ -533,6 +533,7 @@ func registerOpenRoutes(deps Dependencies, mux *http.ServeMux) {
 // access policies, API-key rotation and application oversight.
 func registerAdminRoutes(deps Dependencies, mux *http.ServeMux) {
 	mux.HandleFunc("/api/admin/agent-users", registerAgent(deps))
+	mux.HandleFunc("GET /api/admin/agent-users", listAgentUsers(deps))
 	mux.HandleFunc("/api/admin/agent-users/{agentUserId}/access-policy", replaceAgentModelPolicy(deps))
 	mux.HandleFunc("/api/admin/agent-users/{agentUserId}/api-keys/rotate", rotateAgentAPIKey(deps))
 	mux.HandleFunc("/api/admin/agent-users/{agentUserId}/api-keys/revoke-all", revokeAllAgentAPIKeys(deps))

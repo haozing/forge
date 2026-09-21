@@ -122,3 +122,38 @@ func requestBaseURL(r *http.Request) string {
 	}
 	return scheme + "://" + r.Host
 }
+
+// listAgentUsers serves GET /api/admin/agent-users：管理台"Agent 用户"
+// 列表（发钥 UI 数据面）。门禁与注册同款（member + system:agent-users）。
+func listAgentUsers(deps Dependencies) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
+			return
+		}
+		principal, err := deps.SessionService.Authenticate(r.Context(), r)
+		if err != nil {
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		if principal.UserType != "member" {
+			writeError(w, http.StatusForbidden, "member_required")
+			return
+		}
+		allowed, err := deps.ScopeResolver.AllowedSystemResourceIDs(r.Context(), principal, "agent.manage")
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "authorization_scope_failed")
+			return
+		}
+		if !containsScope(allowed, "system:agent-users") {
+			writeError(w, http.StatusForbidden, "permission_denied")
+			return
+		}
+		result, err := deps.AdminService.ListAgentUsers(r.Context(), principal)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "agent_user_list_failed")
+			return
+		}
+		writeJSON(w, http.StatusOK, result)
+	}
+}
