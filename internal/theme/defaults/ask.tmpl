@@ -5,7 +5,7 @@
   data-logged-in="{{.LoggedIn}}"
   data-quota-used="{{.QuotaUsed}}"
   data-quota-limit="{{.QuotaLimit}}"
-  data-login-href="{{.Site.HomeHref}}login">
+  data-login-href="/login">
   <h1>{{i18n "ask"}}</h1>
   {{if .LoggedIn}}
   <p class="ask-note">{{i18n "ask_note"}} <span class="ask-quota">{{i18n "ask_quota_label"}} {{.QuotaUsed}}/{{.QuotaLimit}}</span></p>
@@ -22,7 +22,7 @@
   {{else}}
   <div class="ask-login-cta">
     <p>{{i18n "ask_login_required"}}</p>
-    <a class="btn btn-primary" href="{{.Site.HomeHref}}login">{{i18n "ask_go_login"}}</a>
+    <a class="btn btn-primary" href="/login">{{i18n "ask_go_login"}}</a>
   </div>
   {{end}}
 </div>
