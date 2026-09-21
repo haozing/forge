@@ -5,8 +5,7 @@ a{color:var(--c-primary);text-decoration:none}
 a:focus-visible,button:focus-visible,input:focus-visible{outline:2px solid var(--c-primary);outline-offset:2px}
 h1,h2,h3{font-family:var(--font-heading)}
 .site-header{background:var(--c-surface);border-bottom:1px solid var(--c-border)}
-.header-inner{max-width:var(--reading);margin:0 auto;display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:16px;padding:14px 16px}
-.header-inner-wide{max-width:1000px}
+.header-inner{max-width:var(--content);margin:0 auto;display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:16px;padding:14px 16px}
 .site-header .site-name{font-family:var(--font-heading);font-weight:700;color:var(--c-text);font-size:19px;justify-self:start}
 .site-header .site-name .site-domain{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px;color:var(--c-muted);margin-left:6px}
 .site-nav{display:flex;gap:20px;justify-self:center}
@@ -15,9 +14,7 @@ h1,h2,h3{font-family:var(--font-heading)}
 .search-form{justify-self:end;margin:0}
 .search-form input{border:1px solid var(--c-border);border-radius:6px;padding:5px 12px;font:inherit;background:var(--c-bg);color:var(--c-text);width:180px}
 .search-form input:focus{outline:2px solid var(--c-primary);outline-offset:-1px}
-.site-main{max-width:var(--reading);margin:0 auto;padding:28px 16px 60px}
-/* 枢纽首页内容放宽：落地页需要横向空间，文章阅读仍用 760px */
-.site-main-wide{max-width:1000px}
+.site-main{max-width:var(--content);margin:0 auto;padding:28px 16px 60px}
 .cards{display:grid;gap:14px}
 .card{background:var(--c-surface);border:1px solid var(--c-border);border-radius:6px;padding:16px 18px;transition:border-color .15s ease,box-shadow .15s ease}
 .card:hover{border-color:var(--c-primary);box-shadow:0 1px 6px rgba(35,31,32,.06)}

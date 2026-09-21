@@ -11,7 +11,7 @@
 <style>{{themeCSS}}</style>
 </head>
 <body>
-<header class="site-header"><div class="header-inner{{if eq .Kind "home"}} header-inner-wide{{end}}">
+<header class="site-header"><div class="header-inner">
   <a class="site-name" href="{{.Site.HomeHref}}">{{.Site.Name}}<span class="site-domain">qidu.site</span></a>
   <nav class="site-nav">
     <a href="{{.Site.HomeHref}}">首页</a>
@@ -22,7 +22,7 @@
     <input type="search" name="q" placeholder="{{i18n "search"}}" aria-label="{{i18n "search"}}">
   </form>
 </div></header>
-<main class="site-main{{if eq .Kind "home"}} site-main-wide{{end}}">
+<main class="site-main">
 {{template "content" .}}
 </main>
 <footer class="site-footer">
