@@ -409,13 +409,13 @@ func (s *Service) Posts(ctx context.Context, addr string, principal auth.Princip
 			}
 			return renderOutput{}, err
 		}
-		vm := ResolveList(slug, "文章", "/sites/"+slug+"/posts/", page, page.NextCursor)
+		vm := ResolveList(slug, "知识库", "/sites/"+slug+"/posts/", page, page.NextCursor)
 		vm.Site = chrome(facts, "list")
 		vm.Queries = queries
-		vm.Title = "文章 · " + facts.Site.Name
+		vm.Title = "知识库 · " + facts.Site.Name
 		if cursor != "" {
 			// 分页页与第一页共用 title 会判重复（审计 P2-7）：cursor 页加续页标识。
-			vm.Title = "文章（续页） · " + facts.Site.Name
+			vm.Title = "知识库（续页） · " + facts.Site.Name
 		}
 		vm.Description = facts.Site.Name + " 全部文章，按发布时间排列。"
 		// 分页页 canonical 固定指干净首页 URL：cursor 是会话级令牌，

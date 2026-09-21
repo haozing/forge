@@ -1,8 +1,9 @@
 :root{
-  --c-primary:#b91c1c;
+  --c-primary:#1e3a5f;
+  --c-accent:#ea8a3a;
   --c-surface:#FBF9F6;
-  --c-bg:#F6F4F1;
-  --c-text:#231F20;
+  --c-bg:#FAF9F7;
+  --c-text:#2d2d2d;
   --c-muted:#6b7280;
   --c-border:#E2E0DD;
   --font-heading:Georgia, "Songti SC", "Noto Serif CJK SC", serif;

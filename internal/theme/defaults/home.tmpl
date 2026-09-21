@@ -1,22 +1,90 @@
 {{define "content"}}
-<div class="home">
-  <h1 class="home-title">{{.Site.Name}}</h1>
-  {{with .Description}}<p class="home-desc">{{.}}</p>{{end}}
-  {{if .Categories}}
-  <nav class="category-index" aria-label="分类导航">
-    {{range .Categories}}<a class="category-chip" href="{{.Href}}">{{.Name}} <span class="count">{{.Count}}</span></a>{{end}}
-  </nav>
-  {{end}}
-  {{if .Items}}
-  <div class="cards">
-    {{range .Items}}{{template "card" .}}{{end}}
-  </div>
-  {{end}}
-  {{if .ShowTagCloud}}
-  <section class="tag-cloud">
-    <h2>{{i18n "tags"}}</h2>
-    {{range .TagCloud}}<a class="tag-chip" href="{{.Href}}">{{.DisplayName}} <span class="count">{{.Count}}</span></a>{{end}}
+<div class="hub">
+  <section class="hero">
+    <h1 class="hero-title">独立开发者出海工具站</h1>
+    <p class="hero-sub">帮小团队跑通从0到1，补齐核验、合规、渠道的变现组件</p>
+    <p class="hero-tags">十年全栈实战 · AI驱动提效 · 慢结构长期主义</p>
+    <div class="hero-actions">
+      <a class="btn btn-primary" href="{{.Site.PostsHref}}">出海知识库</a>
+      <a class="btn" href="#tools">工具矩阵</a>
+    </div>
+    <p class="hero-note">755 篇实战干货 · 持续更新</p>
   </section>
-  {{end}}
+
+  <section class="caps">
+    <div class="cap-card">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M9 12l2 2 4-4"/><circle cx="12" cy="12" r="9"/></svg>
+      <h2>渠道核验</h2>
+      <p>真实渠道资质筛查，避开假流量假合作</p>
+    </div>
+    <div class="cap-card">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l8 4v5c0 5-3.5 8-8 9-4.5-1-8-4-8-9V7l8-4z"/></svg>
+      <h2>合规护航</h2>
+      <p>海外市场合规清单，降低政策风险</p>
+    </div>
+    <div class="cap-card">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="M8 21h8M12 18v3"/></svg>
+      <h2>实战工具</h2>
+      <p>轻量微型SaaS，开箱即用，不用重造轮子</p>
+    </div>
+    <div class="cap-card">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h4l2-7 3 14 2-7h3"/></svg>
+      <h2>AI提效</h2>
+      <p>全流程AI赋能，小团队也能高效跑通全链路</p>
+    </div>
+  </section>
+
+  <section class="matrix" id="tools">
+    <h2 class="hub-h2">轻量工具矩阵</h2>
+    <p class="hub-sub">不做大平台，只做解决具体问题的小工具</p>
+    <div class="matrix-grid">
+      <div class="tool-card is-dev">
+        <h3>七渡·渠真</h3>
+        <p class="tool-tag">渠道核验工具</p>
+        <p class="tool-desc">海外渠道真实性核验，流量质量筛查，避开假渠道坑</p>
+        <span class="tool-badge">开发中</span>
+      </div>
+      <div class="tool-card is-dev">
+        <h3>七渡·合规镜</h3>
+        <p class="tool-tag">出海合规工具</p>
+        <p class="tool-desc">海外市场合规诊断，资质校验，政策风险预警</p>
+        <span class="tool-badge">开发中</span>
+      </div>
+      <div class="tool-card is-dev">
+        <h3>七渡·信核</h3>
+        <p class="tool-tag">数据核验工具</p>
+        <p class="tool-desc">跨平台数据一致性校验，确保业务数据真实可信</p>
+        <span class="tool-badge">开发中</span>
+      </div>
+      <div class="tool-card is-dev">
+        <h3>AgentBlog 自动化博客</h3>
+        <p class="tool-tag">AI 内容引擎</p>
+        <p class="tool-desc">AI驱动的独立站博客系统，批量生成SEO内容，自动部署上线</p>
+        <span class="tool-badge">开发中</span>
+      </div>
+    </div>
+  </section>
+
+  <section class="kb-zone">
+    <div class="kb-intro">
+      <h2 class="hub-h2">出海知识库</h2>
+      <p class="kb-desc">独立站建站、SEO、外链、变现的实战知识沉淀</p>
+      <p class="kb-stats">10+ 分类 · 755+ 篇 · 持续更新</p>
+      <a class="btn btn-primary" href="{{.Site.PostsHref}}">进入知识库</a>
+      <a class="kb-cats" href="{{.Site.HomeHref}}c/">按分类浏览 →</a>
+    </div>
+    <div class="kb-latest">
+      <h2 class="hub-h2">最新出海观察</h2>
+      <div class="cards">{{range .Items}}{{template "card" .}}{{end}}</div>
+      <a class="kb-all" href="{{.Site.PostsHref}}">查看全部文章 →</a>
+    </div>
+  </section>
+
+  <section class="about-strip">
+    <h2 class="hub-h2">你好，我是七渡</h2>
+    <p>十年全栈开发，做过区块链、电商店群、独立工具站，现在带小团队做轻量出海SaaS。</p>
+    <p>不追风口，不造神话，相信慢结构的长期价值。所有工具和方法，我们都先自己跑一遍，再整理成可复用的产品。</p>
+    <p>如果你也在做独立产品、小团队出海，欢迎一起交流。</p>
+  </section>
 </div>
 {{end}}
