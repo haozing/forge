@@ -4,15 +4,15 @@ body{margin:0;background:var(--c-bg);color:var(--c-text);font:16px/1.7 var(--fon
 a{color:var(--c-primary);text-decoration:none}
 a:focus-visible,button:focus-visible,input:focus-visible{outline:2px solid var(--c-primary);outline-offset:2px}
 h1,h2,h3{font-family:var(--font-heading)}
-.site-header{display:flex;flex-direction:column;align-items:center;gap:12px;padding:16px 24px;background:var(--c-surface);border-bottom:1px solid var(--c-border);flex-wrap:wrap}
-.site-header .site-name{font-family:var(--font-heading);font-weight:700;color:var(--c-text);font-size:20px}
-.site-nav{display:flex;gap:22px;row-gap:6px;flex-wrap:wrap;justify-content:center}
+.site-header{display:flex;align-items:center;justify-content:center;gap:20px;padding:14px 24px;background:var(--c-surface);border-bottom:1px solid var(--c-border);flex-wrap:wrap}
+.site-header .site-name{font-family:var(--font-heading);font-weight:700;color:var(--c-text);font-size:19px}
+.site-nav{display:flex;gap:20px;row-gap:6px;flex-wrap:wrap}
 .site-nav a{white-space:nowrap;color:var(--c-text);opacity:.85}
 .site-nav a:hover{color:var(--c-primary);opacity:1}
 /* 分类入口不进头部导航（2026-09-21 拍板）：分类浏览走首页分类区块与 /c/ 总览页 */
 .site-nav a[href*="/c/"]{display:none}
 .search-form{margin:0}
-.search-form input{border:1px solid var(--c-border);border-radius:6px;padding:6px 14px;font:inherit;background:var(--c-bg);color:var(--c-text);width:220px;max-width:70vw}
+.search-form input{border:1px solid var(--c-border);border-radius:6px;padding:5px 12px;font:inherit;background:var(--c-bg);color:var(--c-text);width:180px}
 .search-form input:focus{outline:2px solid var(--c-primary);outline-offset:-1px}
 .site-main{max-width:var(--reading);margin:0 auto;padding:28px 16px 60px}
 .cards{display:grid;gap:14px}
@@ -70,9 +70,8 @@ h1,h2,h3{font-family:var(--font-heading)}
 @media (max-width: 720px){
   .site-header{gap:10px;padding:12px 14px}
   .site-header .site-name{font-size:17px}
-  .site-nav{gap:8px 14px}
-  .search-form{width:100%}
-  .search-form input{width:100%}
+  .site-nav{gap:8px 14px;justify-content:center}
+  .search-form input{width:150px}
   .article-title{font-size:24px}
   .site-footer{flex-direction:column;gap:10px}
 }
