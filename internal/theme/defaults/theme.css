@@ -15,6 +15,8 @@ h1,h2,h3{font-family:var(--font-heading)}
 .search-form input{border:1px solid var(--c-border);border-radius:6px;padding:5px 12px;font:inherit;background:var(--c-bg);color:var(--c-text);width:180px}
 .search-form input:focus{outline:2px solid var(--c-primary);outline-offset:-1px}
 .site-main{max-width:var(--reading);margin:0 auto;padding:28px 16px 60px}
+/* 枢纽首页内容放宽：落地页需要横向空间，文章阅读仍用 760px */
+.site-main-wide{max-width:1000px}
 .cards{display:grid;gap:14px}
 .card{background:var(--c-surface);border:1px solid var(--c-border);border-radius:6px;padding:16px 18px;transition:border-color .15s ease,box-shadow .15s ease}
 .card:hover{border-color:var(--c-primary);box-shadow:0 1px 6px rgba(35,31,32,.06)}

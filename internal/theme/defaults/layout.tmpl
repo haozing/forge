@@ -22,7 +22,7 @@
     <input type="search" name="q" placeholder="{{i18n "search"}}" aria-label="{{i18n "search"}}">
   </form>
 </div></header>
-<main class="site-main">
+<main class="site-main{{if eq .Kind "home"}} site-main-wide{{end}}">
 {{template "content" .}}
 </main>
 <footer class="site-footer">
