@@ -4,14 +4,14 @@ body{margin:0;background:var(--c-bg);color:var(--c-text);font:16px/1.7 var(--fon
 a{color:var(--c-primary);text-decoration:none}
 a:focus-visible,button:focus-visible,input:focus-visible{outline:2px solid var(--c-primary);outline-offset:2px}
 h1,h2,h3{font-family:var(--font-heading)}
-.site-header{display:flex;align-items:center;justify-content:center;gap:20px;padding:14px 24px;background:var(--c-surface);border-bottom:1px solid var(--c-border);flex-wrap:wrap}
-.site-header .site-name{font-family:var(--font-heading);font-weight:700;color:var(--c-text);font-size:19px}
-.site-nav{display:flex;gap:20px;row-gap:6px;flex-wrap:wrap}
+.site-header{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:16px;padding:14px 24px;background:var(--c-surface);border-bottom:1px solid var(--c-border)}
+.site-header .site-name{font-family:var(--font-heading);font-weight:700;color:var(--c-text);font-size:19px;justify-self:start}
+.site-nav{display:flex;gap:20px;flex-wrap:wrap;justify-self:center}
 .site-nav a{white-space:nowrap;color:var(--c-text);opacity:.85}
 .site-nav a:hover{color:var(--c-primary);opacity:1}
 /* 分类入口不进头部导航（2026-09-21 拍板）：分类浏览走首页分类区块与 /c/ 总览页 */
 .site-nav a[href*="/c/"]{display:none}
-.search-form{margin:0}
+.search-form{justify-self:end;margin:0}
 .search-form input{border:1px solid var(--c-border);border-radius:6px;padding:5px 12px;font:inherit;background:var(--c-bg);color:var(--c-text);width:180px}
 .search-form input:focus{outline:2px solid var(--c-primary);outline-offset:-1px}
 .site-main{max-width:var(--reading);margin:0 auto;padding:28px 16px 60px}
@@ -48,7 +48,7 @@ h1,h2,h3{font-family:var(--font-heading)}
 .field-row{display:flex;gap:12px;border-bottom:1px dashed var(--c-border);padding:6px 0}
 .field-row dt{width:140px;color:var(--c-muted)}
 .neighbors{display:flex;justify-content:space-between;margin-top:26px}
-.site-footer{border-top:1px solid var(--c-border);padding:18px 24px;display:flex;justify-content:space-between;color:var(--c-muted);font-size:14px}
+.site-footer{border-top:1px solid var(--c-border);padding:18px 24px;display:flex;justify-content:center;align-items:center;gap:16px;color:var(--c-muted);font-size:14px}
 .site-footer a{color:var(--c-muted)}
 .site-footer a:hover{color:var(--c-primary)}
 .home-title { font-size: 1.6rem; margin: 0 0 .4rem; }
@@ -68,9 +68,10 @@ h1,h2,h3{font-family:var(--font-heading)}
 .subcategories ul{list-style:none;padding:0;display:flex;flex-wrap:wrap;gap:10px}
 .pager-next{display:inline-block;margin-top:1.2rem}
 @media (max-width: 720px){
-  .site-header{gap:10px;padding:12px 14px}
+  .site-header{grid-template-columns:1fr;justify-items:center;gap:10px;padding:12px 14px}
   .site-header .site-name{font-size:17px}
   .site-nav{gap:8px 14px;justify-content:center}
+  .search-form{justify-self:center}
   .search-form input{width:150px}
   .article-title{font-size:24px}
   .site-footer{flex-direction:column;gap:10px}
