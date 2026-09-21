@@ -11,7 +11,7 @@
 <style>{{themeCSS}}</style>
 </head>
 <body>
-<header class="site-header"><div class="header-inner">
+<header class="site-header"><div class="header-inner{{if eq .Kind "home"}} header-inner-wide{{end}}">
   <a class="site-name" href="{{.Site.HomeHref}}">{{.Site.Name}}<span class="site-domain">qidu.site</span></a>
   <nav class="site-nav">
     <a href="{{.Site.HomeHref}}">首页</a>

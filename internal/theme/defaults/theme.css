@@ -6,6 +6,7 @@ a:focus-visible,button:focus-visible,input:focus-visible{outline:2px solid var(-
 h1,h2,h3{font-family:var(--font-heading)}
 .site-header{background:var(--c-surface);border-bottom:1px solid var(--c-border)}
 .header-inner{max-width:var(--reading);margin:0 auto;display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:16px;padding:14px 16px}
+.header-inner-wide{max-width:1000px}
 .site-header .site-name{font-family:var(--font-heading);font-weight:700;color:var(--c-text);font-size:19px;justify-self:start}
 .site-header .site-name .site-domain{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px;color:var(--c-muted);margin-left:6px}
 .site-nav{display:flex;gap:20px;justify-self:center}
