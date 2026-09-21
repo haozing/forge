@@ -27,7 +27,7 @@ import (
 // deliveryCSP is the Content-Security-Policy of every HTML response (design
 // doc §10.7): inline style only (CSS variables injection), same-origin
 // scripts (the search island ships as a static file), no framing, no base.
-const deliveryCSP = "default-src 'none'; style-src 'unsafe-inline'; script-src 'self'; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+const deliveryCSP = "default-src 'none'; style-src 'unsafe-inline'; script-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
 
 // requireDelivery answers 500 when the delivery service is not wired.
 func requireDelivery(w http.ResponseWriter, deps Dependencies) *delivery.Service {
