@@ -228,10 +228,11 @@ func (s *Service) PublicChatStream(ctx context.Context, addr string, principal a
 			break
 		}
 	}
-	if s.ChatModels == nil || s.ChatAgentApplicationID == "" {
+	chatAppID, ok := s.Reader.ChatConfig(ctx, slug)
+	if !ok || s.ChatModels == nil {
 		return fmt.Errorf("public chat is not configured")
 	}
-	resolved, err := s.ChatModels.Resolve(ctx, s.ChatAgentApplicationID)
+	resolved, err := s.ChatModels.Resolve(ctx, chatAppID)
 	if err != nil {
 		return err
 	}

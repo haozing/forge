@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -279,20 +278,11 @@ func main() {
 	// the page cache, StyleEngine and the real-render preview (wired after
 	// the dependencies literal so it can reference the reader and service).
 	deps.Delivery = delivery.NewService(db, deps.PublicSites, deps.Sites, 0, log.Printf)
-	// 公开站 AI 问答（/ask）装配：CHAT_AGENT_APPLICATION_ID 指向品牌问答
-	// 绑定的 agent 应用（模型经 ModelRegistry 解析）；未配置时问答端点
-	// 返回明确降级。CHAT_DAILY_QUOTA 为每成员每日提问上限（默认 20）。
-	if chatAppID := strings.TrimSpace(os.Getenv("CHAT_AGENT_APPLICATION_ID")); chatAppID != "" {
-		deps.Delivery.ChatModels = chatModelResolverAdapter{registry: modelRegistry}
-		deps.Delivery.ChatAgentApplicationID = chatAppID
-		quota := 20
-		if raw := strings.TrimSpace(os.Getenv("CHAT_DAILY_QUOTA")); raw != "" {
-			if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
-				quota = parsed
-			}
-		}
-		deps.Delivery.ChatDailyQuota = quota
-	}
+	// 公开站 AI 问答（/ask）装配：额度每成员每日 20 问；问答模型按站点
+	// 绑定的 chat_agent_application_id（站点列）经 ModelRegistry 解析，
+	// 未绑定站点的问答端点明确降级。
+	deps.Delivery.ChatModels = chatModelResolverAdapter{registry: modelRegistry}
+	deps.Delivery.ChatDailyQuota = 20
 	// The delivery face pins canonical/og:url/sitemap to the configured
 	// public origin: rendered pages are cached Host-agnostically, so a
 	// request-Host-derived prefix would poison the cache on internal probes.

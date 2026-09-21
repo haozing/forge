@@ -1783,6 +1783,27 @@ func (item Site) localeMatchesDetail(assetLocale, locale string) bool {
 	return assetLocale == locale
 }
 
+// ChatConfig 返回站点的公开问答应用绑定（chat_agent_application_id）。
+// 未绑定时 ok=false，问答端点明确降级不可用。
+func (r *PublicReader) ChatConfig(ctx context.Context, siteSlug string) (applicationID string, ok bool) {
+	item, err := r.loadSite(ctx, siteSlug)
+	if err != nil {
+		return "", false
+	}
+	if r.Store == nil || r.Store.Pool == nil {
+		return "", false
+	}
+	var appID string
+	err = r.Store.Pool.QueryRow(ctx, `
+		SELECT chat_agent_application_id::text FROM site.public_sites
+		WHERE id = $1::uuid AND chat_agent_application_id IS NOT NULL
+	`, item.ID).Scan(&appID)
+	if err != nil || appID == "" {
+		return "", false
+	}
+	return appID, true
+}
+
 // FilteredPostsResult 是组合筛选列表页的一页数据。
 type FilteredPostsResult struct {
 	Items []PublicPost
