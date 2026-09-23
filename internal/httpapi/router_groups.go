@@ -57,6 +57,33 @@ func registerDeliveryRoutes(deps Dependencies, mux *http.ServeMux) {
 	// "/" 留给前置代理的默认走向（多站部署）。
 	if deps.RootSiteSlug != "" {
 		mux.HandleFunc("GET /{$}", rootSiteHome(deps))
+		// 根形态内容路由：站点上下文经 SetPathValue 注入，处理器复用
+		// /sites/{slug} 的同一实现（渲染层的 URL 收口改写见 delivery）。
+		at := func(next http.HandlerFunc) http.HandlerFunc {
+			return func(w http.ResponseWriter, r *http.Request) {
+				r.SetPathValue("slug", deps.RootSiteSlug)
+				next(w, r)
+			}
+		}
+		mux.HandleFunc("/posts", at(deliverySitePosts(deps)))
+		mux.HandleFunc("/posts/{displayPath...}", at(deliverySitePost(deps)))
+		mux.HandleFunc("/c", at(deliverySiteCategory(deps)))
+		mux.HandleFunc("/c/{path...}", at(deliverySiteCategory(deps)))
+		mux.HandleFunc("/tags", at(deliverySiteTags(deps)))
+		mux.HandleFunc("/tags/{key}", at(deliverySiteTagPage(deps)))
+		mux.HandleFunc("/tags/{key}/", at(deliverySiteTagPage(deps)))
+		mux.HandleFunc("/sections/{sectionSlug}", at(deliverySiteSection(deps)))
+		mux.HandleFunc("/sections/{sectionSlug}/", at(deliverySiteSection(deps)))
+		mux.HandleFunc("/search", at(deliverySiteSearch(deps)))
+		mux.HandleFunc("/about/", at(deliverySiteAbout(deps)))
+		mux.HandleFunc("/archive/", at(deliverySiteArchive(deps)))
+		mux.HandleFunc("/p/{pageSlug}", at(deliverySiteCustomPage(deps)))
+		mux.HandleFunc("/ask", at(deliverySiteAsk(deps)))
+		mux.HandleFunc("/media/{attachmentId}", at(deliverySiteMedia(deps)))
+		mux.HandleFunc("/rss.xml", at(deliverySiteFeed("rss")(deps)))
+		mux.HandleFunc("/sitemap.xml", at(deliverySiteFeed("sitemap")(deps)))
+		// /robots.txt 与 /llms.txt 已有域级注册（robots 聚合与平台 MCP 文档），
+		// 此处不重复注册以免 mux panic。
 	}
 	mux.HandleFunc("/sites/{slug}", deliverySiteHome(deps))
 	mux.HandleFunc("/sites/{slug}/", deliverySiteHome(deps))

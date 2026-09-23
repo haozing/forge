@@ -3,7 +3,10 @@ package delivery
 // seo_meta_test.go — 2026-09-23 SEO 审计修复的单元回归：首页标题拼接、
 // meta description 的 Markdown 标记剥离、根站点 URL 形态。
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestHomeTitle(t *testing.T) {
 	cases := []struct {
@@ -64,5 +67,30 @@ func TestOriginOf(t *testing.T) {
 		if got := originOf(canonical); got != want {
 			t.Errorf("originOf(%q) = %q, want %q", canonical, got, want)
 		}
+	}
+}
+
+func TestRewriteRootSiteURLs(t *testing.T) {
+	body := []byte(`<a href="/sites/itd/posts/x">L</a>` +
+		`<a href="/sites/itd">H</a>` +
+		`<link rel="canonical" href="https://www.qidu.site/sites/itd/posts/x">` +
+		`"item":"https://www.qidu.site/sites/itd/c/seo"` +
+		`data-site-slug="itd"` +
+		`/api/public/sites/itd/chat`)
+	got := string(rewriteRootSiteURLs(body, "itd", "https://www.qidu.site"))
+	for _, want := range []string{
+		`href="/posts/x"`,
+		`href="/"`,
+		`href="https://www.qidu.site/posts/x"`,
+		`"https://www.qidu.site/c/seo"`,
+		`data-site-slug="itd"`,
+		`/api/public/sites/itd/chat`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("rewrite lost %q in %s", want, got)
+		}
+	}
+	if strings.Contains(got, `href="/sites/`) {
+		t.Errorf("rewrite left a path-form href: %s", got)
 	}
 }

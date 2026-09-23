@@ -102,6 +102,19 @@ func originOf(canonical string) string {
 	return strings.TrimRight(canonical, "/")
 }
 
+// rewriteRootSiteURLs 把根站点页面里的 URL 统一改写为根形态：相对属性值
+// "/sites/{slug}/…" → "/…"（HTML 属性带引号前缀，不会误伤 /api/public/
+// sites/… 这类接口路径），绝对 "baseURL/sites/{slug}/…" → "baseURL/…"
+//（canonical/og:url/JSON-LD/sitemap/RSS 里的绝对 URL）。替换顺序先长后短。
+func rewriteRootSiteURLs(body []byte, slug, baseURL string) []byte {
+	html := string(body)
+	html = strings.ReplaceAll(html, baseURL+"/sites/"+slug+"/", baseURL+"/")
+	html = strings.ReplaceAll(html, `"/sites/`+slug+`/"`, `"/"`)
+	html = strings.ReplaceAll(html, `"/sites/`+slug+`"`, `"/"`)
+	html = strings.ReplaceAll(html, `"/sites/`+slug+`/`, `"/`)
+	return []byte(html)
+}
+
 // NewService wires the delivery service with a fresh cache and renderer.
 // ChatModels/ChatAgentApplicationID/ChatDailyQuota 为公开 AI 问答的可选
 // 装配（未配置时 /ask 端点明确降级），由 cmd/api 在构造后注入。
@@ -258,6 +271,10 @@ func (s *Service) pipeline(ctx context.Context, addr string, principal auth.Prin
 			}, nil
 		}
 		if output.page != nil {
+			// 根站点模式：feed 类输出（rss/sitemap/llms）同样收口到根形态。
+			if s.RootSiteSlug != "" && facts.Site.Slug == s.RootSiteSlug {
+				output.page.Body = rewriteRootSiteURLs(output.page.Body, facts.Site.Slug, baseURL)
+			}
 			s.storeEntry(key, revision(facts), band, routePath, output.page)
 			return output.page, nil
 		}
@@ -281,6 +298,13 @@ func (s *Service) pipeline(ctx context.Context, addr string, principal auth.Prin
 		//（含存量自定义主题）都即时生效。
 		if page, ok := pageMetaFromVM(output.vm); ok {
 			body = injectSEOMeta(body, page)
+		}
+		// 根站点模式（2026-09-23 SEO 审计第二轮）：整页 URL 收口到根形态——
+		// 导航/卡片/面包屑/分页/og:image/JSON-LD 里的 "/sites/{slug}/…" 全部
+		// 改写为 "/…"。各拼点维持原状，此处单一收口。canonical 已在 builder
+		// 层用根形态（绝对 URL 同样命中改写），改写须在注入之后、缓存之前。
+		if s.RootSiteSlug != "" && facts.Site.Slug == s.RootSiteSlug {
+			body = rewriteRootSiteURLs(body, facts.Site.Slug, baseURL)
 		}
 		cacheControl := publicCachePolicy
 		if band == "member" || facts.Site.DefaultContentScope != site.ScopePublic {

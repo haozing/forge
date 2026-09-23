@@ -235,10 +235,13 @@ func main() {
 		// plus the tag facet counter (B4); the anonymous IP budget reuses the
 		// same LoginThrottle instance as the login buckets (B5).
 		PublicSites: &site.PublicReader{
-			Store:    db,
-			Query:    queryService,
-			Throttle: &auth.PublicSiteIPThrottle{Counter: loginThrottle},
-			Facets:   tag.FacetService{Store: db},
+			Store: db,
+			Query: queryService,
+			Throttle: &auth.PublicSiteIPThrottle{
+				Counter: loginThrottle,
+				Limit:   auth.RatePolicy{Window: time.Minute, Max: cfg.PublicSiteIPRateLimit, Block: time.Minute},
+			},
+			Facets: tag.FacetService{Store: db},
 		},
 		// Phase 3 retrieval operations: profiles (list via the repository,
 		// lifecycle via the service) and rebuild batches.

@@ -73,6 +73,9 @@ type Config struct {
 	// DeliveryRootSiteSlug（DELIVERY_ROOT_SITE_SLUG）：单品牌部署的根站点
 	// slug；设置后 "/" 服务该站首页、/sites/{slug} 301 到根。空串关闭。
 	DeliveryRootSiteSlug           string
+	// PublicSiteIPRateLimit（PUBLIC_SITE_IP_LIMIT_PER_MIN）：公开站 /24
+	// 访客桶的每分钟请求数；0 = 沿用内置默认 120。
+	PublicSiteIPRateLimit          int
 	RateLimitHMACKey               string
 	EmailDeliveryKeys              string
 	EmailDeliveryCurrentKeyVersion string
@@ -139,6 +142,7 @@ func Load() Config {
 		MemberAllowedOrigins:           envCSV("MEMBER_ALLOWED_ORIGINS"),
 		PublicAppBaseURL:               strings.TrimRight(strings.TrimSpace(os.Getenv("PUBLIC_APP_BASE_URL")), "/"),
 		DeliveryRootSiteSlug:           strings.TrimSpace(os.Getenv("DELIVERY_ROOT_SITE_SLUG")),
+		PublicSiteIPRateLimit:          int(envInt64OrDefault("PUBLIC_SITE_IP_LIMIT_PER_MIN", 0)),
 		RateLimitHMACKey:               os.Getenv("RATE_LIMIT_HMAC_KEY"),
 		EmailDeliveryKeys:              os.Getenv("EMAIL_DELIVERY_KEYS"),
 		EmailDeliveryCurrentKeyVersion: strings.TrimSpace(os.Getenv("EMAIL_DELIVERY_CURRENT_KEY_VERSION")),

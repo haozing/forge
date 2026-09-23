@@ -152,6 +152,10 @@ var _ bucketCounter = (*LoginThrottle)(nil)
 // routes; the capability and its tests live here.
 type PublicSiteIPThrottle struct {
 	Counter bucketCounter
+	// Limit 覆盖默认预算（PUBLIC_SITE_IP_LIMIT_PER_MIN）：公开内容站的
+	// 访客/爬虫共享 /24 桶，内置 120/min 对真实流量过紧（2026-09-23 实测
+	// 真人连点即触顶）。零值 = 沿用 PublicSiteIPLimit。
+	Limit RatePolicy
 }
 
 // NewPublicSiteIPThrottle wires the limiter onto the shared DB bucket store.
@@ -164,5 +168,9 @@ func NewPublicSiteIPThrottle(store *store.Store, hmacKey []byte) *PublicSiteIPTh
 // duration. The address is truncated through ClientIPPrefix so a /24 (IPv4)
 // or /56 (IPv6) shares one bucket, matching the login IP buckets.
 func (t *PublicSiteIPThrottle) Allow(ctx context.Context, effectiveAddr string) (bool, time.Duration, error) {
-	return t.Counter.CheckAndIncrement(ctx, BucketPublicSiteIP, ClientIPPrefix(effectiveAddr), PublicSiteIPLimit)
+	policy := PublicSiteIPLimit
+	if t.Limit.Max > 0 {
+		policy = t.Limit
+	}
+	return t.Counter.CheckAndIncrement(ctx, BucketPublicSiteIP, ClientIPPrefix(effectiveAddr), policy)
 }

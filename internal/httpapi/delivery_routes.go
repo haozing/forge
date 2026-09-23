@@ -110,7 +110,9 @@ func writeDeliveryError(w http.ResponseWriter, r *http.Request, service *deliver
 		if rateLimited.RetryAfter > 0 {
 			w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(rateLimited.RetryAfter.Seconds()))))
 		}
-		writeError(w, http.StatusTooManyRequests, "rate_limited")
+		// HTML 面的 429 用站点错误页呈现（2026-09-23 实测裸 JSON 直接暴露给
+		// 访客）；no-store 由 ErrorPage 自带，不会把限流页缓存进共享层。
+		writeDeliveryPage(w, r, service, service.ErrorPage(http.StatusTooManyRequests))
 		return
 	}
 	var apiErr *agentquery.APIError
