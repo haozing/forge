@@ -21,8 +21,10 @@
       {{range .Featured}}
       <li>
         <a href="{{.URL}}" target="_blank" {{with .Rel}}rel="{{.}}"{{end}}>{{.Name}}</a>
+        <span class="ext-url">{{.URL}}</span>
         <span class="ext-desc">{{.Description}}</span>
         {{if .TestedOn}}<span class="ext-tested">Tested on {{.TestedOn}}</span>{{end}}
+        {{with .Skill}}<details class="ext-skill"><summary>Agent Skill — auto-submit via AI agent</summary><pre><code>{{.}}</code></pre></details>{{end}}
       </li>
       {{end}}
     </ul>
@@ -36,8 +38,10 @@
       {{range .Groups}}{{range .Items}}
       <li>
         <a href="{{.URL}}" target="_blank" {{with .Rel}}rel="{{.}}"{{end}}>{{.Name}}</a>
+        <span class="ext-url">{{.URL}}</span>
         <span class="ext-desc">{{.Description}}</span>
         {{if .TestedOn}}<span class="ext-tested">Tested on {{.TestedOn}}</span>{{end}}
+        {{with .Skill}}<details class="ext-skill"><summary>Agent Skill — auto-submit via AI agent</summary><pre><code>{{.}}</code></pre></details>{{end}}
       </li>
       {{end}}{{end}}
     </ul>
@@ -56,11 +60,13 @@
   <section class="ext-groups">
     <h2>External Links by Category</h2>
     {{range .Groups}}
-    <h3 id="{{.Key}}">{{.Label}}</h3>
+    <h3 id="{{.Key}}"><a href="/external-links/{{.Key}}">{{.Label}}</a></h3>
+    <p class="ext-viewall"><a href="/external-links/{{.Key}}">View all in {{.Label}} &rarr;</a></p>
     <ul class="ext-links">
       {{range .Items}}
       <li>
         <a href="{{.URL}}" target="_blank" {{with .Rel}}rel="{{.}}"{{end}}>{{.Name}}</a>
+        <span class="ext-url">{{.URL}}</span>
         <span class="ext-desc">{{.Description}}</span>
         {{if .TestedOn}}<span class="ext-tested">Tested on {{.TestedOn}}</span>{{end}}
       </li>
