@@ -315,7 +315,8 @@ func (s Service) Patch(ctx context.Context, principal auth.Principal, modelID st
 	}
 	if _, err := s.Store.Pool.Exec(ctx, `
 		UPDATE model.resource_models SET name = $3, description = $4, status = $5, updated_at = now()
-		WHERE organization_id = $1::uuid AND id = $2::uuid AND workspace_id = $6::uuid
+		WHERE organization_id = $1::uuid AND id = $2::uuid
+		  AND workspace_id IS NOT DISTINCT FROM NULLIF($6, '')::uuid
 	`, principal.OrganizationID, modelID, name, description, status, model.WorkspaceID); err != nil {
 		return Model{}, fmt.Errorf("update resource model: %w", err)
 	}
