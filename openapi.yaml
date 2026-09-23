@@ -6676,6 +6676,7 @@ components:
         enabled_locales: { type: array, items: { type: string }, description: '对外启用的语言集合（仅默认语言 = 多语言链路不激活）' }
         fallback_to_default: { type: boolean, description: '当前语言无内容时列表回退显示默认语言版本' }
         published_release_id: { type: string, format: uuid, nullable: true }
+        directory_config: { type: array, nullable: true, description: '模型公开目录页配置（0047）：目录实例数组（slug/model_key/group_by/sort/page_size/tdk/intro/submission/outlink_nofollow）' }
         status: { type: string, enum: [active, disabled] }
         revision: { type: integer }
         created_at: { type: string, format: date-time }

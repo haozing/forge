@@ -32,6 +32,8 @@ const (
 	SlotPage       = "page"
 	SlotPartials   = "partials"
 	SlotAsk        = "ask"
+	SlotExternalLinks          = "external_links"
+	SlotExternalLinksGuidelines = "external_links_guidelines"
 	SlotTokensCSS  = "tokens.css"
 	SlotThemeCSS   = "theme.css"
 	ContentDefine  = "content" // layout 必须定义的挂载点名
@@ -43,7 +45,7 @@ const (
 var Slots = []string{
 	SlotLayout, SlotHome, SlotDetail, SlotAbout, SlotList, SlotSection,
 	SlotCategory, SlotTags, SlotTagPage, SlotSearch, SlotArchive, SlotPage,
-	SlotPartials, SlotAsk,
+	SlotPartials, SlotAsk, SlotExternalLinks, SlotExternalLinksGuidelines,
 }
 
 // MaxFileBytes / MaxTotalBytes 是文件集大小上限（§3 要点）。

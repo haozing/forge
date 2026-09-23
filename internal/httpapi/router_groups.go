@@ -57,6 +57,10 @@ func registerDeliveryRoutes(deps Dependencies, mux *http.ServeMux) {
 	// "/" 留给前置代理的默认走向（多站部署）。
 	if deps.RootSiteSlug != "" {
 		mux.HandleFunc("GET /{$}", rootSiteHome(deps))
+		// 模型公开目录页（外链板块 v2）：GET 页面族 + POST 公开提交端点。
+		mux.HandleFunc("/external-links", rootSiteDirectoryPages(deps))
+		mux.HandleFunc("/external-links/", rootSiteDirectoryPages(deps))
+		mux.HandleFunc("POST /external-links/submit", submitExternalLink(deps))
 		// 根形态内容路由：站点上下文经 SetPathValue 注入，处理器复用
 		// /sites/{slug} 的同一实现（渲染层的 URL 收口改写见 delivery）。
 		at := func(next http.HandlerFunc) http.HandlerFunc {

@@ -150,6 +150,7 @@ func createMemberAsset(deps Dependencies) http.HandlerFunc {
 		}
 		result, err := deps.MemberAssetService.Create(r.Context(), principal, r.PathValue("workspaceId"), key, input)
 		if err != nil {
+			log.Printf("asset create failed: %v", err)
 			writeMemberAssetError(w, err, "asset_create_failed")
 			return
 		}

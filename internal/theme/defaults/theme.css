@@ -162,3 +162,24 @@ h1,h2,h3{font-family:var(--font-heading)}
   .caps{grid-template-columns:1fr 1fr}
   .matrix-grid{grid-template-columns:1fr}
 }
+
+/* External Links directory (2026-09-23) */
+.ext-breadcrumbs{font-size:13px;color:var(--muted,#6b7280);margin-bottom:12px}
+.ext-breadcrumbs a{color:inherit}
+.ext-intro{font-size:16px;line-height:1.8;max-width:820px}
+.ext-links{list-style:none;margin:0;padding:0}
+.ext-links li{padding:10px 0;border-bottom:1px solid var(--border,#e5e7eb)}
+.ext-links a{font-weight:600}
+.ext-desc{display:block;color:var(--muted,#6b7280);font-size:14px;margin-top:2px}
+.ext-tested{display:inline-block;margin-top:4px;font-size:12px;color:var(--muted,#6b7280)}
+.ext-links .ext-skill{margin-top:6px}
+.ext-links .ext-skill pre{white-space:pre-wrap;font-size:12px;background:var(--card,#f9fafb);border:1px solid var(--border,#e5e7eb);border-radius:6px;padding:10px;overflow-x:auto}
+.ext-form{display:grid;gap:14px;max-width:640px;margin-top:12px}
+.ext-form label{display:grid;gap:4px;font-size:14px}
+.ext-form input,.ext-form select,.ext-form textarea{border:1px solid var(--border,#d1d5db);border-radius:6px;padding:8px 10px;font:inherit}
+.ext-form fieldset{border:1px dashed var(--border,#d1d5db);border-radius:6px;padding:10px;display:grid;gap:10px}
+.ext-form legend{font-size:13px;padding:0 6px}
+.ext-form .ext-hp{position:absolute;left:-9999px;height:1px;width:1px;opacity:0}
+.ext-thanks{background:#ecfdf5;border:1px solid #a7f3d0;border-radius:8px;padding:12px 16px;font-size:15px}
+.ext-pagination{display:flex;gap:16px;align-items:center;justify-content:center;padding:18px 0}
+.ext-guidelines h2{margin-top:28px}

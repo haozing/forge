@@ -1,0 +1,120 @@
+{{define "content"}}
+<div class="hub">
+  <nav class="ext-breadcrumbs" aria-label="Breadcrumb">
+    <a href="{{.Site.HomeHref}}">Home</a> <span aria-hidden="true">&gt;</span>
+    {{if .IsCategory}}<a href="/external-links">External Links</a> <span aria-hidden="true">&gt;</span> <span>{{.CategoryLabel}}</span>
+    {{else}}<span>External Links</span>{{end}}
+  </nav>
+
+  <h1 class="hub-h2">{{if .IsCategory}}{{.CategoryLabel}} External Links Directory{{else}}External Links Directory &amp; SEO Guide{{end}}</h1>
+
+  {{if .SubmittedThanks}}
+  <p class="ext-thanks">✅ Your submission has been received. We manually review every site within 1-3 business days and will notify you by email.</p>
+  {{end}}
+
+  {{if .Intro}}<p class="ext-intro">{{.Intro}}</p>{{end}}
+
+  {{if and (not .IsCategory) .Featured}}
+  <section class="ext-featured">
+    <h2>Featured Sites</h2>
+    <ul class="ext-links">
+      {{range .Featured}}
+      <li>
+        <a href="{{.URL}}" target="_blank" {{with .Rel}}rel="{{.}}"{{end}}>{{.Name}}</a>
+        <span class="ext-desc">{{.Description}}</span>
+        {{if .TestedOn}}<span class="ext-tested">Tested on {{.TestedOn}}</span>{{end}}
+      </li>
+      {{end}}
+    </ul>
+  </section>
+  {{end}}
+
+  {{if .IsCategory}}
+  <section class="ext-listing">
+    <h2>{{.CategoryLabel}} — All Listings</h2>
+    <ul class="ext-links">
+      {{range .Groups}}{{range .Items}}
+      <li>
+        <a href="{{.URL}}" target="_blank" {{with .Rel}}rel="{{.}}"{{end}}>{{.Name}}</a>
+        <span class="ext-desc">{{.Description}}</span>
+        {{if .TestedOn}}<span class="ext-tested">Tested on {{.TestedOn}}</span>{{end}}
+      </li>
+      {{end}}{{end}}
+    </ul>
+    {{if .CommunityPicks}}
+    <h3>Community Picks — sites recommended by our submitters</h3>
+    <ul class="ext-links ext-picks">
+      {{range .CommunityPicks}}
+      <li>
+        <a href="{{.URL}}" target="_blank" {{with .Rel}}rel="{{.}}"{{end}}>{{.Name}}</a>
+      </li>
+      {{end}}
+    </ul>
+    {{end}}
+  </section>
+  {{else}}
+  <section class="ext-groups">
+    <h2>External Links by Category</h2>
+    {{range .Groups}}
+    <h3 id="{{.Key}}">{{.Label}}</h3>
+    <ul class="ext-links">
+      {{range .Items}}
+      <li>
+        <a href="{{.URL}}" target="_blank" {{with .Rel}}rel="{{.}}"{{end}}>{{.Name}}</a>
+        <span class="ext-desc">{{.Description}}</span>
+        {{if .TestedOn}}<span class="ext-tested">Tested on {{.TestedOn}}</span>{{end}}
+      </li>
+      {{end}}
+    </ul>
+    {{end}}
+  </section>
+  {{end}}
+
+  {{if .Submit.Enabled}}
+  <section class="ext-submit" id="submit">
+    <h2>Submit Your Site for a Free External Link</h2>
+    <p>Submit your indie site, micro-SaaS tool or niche blog to our directory. Approved sites receive a quality backlink from qidu.site and are listed in the most relevant category. Recommend someone else's tool? You may also leave your own site to get listed in our Community Picks.</p>
+    EXT_SUBMIT_FORM_PLACEHOLDER
+    <p class="ext-guidelines-link">Read the <a href="/external-links/submission-guidelines">Submission Guidelines</a> before submitting.</p>
+  </section>
+  {{end}}
+
+  {{if not .IsCategory}}
+  <section class="ext-guide">
+    <h2>External Linking SEO Best Practices</h2>
+    <h3>What Are External Links?</h3>
+    <p>An external link (also called an outbound link) points from your page to a page on another domain. Search engines treat external references as relevance and trust signals: linking to authoritative, relevant resources helps both users and crawlers understand what your content is about.</p>
+    <h3>How Do External Links Help SEO?</h3>
+    <p>External links to quality sources support topical relevance and credibility. On the other side of the equation, earning external links from relevant sites remains one of the strongest ranking signals — which is exactly why directories like this one exist: a listing here is an external link to your site.</p>
+    <h3>Internal vs External Links: Key Differences</h3>
+    <p>Internal links connect pages within the same domain and control how crawl weight flows through your site. External links connect your content to other domains — they cite sources, build trust, and (when others link back to you) drive rankings and referral traffic.</p>
+    <h3>Tips for Building Quality External Links</h3>
+    <p>Ship something worth linking to (free tools, original data, honest teardowns), submit to curated directories in your niche, and keep every listing description original. Avoid bulk automated links — modern search engines discount them fast.</p>
+  </section>
+
+  <section class="ext-faq">
+    <h2>Frequently Asked Questions</h2>
+    <h3>What is an external link in SEO?</h3>
+    <p>An external link is a hyperlink that points from your website to a page on a different domain. It cites sources and helps search engines understand your content's context.</p>
+    <h3>Are external links good for search engine rankings?</h3>
+    <p>Yes — linking out to relevant, authoritative sources is a positive quality signal, and earning external links from other sites to your pages is one of the strongest ranking factors.</p>
+    <h3>What's the difference between internal and external links?</h3>
+    <p>Internal links connect pages on the same domain; external links point to other domains. A healthy site uses both: internal links for structure, external links for citations and trust.</p>
+    <h3>How do you build external links for a new website?</h3>
+    <p>Start with curated directories in your niche (like this one — submission is free), publish original tools or data worth citing, and do genuine outreach to sites that cover your topic.</p>
+    <h3>Do follow vs nofollow external links: which matters more?</h3>
+    <p>Dofollow links pass ranking signals; nofollow links are hints. A natural profile contains mostly dofollow links from relevant, reviewed sources — exactly what this directory provides.</p>
+  </section>
+  {{end}}
+
+  {{with .Pagination}}
+  {{if or .PrevHref .NextHref}}
+  <nav class="ext-pagination">
+    {{with .PrevHref}}<a href="{{.}}">&larr; Previous</a>{{end}}
+    <span>Page {{.Page}}</span>
+    {{with .NextHref}}<a href="{{.}}">Next &rarr;</a>{{end}}
+  </nav>
+  {{end}}
+  {{end}}
+</div>
+{{end}}

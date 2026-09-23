@@ -154,6 +154,12 @@ type renderOutput struct {
 	vm       any
 	noIndex  bool
 	redirect string
+	// injectSubmitForm 在渲染后的 HTML 里把 <!--EXT_SUBMIT_FORM--> 占位
+	// 替换为提交表单（外链板块 v2）：表单是 POST，主题安全扫描禁止主题
+	// 模板携带 POST 表单（form_rule），故由服务端可信注入。
+	injectSubmitForm bool
+	// injectSubmitCats 是提交表单分类枚举（配合 injectSubmitForm）。
+	injectSubmitCats []string
 }
 
 // buildFunc builds one page against already-loaded facts and visitor band.
@@ -298,6 +304,10 @@ func (s *Service) pipeline(ctx context.Context, addr string, principal auth.Prin
 		//（含存量自定义主题）都即时生效。
 		if page, ok := pageMetaFromVM(output.vm); ok {
 			body = injectSEOMeta(body, page)
+		}
+		// 外链板块提交表单注入（主题模板 POST 表单被 form_rule 禁止）。
+		if output.injectSubmitForm {
+			body = injectExternalSubmitForm(body, output.injectSubmitCats)
 		}
 		// 根站点模式（2026-09-23 SEO 审计第二轮）：整页 URL 收口到根形态——
 		// 导航/卡片/面包屑/分页/og:image/JSON-LD 里的 "/sites/{slug}/…" 全部
@@ -803,6 +813,15 @@ func (s *Service) Sitemap(ctx context.Context, addr string, principal auth.Princ
 		}
 		if sitemapPosts > 0 {
 			vm.URLs = append(vm.URLs, SitemapURL{Loc: baseURL + "/sites/" + slug + "/archive/"})
+		}
+		// 模型公开目录页（外链板块 v2）：总目录 + 规则页进 sitemap；分类
+		// 子页拆分（P2）后再收录，避免薄内容页进索引。
+		if cfg, ok := directoryConfigFor(facts, "external-links"); ok {
+			_ = cfg
+			vm.URLs = append(vm.URLs,
+				SitemapURL{Loc: baseURL + "/external-links"},
+				SitemapURL{Loc: baseURL + "/external-links/submission-guidelines"},
+			)
 		}
 		body, err := s.Render.RenderXML("sitemap", vm)
 		if err != nil {

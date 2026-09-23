@@ -69,7 +69,11 @@ type Site struct {
 	// PublishedReleaseID points at the live immutable config snapshot; NULL
 	// means the public render falls back to the working columns above.
 	PublishedReleaseID *string   `json:"published_release_id"`
-	Revision           int64     `json:"revision"`
+	// 目录页配置（0047，模型公开目录页）：JSON 数组，每项一个目录实例
+	//（slug/model_key/group_by/sort/tdk/intro/submission）。交付层按它
+	// 生成可收录的模型记录目录页。
+	DirectoryConfig json.RawMessage `json:"directory_config"`
+	Revision        int64           `json:"revision"`
 	CreatedAt          time.Time `json:"created_at"`
 	UpdatedAt          time.Time `json:"updated_at"`
 	// ETag is the representation version (the revision); handlers emit it for
@@ -175,7 +179,8 @@ const siteColumns = `id::text, organization_id::text, workspace_id::text, slug, 
 	published_release_id::text, created_at, updated_at,
 	COALESCE(logo_attachment_id::text, ''), COALESCE(favicon_attachment_id::text, ''),
 	COALESCE(social_image_attachment_id::text, ''),
-	COALESCE(draft_theme_revision_id::text, ''), COALESCE(published_theme_revision_id::text, '')`
+	COALESCE(draft_theme_revision_id::text, ''), COALESCE(published_theme_revision_id::text, ''),
+	COALESCE(directory_config, '[]'::jsonb)`
 
 func scanSiteRow(row interface{ Scan(...any) error }) (Site, error) {
 	var item Site
@@ -184,7 +189,8 @@ func scanSiteRow(row interface{ Scan(...any) error }) (Site, error) {
 		&item.DefaultLocale, &item.EnabledLocales, &item.FallbackToDefault,
 		&item.CommentsMode, &item.PublishedReleaseID, &item.CreatedAt, &item.UpdatedAt,
 		&item.LogoAttachmentID, &item.FaviconAttachmentID, &item.SocialImageAttachmentID,
-		&item.DraftThemeRevisionID, &item.PublishedThemeRevisionID)
+		&item.DraftThemeRevisionID, &item.PublishedThemeRevisionID,
+		&item.DirectoryConfig)
 	if err != nil {
 		return Site{}, err
 	}

@@ -1936,3 +1936,92 @@ func (r *PublicReader) CategoryNameBySlug(ctx context.Context, siteSlug, categor
 	}
 	return name, true
 }
+
+// DirectoryRecord is one published model record surfaced on a directory page
+// (模型公开目录页)：the record's whitelisted field values are read straight
+// from the published version's fields JSONB — visibility/inclusion decisions
+// stay in the derived binding view (published + scope + model channel −
+// exclusions), never re-implemented here.
+type DirectoryRecord struct {
+	AssetID           string
+	Title             string
+	URL               string
+	Category          string
+	Description       string
+	TestedOn          string
+	AgentSkill        string
+	SubmitterSiteName string
+	SubmitterSiteURL  string
+	Featured          bool
+	UpdatedAt         time.Time
+}
+
+// DirectoryRecords pages published records of one model (by model_key) that
+// are included in the given site. category filters on the record's category
+// field value (empty = all). Ordered featured-first, then newest update.
+// Returns the page plus hasMore (limit+1 probe).
+func (r *PublicReader) DirectoryRecords(ctx context.Context, visitorAddr string, principal auth.Principal, slug, modelKey, category string, offset, limit int) ([]DirectoryRecord, bool, error) {
+	if err := r.allow(ctx, visitorAddr); err != nil {
+		return nil, false, err
+	}
+	item, err := r.loadSite(ctx, slug)
+	if err != nil {
+		return nil, false, err
+	}
+	if limit <= 0 || limit > 100 {
+		limit = 20
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	joins := `
+		FROM site.site_content_bindings b
+		JOIN asset.assets a
+		  ON a.organization_id = b.organization_id AND a.id = b.asset_id
+		 AND a.deleted_at IS NULL AND a.publication_status = 'published'
+		 AND a.current_published_version_id IS NOT NULL
+		JOIN asset.asset_versions v
+		  ON v.organization_id = a.organization_id AND v.id = a.current_published_version_id
+		JOIN model.resource_models rm
+		  ON rm.organization_id = a.organization_id AND rm.id = a.resource_model_id
+		 AND rm.model_key = $3 AND rm.status = 'active'
+		WHERE b.site_id = $2::uuid AND b.organization_id = $1::uuid`
+	args := []any{item.OrganizationID, item.ID, modelKey}
+	if category != "" {
+		joins += fmt.Sprintf(" AND v.fields->>'category' = $%d", len(args)+1)
+		args = append(args, category)
+	}
+
+	var total int
+	if err := r.Store.Pool.QueryRow(ctx, `SELECT count(*)`+joins, args...).Scan(&total); err != nil {
+		return nil, false, fmt.Errorf("count directory records: %w", err)
+	}
+	rows, err := r.Store.Pool.Query(ctx, `
+		SELECT a.id::text, v.title, COALESCE(v.fields->>'site_url', ''),
+		       COALESCE(v.fields->>'category', ''), COALESCE(v.fields->>'description', ''),
+		       COALESCE(v.fields->>'tested_date', ''), COALESCE(v.fields->>'agent_skill', ''),
+		       COALESCE(v.fields->>'submitter_site_name', ''), COALESCE(v.fields->>'submitter_site_url', ''),
+		       (COALESCE(v.fields->>'featured', '') = 'true'), a.updated_at
+		`+joins+fmt.Sprintf(`
+		ORDER BY (COALESCE(v.fields->>'featured', '') = 'true') DESC, a.updated_at DESC
+		LIMIT %d OFFSET %d`, limit, offset), args...)
+	if err != nil {
+		return nil, false, fmt.Errorf("list directory records: %w", err)
+	}
+	defer rows.Close()
+	items := make([]DirectoryRecord, 0, limit)
+	for rows.Next() {
+		var rec DirectoryRecord
+		if err := rows.Scan(&rec.AssetID, &rec.Title, &rec.URL, &rec.Category,
+			&rec.Description, &rec.TestedOn, &rec.AgentSkill,
+			&rec.SubmitterSiteName, &rec.SubmitterSiteURL, &rec.Featured, &rec.UpdatedAt); err != nil {
+			return nil, false, fmt.Errorf("scan directory record: %w", err)
+		}
+		items = append(items, rec)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, fmt.Errorf("iterate directory records: %w", err)
+	}
+	hasMore := offset+len(items) < total
+	return items, hasMore, nil
+}
