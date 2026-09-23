@@ -95,6 +95,10 @@ type Dependencies struct {
 	// otherwise poison every visitor's canonical/og:url/sitemap for one TTL.
 	// Empty falls back to the request-derived origin (development).
 	DeliveryPublicBaseURL string
+	// RootSiteSlug（DELIVERY_ROOT_SITE_SLUG）：单品牌部署的根站点。设置后
+	// "/" 由投递面直接服务该站首页，/sites/{slug} 裸形态 301 收敛到根（根域
+	// 权重归一，2026-09-23 SEO 审计）。空串 = 多站部署，维持纯路径形态。
+	RootSiteSlug string
 	// Phase 4 member suggestion review surface (queue, accept/reject, batch).
 	SuggestionReviews *assetservice.SuggestionReviewService
 	// Phase 3 retrieval operations services (projection profiles and rebuilds).

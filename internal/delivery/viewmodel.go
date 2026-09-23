@@ -601,6 +601,13 @@ func sanitizeMetaDescription(text string) string {
 	text = mdAssetLinkPattern.ReplaceAllString(text, "$1")
 	text = assetRefPattern.ReplaceAllString(text, "")
 	text = mediaRefPattern.ReplaceAllString(text, "")
+	// Markdown 标记剥离（2026-09-23 SEO 审计）：摘要字段常是 AI 写的原始
+	// markdown，**加粗**/`代码` 标记会原样出现在 SERP 描述里。只删标记字符
+	// 不动正文；单星号与下划线词内出现概率极低，可接受误伤。
+	text = strings.ReplaceAll(text, "**", "")
+	text = strings.ReplaceAll(text, "__", "")
+	text = strings.ReplaceAll(text, "`", "")
+	text = strings.ReplaceAll(text, "【截图文字】", "")
 	if idx := strings.Index(text, "相似文档："); idx >= 0 {
 		text = text[:idx]
 	}

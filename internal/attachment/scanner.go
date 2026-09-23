@@ -171,6 +171,16 @@ func (p ScanProcessor) CleanupExpired(ctx context.Context) (int, error) {
 			SELECT 1 FROM content.block_revisions br
 			WHERE br.props ->> 'attachment_id' = at.id::text
 		  )
+		  AND NOT EXISTS (
+			-- 站点品牌图（logo/favicon/分享图）不算孤儿：它们只挂在 site 行
+			-- 上、不进版本绑定链（2026-09-23 实测 og:image 分享图被本清扫器
+			-- 连对象一起误删）。
+			SELECT 1 FROM site.public_sites ps
+			WHERE ps.organization_id = at.organization_id
+			  AND (ps.logo_attachment_id = at.id
+			    OR ps.favicon_attachment_id = at.id
+			    OR ps.social_image_attachment_id = at.id)
+		  )
 	`)
 	if err != nil {
 		return 0, fmt.Errorf("list expired attachments: %w", err)

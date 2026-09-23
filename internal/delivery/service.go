@@ -75,8 +75,31 @@ type Service struct {
 	ChatModels              ChatModelResolver
 	ChatAgentApplicationID string
 	ChatDailyQuota         int
+	// RootSiteSlug 是"单品牌部署"的根站点（DELIVERY_ROOT_SITE_SLUG）：httpapi
+	// 把 "/" 直接路由到该站首页、/sites/{slug} 301 到根，首页 canonical/
+	// JSON-LD/sitemap/RSS 的站 URL 因此收拢为 baseURL + "/"，避免把根域权重
+	// 让渡给 /sites/{slug}/ 路径形态。空串 = 关闭（多站部署维持路径形态）。
+	RootSiteSlug string
 	// group collapses concurrent cold-key renders.
 	group singleflight.Group
+}
+
+// homeURLFor 解析站点首页的绝对 URL：根站点取根形态，其余站取路径形态。
+func (s *Service) homeURLFor(slug, baseURL string) string {
+	if s.RootSiteSlug != "" && s.RootSiteSlug == slug {
+		return baseURL + "/"
+	}
+	return baseURL + "/sites/" + slug + "/"
+}
+
+// originOf 从绝对 canonical 提取 scheme+host：路径形态（含 /sites/ 前缀）
+// 截到前缀前；根形态（裸 origin，可能带尾斜杠）原样收敛。canonical 由
+// baseURL（无尾斜杠）+ 路径拼出，两种形态覆盖全部现状。
+func originOf(canonical string) string {
+	if idx := strings.Index(canonical, "/sites/"); idx > 0 {
+		return canonical[:idx]
+	}
+	return strings.TrimRight(canonical, "/")
 }
 
 // NewService wires the delivery service with a fresh cache and renderer.
@@ -346,7 +369,21 @@ func (s *Service) ErrorPage(status int) *Response {
 // Home serves the site homepage.
 func (s *Service) Home(ctx context.Context, addr string, principal auth.Principal, slug, baseURL string, locale string) (*Response, error) {
 	routePath := "/sites/" + slug + "/" + locale
-	return s.pipeline(ctx, addr, principal, slug, routePath, baseURL, func(ctx context.Context, facts site.SiteFacts, band string, queries *theme.Queries) (renderOutput, error) {
+	return s.pipeline(ctx, addr, principal, slug, routePath, baseURL, s.buildHome(slug, baseURL, "", addr, locale, principal))
+}
+
+// HomeRoot serves the homepage of the deployment's root site (RootSiteSlug)
+// at "/": identical page body family, but the canonical / JSON-LD site URL
+// collapse onto the bare origin so the root domain owns the homepage.
+// locale 固定默认语言——根路径只有一种语言形态（带前缀的翻译走原路径）。
+func (s *Service) HomeRoot(ctx context.Context, addr string, principal auth.Principal, slug, baseURL string) (*Response, error) {
+	return s.pipeline(ctx, addr, principal, slug, "/", baseURL, s.buildHome(slug, baseURL, baseURL+"/", addr, "", principal))
+}
+
+// buildHome 构造首页 builder。canonicalOverride 非空时（根站点模式）首页
+// canonical 用它而非 baseURL+routePath；JSON-LD 站 URL 恒走 homeURLFor。
+func (s *Service) buildHome(slug, baseURL, canonicalOverride, addr, locale string, principal auth.Principal) buildFunc {
+	return func(ctx context.Context, facts site.SiteFacts, band string, queries *theme.Queries) (renderOutput, error) {
 		if gated(facts, band) {
 			return s.gateOutput(facts)
 		}
@@ -378,19 +415,29 @@ func (s *Service) Home(ctx context.Context, addr string, principal auth.Principa
 		} else {
 			s.Logf("delivery: home categories degraded slug=%s err=%v", slug, err)
 		}
+		// 卡片截断（2026-09-23 SEO 审计）：默认主题 .kb-latest 只展示前 3 张
+		//（theme.css nth-child(n+4) display:none），模板曾渲染全部条目靠 CSS
+		// 藏匿——92 个隐藏 h2 全部进了 DOM。渲染层截断，DOM 与所见一致。
+		if len(vm.Items) > 3 {
+			vm.Items = vm.Items[:3]
+		}
 		vm.Site = chrome(facts, "home")
 		vm.Queries = queries
-		vm.Title = facts.Site.Name
+		vm.Title = homeTitle(facts.Site.Name, facts.Site.Description)
 		// 站点描述（§7.3）优先；空则回退站点名（meta description 不留空）。
 		vm.Description = facts.Site.Description
 		if vm.Description == "" {
 			vm.Description = facts.Site.Name
 		}
-		vm.Canonical = baseURL + routePath
+		if canonicalOverride != "" {
+			vm.Canonical = canonicalOverride
+		} else {
+			vm.Canonical = baseURL + "/sites/" + slug + "/" + locale
+		}
 		vm.NoIndex = !vm.Site.ScopePublic
 		// 首页结构化数据（对标审计 P1-4）：WebSite + Organization。
 		if !vm.NoIndex {
-			siteURL := baseURL + "/sites/" + slug + "/"
+			siteURL := s.homeURLFor(slug, baseURL)
 			ld, _ := json.Marshal([]map[string]any{
 				{"@context": "https://schema.org", "@type": "WebSite",
 					"name": facts.Site.Name, "url": siteURL,
@@ -401,7 +448,32 @@ func (s *Service) Home(ctx context.Context, addr string, principal auth.Principa
 			vm.JSONLD = template.JS(ld)
 		}
 		return renderOutput{kind: "home", vm: vm, noIndex: vm.NoIndex}, nil
-	})
+	}
+}
+
+// homeTitle 拼首页 <title>：站点名 + 描述首段（" · "前的一段，24 字符封顶）。
+// 只写站点名浪费最强页面信号（2026-09-23 SEO 审计）；描述缺省回退站名。
+func homeTitle(name, description string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return ""
+	}
+	segment := ""
+	if trimmed := strings.TrimSpace(description); trimmed != "" {
+		if idx := strings.Index(trimmed, " · "); idx > 0 {
+			segment = strings.TrimSpace(trimmed[:idx])
+		} else {
+			segment = trimmed
+		}
+	}
+	if segment == "" || segment == name {
+		return name
+	}
+	runes := []rune(segment)
+	if len(runes) > 24 {
+		segment = strings.TrimSpace(string(runes[:24]))
+	}
+	return name + "｜" + segment
 }
 
 // Posts serves the post list.
@@ -627,7 +699,7 @@ func (s *Service) RSS(ctx context.Context, addr string, principal auth.Principal
 		if err != nil {
 			return renderOutput{}, err
 		}
-		vm := RSSVM{Site: chrome(facts, "rss"), Items: []RSSItem{}, HomeURL: baseURL + "/sites/" + slug + "/"}
+		vm := RSSVM{Site: chrome(facts, "rss"), Items: []RSSItem{}, HomeURL: s.homeURLFor(slug, baseURL)}
 		for _, post := range page.Items {
 			vm.Items = append(vm.Items, RSSItem{
 				Title:       post.Title,
@@ -654,7 +726,7 @@ func (s *Service) Sitemap(ctx context.Context, addr string, principal auth.Princ
 			return renderOutput{}, ErrFeedDisabled
 		}
 		vm := SitemapVM{Site: chrome(facts, "sitemap"), URLs: []SitemapURL{
-			{Loc: baseURL + "/sites/" + slug + "/"},
+			{Loc: s.homeURLFor(slug, baseURL)},
 			{Loc: baseURL + "/sites/" + slug + "/posts/"},
 		}}
 		if _, err := s.Reader.About(ctx, addr, principal, slug); err == nil {
@@ -727,6 +799,37 @@ func (s *Service) Robots(ctx context.Context, addr string, principal auth.Princi
 			return renderOutput{}, err
 		}
 		return renderOutput{page: &Response{Body: body, ContentType: contentText, CacheControl: feedCachePolicy, Status: 200}}, nil
+	})
+}
+
+// LLMs serves the site-scoped llms.txt content guide (llms.txt 惯例)：站点
+// 名/描述 + 已发布文章清单。域级 /llms.txt 仍是平台 MCP 说明（与
+// /.well-known/agents.json 配套），面向 LLM 的站点内容指南挂站点级路径。
+func (s *Service) LLMs(ctx context.Context, addr string, principal auth.Principal, slug, baseURL string) (*Response, error) {
+	routePath := "/sites/" + slug + "/llms.txt"
+	return s.pipeline(ctx, addr, principal, slug, routePath, baseURL, func(ctx context.Context, facts site.SiteFacts, band string, queries *theme.Queries) (renderOutput, error) {
+		if facts.Site.DefaultContentScope != site.ScopePublic {
+			return renderOutput{}, ErrFeedDisabled
+		}
+		page, err := s.Reader.Posts(ctx, addr, principal, slug, site.PublicPostQuery{Limit: 100})
+		if err != nil {
+			return renderOutput{}, err
+		}
+		var b strings.Builder
+		b.WriteString("# " + facts.Site.Name + "\n\n")
+		if facts.Site.Description != "" {
+			b.WriteString("> " + facts.Site.Description + "\n\n")
+		}
+		b.WriteString("## Posts\n\n")
+		for _, post := range page.Items {
+			title := strings.ReplaceAll(post.Title, "[", "(")
+			title = strings.ReplaceAll(title, "]", ")")
+			b.WriteString("- [" + title + "](" + baseURL + postHref(slug, post.DisplayPath) + ")\n")
+		}
+		return renderOutput{page: &Response{
+			Body: []byte(b.String()), ContentType: contentText,
+			CacheControl: feedCachePolicy, Status: 200,
+		}}, nil
 	})
 }
 
@@ -874,13 +977,12 @@ func injectSEOMeta(body []byte, page Page) []byte {
 		ogType = "article"
 	}
 	b.WriteString(`<meta property="og:type" content="` + ogType + `">`)
+	origin := originOf(page.Canonical)
 	image := page.CanonicalImage
 	if image == "" {
 		// 无封面时回退站点社交图（绝对化：借 canonical 的 scheme+host）。
-		if page.Site.SocialImageURL != "" && page.Canonical != "" {
-			if idx := strings.Index(page.Canonical, "/sites/"); idx > 0 {
-				image = page.Canonical[:idx] + page.Site.SocialImageURL
-			}
+		if page.Site.SocialImageURL != "" && origin != "" {
+			image = origin + page.Site.SocialImageURL
 		}
 	}
 	card := "summary"
@@ -894,6 +996,12 @@ func injectSEOMeta(body []byte, page Page) []byte {
 	b.WriteString(`<meta name="twitter:card" content="` + card + `">`)
 	if page.ModifiedISO != "" {
 		b.WriteString(`<meta property="article:modified_time" content="` + esc(page.ModifiedISO) + `">`)
+	}
+	// RSS autodiscovery（2026-09-23 SEO 审计）：rss.xml 一直存在但 head 无
+	// 声明，阅读器/爬虫发现不了。绝对化借 canonical 的 origin。
+	if rss := page.Site.RSSHref; rss != "" && origin != "" {
+		b.WriteString(`<link rel="alternate" type="application/rss+xml" title="` +
+			esc(page.Site.Name) + `" href="` + esc(origin+rss) + `">`)
 	}
 	if page.JSONLD != "" && !page.NoIndex {
 		b.WriteString(`<script type="application/ld+json">` + string(page.JSONLD) + `</script>`)

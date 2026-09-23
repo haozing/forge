@@ -34,6 +34,7 @@ func TestDeliveryRoutesRegistered(t *testing.T) {
 		{http.MethodGet, "/sites/demo/rss.xml"},
 		{http.MethodGet, "/sites/demo/sitemap.xml"},
 		{http.MethodGet, "/sites/demo/robots.txt"},
+		{http.MethodGet, "/sites/demo/llms.txt"},
 		{http.MethodGet, "/static/delivery-search.js"},
 		// Subtree catch-all: unknown site paths must resolve to a handler
 		// (which answers the site-scoped 404 page), never a mux-level miss.
@@ -89,5 +90,19 @@ func TestDeliveryCommentFormRouteRegistered(t *testing.T) {
 	request := &http.Request{Method: http.MethodPost, URL: &url.URL{Path: "/sites/demo/posts/hello/comments"}}
 	if _, pattern := mux.Handler(request); pattern == "" {
 		t.Fatal("POST {PostPath}/comments resolves to no registered pattern")
+	}
+}
+
+// TestRootSiteRouteConditional（2026-09-23 SEO 审计）：根路由 "/" 只在配置
+// RootSiteSlug 时注册；未配置时 "/" 保持未注册（留给前置代理默认走向）。
+func TestRootSiteRouteConditional(t *testing.T) {
+	empty := newRouter(Dependencies{})
+	request := &http.Request{Method: http.MethodGet, URL: &url.URL{Path: "/"}}
+	if _, pattern := empty.Handler(request); pattern != "" {
+		t.Fatal("/ must stay unregistered without RootSiteSlug")
+	}
+	rooted := newRouter(Dependencies{RootSiteSlug: "itd-site"})
+	if _, pattern := rooted.Handler(request); pattern == "" {
+		t.Fatal("/ must be registered when RootSiteSlug is set")
 	}
 }

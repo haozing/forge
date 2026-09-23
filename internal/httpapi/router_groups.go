@@ -52,6 +52,12 @@ func registerSystemRoutes(deps Dependencies, mux *http.ServeMux) {
 // site-scoped 404 catch-all.
 func registerDeliveryRoutes(deps Dependencies, mux *http.ServeMux) {
 	mux.HandleFunc("/robots.txt", robotsTxt(deps))
+	// 单品牌根站点（DELIVERY_ROOT_SITE_SLUG）："/" 直接服务该站首页；同时
+	// deliverySiteHome 把 /sites/{slug} 裸形态 301 到根。未配置时不注册，
+	// "/" 留给前置代理的默认走向（多站部署）。
+	if deps.RootSiteSlug != "" {
+		mux.HandleFunc("GET /{$}", rootSiteHome(deps))
+	}
 	mux.HandleFunc("/sites/{slug}", deliverySiteHome(deps))
 	mux.HandleFunc("/sites/{slug}/", deliverySiteHome(deps))
 	mux.HandleFunc("/sites/{slug}/posts", deliverySitePosts(deps))
@@ -66,6 +72,7 @@ func registerDeliveryRoutes(deps Dependencies, mux *http.ServeMux) {
 	mux.HandleFunc("/sites/{slug}/rss.xml", deliverySiteFeed("rss")(deps))
 	mux.HandleFunc("/sites/{slug}/sitemap.xml", deliverySiteFeed("sitemap")(deps))
 	mux.HandleFunc("/sites/{slug}/robots.txt", deliverySiteFeed("robots")(deps))
+	mux.HandleFunc("/sites/{slug}/llms.txt", deliverySiteLLMs(deps))
 	mux.HandleFunc("/sites/{slug}/about/", deliverySiteAbout(deps))
 	mux.HandleFunc("/sites/{slug}/c/{path...}", deliverySiteCategory(deps))
 	mux.HandleFunc("/sites/{slug}/c", deliverySiteCategory(deps))

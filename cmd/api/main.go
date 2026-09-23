@@ -287,6 +287,11 @@ func main() {
 	// public origin: rendered pages are cached Host-agnostically, so a
 	// request-Host-derived prefix would poison the cache on internal probes.
 	deps.DeliveryPublicBaseURL = cfg.PublicAppBaseURL
+	// 单品牌根站点（DELIVERY_ROOT_SITE_SLUG）："/" 服务该站首页，
+	// /sites/{slug} 301 收敛到根，canonical/JSON-LD/sitemap/RSS 站 URL 用
+	// 根形态；未配置则维持纯 /sites/ 路径形态。
+	deps.RootSiteSlug = cfg.DeliveryRootSiteSlug
+	deps.Delivery.RootSiteSlug = cfg.DeliveryRootSiteSlug
 	deps.Delivery.Objects = objects
 	server := &http.Server{
 		Addr:              cfg.HTTPAddr,

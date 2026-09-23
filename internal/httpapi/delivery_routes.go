@@ -186,6 +186,15 @@ func deliverySiteHome(deps Dependencies) http.HandlerFunc {
 			writeDeliveryPage(w, r, service, service.ErrorPage(http.StatusNotFound))
 			return
 		}
+		// 根站点收敛（2026-09-23 SEO 审计）：单品牌部署的根站，其裸路径形态
+		// （/sites/{slug}、/sites/{slug}/）301 到 "/"，可收录形态归一。带
+		// locale 前缀的翻译路径不在此列（属正常页面）。注意 "/" 必须由前置
+		// 代理原样转发到本进程（不得做路径重写），否则会 301 循环。
+		if deps.RootSiteSlug == slug &&
+			(r.URL.Path == "/sites/"+slug || r.URL.Path == "/sites/"+slug+"/") {
+			http.Redirect(w, r, "/", http.StatusMovedPermanently)
+			return
+		}
 		if r.URL.Path != "/sites/"+slug && r.URL.Path != "/sites/"+slug+"/" {
 			writeDeliveryPage(w, r, service, service.ErrorPage(http.StatusNotFound))
 			return
@@ -618,6 +627,57 @@ func deliveryCarouselScript(deps Dependencies) http.HandlerFunc {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(delivery.CarouselScript())
+	}
+}
+
+// rootSiteHome serves "/" as the homepage of the deployment's root site
+// (DELIVERY_ROOT_SITE_SLUG). Only registered when a root site is configured;
+// the page's canonical / JSON-LD collapse onto the bare origin (HomeRoot).
+func rootSiteHome(deps Dependencies) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		service := requireDelivery(w, deps)
+		if service == nil {
+			return
+		}
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			writeDeliveryPage(w, r, service, service.ErrorPage(http.StatusMethodNotAllowed))
+			return
+		}
+		page, err := service.HomeRoot(r.Context(), effectiveClientAddr(r, deps.TrustedProxyCIDRs),
+			publicVisitorPrincipal(r, deps), deps.RootSiteSlug, deps.deliveryBaseURL(r))
+		if err != nil {
+			writeDeliveryError(w, r, service, err)
+			return
+		}
+		writeDeliveryPage(w, r, service, page)
+	}
+}
+
+// deliverySiteLLMs serves /sites/{slug}/llms.txt: the site-scoped LLM content
+// guide (site description + published post list). The domain-level /llms.txt
+// remains the platform MCP document paired with /.well-known/agents.json.
+func deliverySiteLLMs(deps Dependencies) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			writeDeliveryPage(w, r, deps.Delivery, deps.Delivery.ErrorPage(http.StatusMethodNotAllowed))
+			return
+		}
+		service := requireDelivery(w, deps)
+		if service == nil {
+			return
+		}
+		slug := r.PathValue("slug")
+		if !site.ValidSlug(slug) {
+			writeDeliveryPage(w, r, service, service.ErrorPage(http.StatusNotFound))
+			return
+		}
+		page, err := service.LLMs(r.Context(), effectiveClientAddr(r, deps.TrustedProxyCIDRs),
+			publicVisitorPrincipal(r, deps), slug, deps.deliveryBaseURL(r))
+		if err != nil {
+			writeDeliveryError(w, r, service, err)
+			return
+		}
+		writeDeliveryPage(w, r, service, page)
 	}
 }
 

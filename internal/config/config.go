@@ -68,8 +68,11 @@ type Config struct {
 	AgentModelMaxCacheEntries       int
 	AgentModelMaxConcurrentRequests int
 	// Phase 1 member surface configuration.
-	MemberAllowedOrigins           []string
-	PublicAppBaseURL               string
+	MemberAllowedOrigins []string
+	PublicAppBaseURL     string
+	// DeliveryRootSiteSlug（DELIVERY_ROOT_SITE_SLUG）：单品牌部署的根站点
+	// slug；设置后 "/" 服务该站首页、/sites/{slug} 301 到根。空串关闭。
+	DeliveryRootSiteSlug           string
 	RateLimitHMACKey               string
 	EmailDeliveryKeys              string
 	EmailDeliveryCurrentKeyVersion string
@@ -135,6 +138,7 @@ func Load() Config {
 
 		MemberAllowedOrigins:           envCSV("MEMBER_ALLOWED_ORIGINS"),
 		PublicAppBaseURL:               strings.TrimRight(strings.TrimSpace(os.Getenv("PUBLIC_APP_BASE_URL")), "/"),
+		DeliveryRootSiteSlug:           strings.TrimSpace(os.Getenv("DELIVERY_ROOT_SITE_SLUG")),
 		RateLimitHMACKey:               os.Getenv("RATE_LIMIT_HMAC_KEY"),
 		EmailDeliveryKeys:              os.Getenv("EMAIL_DELIVERY_KEYS"),
 		EmailDeliveryCurrentKeyVersion: strings.TrimSpace(os.Getenv("EMAIL_DELIVERY_CURRENT_KEY_VERSION")),

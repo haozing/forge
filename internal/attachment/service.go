@@ -414,6 +414,15 @@ func (s Service) Delete(ctx context.Context, principal auth.Principal, attachmen
 		  AND NOT EXISTS (
 			SELECT 1 FROM asset.asset_version_attachments lva WHERE lva.attachment_id = at.id
 		  )
+		  AND NOT EXISTS (
+			-- 站点品牌图在用中：logo/favicon/分享图只挂 site 行，删除会让
+			-- 公开站 og:image/品牌资产 404（2026-09-23 实测）。
+			SELECT 1 FROM site.public_sites ps
+			WHERE ps.organization_id = at.organization_id
+			  AND (ps.logo_attachment_id = at.id
+			    OR ps.favicon_attachment_id = at.id
+			    OR ps.social_image_attachment_id = at.id)
+		  )
 		RETURNING at.object_key
 	`, principal.OrganizationID, attachmentID, principal.UserID).Scan(&objectKey)
 	if errors.Is(err, pgx.ErrNoRows) {
