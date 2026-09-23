@@ -816,12 +816,15 @@ func (s *Service) Sitemap(ctx context.Context, addr string, principal auth.Princ
 		}
 		// 模型公开目录页（外链板块 v2）：总目录 + 规则页进 sitemap；分类
 		// 子页拆分（P2）后再收录，避免薄内容页进索引。
-		if cfg, ok := directoryConfigFor(facts, "external-links"); ok {
-			_ = cfg
+		if _, ok := directoryConfigFor(facts, "external-links"); ok {
 			vm.URLs = append(vm.URLs,
 				SitemapURL{Loc: baseURL + "/external-links"},
 				SitemapURL{Loc: baseURL + "/external-links/submission-guidelines"},
 			)
+			for _, key := range directoryCategoryKeys() {
+				vm.URLs = append(vm.URLs,
+					SitemapURL{Loc: baseURL + "/external-links/" + key})
+			}
 		}
 		body, err := s.Render.RenderXML("sitemap", vm)
 		if err != nil {

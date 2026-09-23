@@ -135,6 +135,16 @@ const externalSubmitAction = "/external-links/submit"
 const externalHoneypotField = "website_fill"
 const externalFormMarker = "EXT_SUBMIT_FORM_PLACEHOLDER"
 
+// externalFAQPairs 是总目录页 FAQ 区的问答对（与模板渲染文案一致），
+// 同时驱动 FAQPage 结构化数据。
+var externalFAQPairs = [][2]string{
+	{"What is an external link in SEO?", "An external link is a hyperlink that points from your website to a page on a different domain. It cites sources and helps search engines understand your content's context."},
+	{"Are external links good for search engine rankings?", "Yes — linking out to relevant, authoritative sources is a positive quality signal, and earning external links from other sites to your pages is one of the strongest ranking factors."},
+	{"What's the difference between internal and external links?", "Internal links connect pages on the same domain; external links point to other domains. A healthy site uses both: internal links for structure, external links for citations and trust."},
+	{"How do you build external links for a new website?", "Start with curated directories in your niche (like this one — submission is free), publish original tools or data worth citing, and do genuine outreach to sites that cover your topic."},
+	{"Do follow vs nofollow external links: which matters more?", "Dofollow links pass ranking signals; nofollow links are hints. A natural profile contains mostly dofollow links from relevant, reviewed sources — exactly what this directory provides."},
+}
+
 // externalSubmitFormHTML 构建公开提交表单（服务端可信注入，不过主题扫描）。
 func externalSubmitFormHTML(categories []string) string {
 	var b strings.Builder
@@ -319,6 +329,14 @@ func (s *Service) buildExternalLinks(addr, baseURL, category string, page int, s
 						"url": baseURL + "/external-links/" + group.Key,
 					})
 				}
+				faqEntities := make([]map[string]any, 0, len(externalFAQPairs))
+				for _, qa := range externalFAQPairs {
+					faqEntities = append(faqEntities, map[string]any{
+						"@type":          "Question",
+						"name":           qa[0],
+						"acceptedAnswer": map[string]any{"@type": "Answer", "text": qa[1]},
+					})
+				}
 				ld, _ = json.Marshal([]map[string]any{
 					{"@context": "https://schema.org", "@type": "CollectionPage",
 						"name":        facts.Site.Name + " External Links",
@@ -327,6 +345,8 @@ func (s *Service) buildExternalLinks(addr, baseURL, category string, page int, s
 						"hasPart":     groupList},
 					{"@context": "https://schema.org", "@type": "WebSite",
 						"name": facts.Site.Name, "url": s.homeURLFor(facts.Site.Slug, baseURL)},
+					{"@context": "https://schema.org", "@type": "FAQPage",
+						"mainEntity": faqEntities},
 				})
 			}
 			vm.JSONLD = template.JS(ld)
