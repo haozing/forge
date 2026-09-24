@@ -102,6 +102,23 @@ type ExternalLinkGroup struct {
 	Items []ExternalLinkEntry
 }
 
+// ExternalCategoryCard 是总目录页的分类导航卡片：图标 + 分类名 + 站点数，
+// 点击进入该分类的外链列表页（SEO 方案 §页面1 分类导航区）。
+type ExternalCategoryCard struct {
+	Key    string
+	Label  string
+	Icon   string
+	Count  int
+}
+
+var directoryCategoryIcons = map[string]string{
+	"seo-tools":        "🔍",
+	"content-creation": "✍️",
+	"monetization":     "💰",
+	"operations":       "🛡️",
+	"website-building": "🧱",
+}
+
 // ExternalSubmitVM 是提交表单的装配。
 type ExternalSubmitVM struct {
 	Enabled    bool
@@ -114,6 +131,7 @@ type ExternalSubmitVM struct {
 type ExternalLinksVM struct {
 	Page
 	Intro      string
+	CategoryCards [] ExternalCategoryCard
 	Groups     []ExternalLinkGroup
 	Featured   []ExternalLinkEntry
 	Submit     ExternalSubmitVM
@@ -265,6 +283,19 @@ func (s *Service) buildExternalLinks(addr, baseURL, category string, page int, s
 		vm.Pagination.Page = page
 		_ = baseURL
 
+		// 分类导航区：卡片含站点数，点击进入分类列表页（G4 装配）。
+		counts, countErr := s.Reader.DirectoryCategoryCounts(ctx, addr, principal, facts.Site.Slug, cfg.ModelKey)
+		if countErr != nil {
+			counts = map[string]int{}
+		}
+		for _, key := range directoryCategoryKeys() {
+			if count := counts[key]; count > 0 {
+				vm.CategoryCards = append(vm.CategoryCards, ExternalCategoryCard{
+					Key: key, Label: directoryCategoryLabel(key),
+					Icon: directoryCategoryIcons[key], Count: count,
+				})
+			}
+		}
 		vm.Groups = groupExternalEntries(records, cfg.OutlinkNofollow)
 		if category != "" {
 			vm.IsCategory = true

@@ -55,6 +55,7 @@
 
   form.addEventListener("submit", function (event) {
     event.preventDefault();
+    event.stopPropagation();
     var question = (input.value || "").trim();
     if (!question || busy) return;
     if (quotaLeft() <= 0) {

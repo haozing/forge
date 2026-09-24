@@ -186,3 +186,11 @@ h1,h2,h3{font-family:var(--font-heading)}
 .ext-url{display:block;color:var(--muted,#6b7280);font-size:12px;margin-top:2px;word-break:break-all}
 .ext-links .ext-skill{margin-top:6px}
 .ext-links .ext-skill summary{cursor:pointer;font-size:13px;color:var(--primary,#2563eb)}
+.ext-catnav{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px;margin:20px 0}
+.ext-catcard{display:flex;flex-direction:column;gap:4px;border:1px solid var(--border,#e5e7eb);border-radius:8px;padding:14px 16px;color:inherit}
+.ext-catcard:hover{border-color:var(--primary,#2563eb)}
+.ext-caticon{font-size:20px}
+.ext-catname{font-weight:600;font-size:15px}
+.ext-catcount{color:var(--muted,#6b7280);font-size:12px}
+.ext-viewall{margin:4px 0 14px}
+.ext-viewall a{font-size:13px}

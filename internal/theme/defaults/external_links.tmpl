@@ -14,6 +14,18 @@
 
   {{if .Intro}}<p class="ext-intro">{{.Intro}}</p>{{end}}
 
+  {{if and (not .IsCategory) .CategoryCards}}
+  <section class="ext-catnav" aria-label="分类导航">
+    {{range .CategoryCards}}
+    <a class="ext-catcard" href="/external-links/{{.Key}}">
+      <span class="ext-caticon">{{.Icon}}</span>
+      <span class="ext-catname">{{.Label}}</span>
+      <span class="ext-catcount">{{.Count}} 个站点</span>
+    </a>
+    {{end}}
+  </section>
+  {{end}}
+
   {{if and (not .IsCategory) .Featured}}
   <section class="ext-featured">
     <h2>Featured Sites</h2>

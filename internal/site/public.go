@@ -2025,3 +2025,44 @@ func (r *PublicReader) DirectoryRecords(ctx context.Context, visitorAddr string,
 	hasMore := offset+len(items) < total
 	return items, hasMore, nil
 }
+
+// DirectoryCategoryCounts 统计目录各分类的已收录记录数（分类导航卡片的
+// "N 个站点" 数据源；0 计数的分类不返回）。
+func (r *PublicReader) DirectoryCategoryCounts(ctx context.Context, visitorAddr string, principal auth.Principal, slug, modelKey string) (map[string]int, error) {
+	if err := r.allow(ctx, visitorAddr); err != nil {
+		return nil, err
+	}
+	item, err := r.loadSite(ctx, slug)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := r.Store.Pool.Query(ctx, `
+		SELECT COALESCE(v.fields->>'category', ''), count(*)
+		FROM site.site_content_bindings b
+		JOIN asset.assets a
+		  ON a.organization_id = b.organization_id AND a.id = b.asset_id
+		 AND a.deleted_at IS NULL AND a.publication_status = 'published'
+		 AND a.current_published_version_id IS NOT NULL
+		JOIN asset.asset_versions v
+		  ON v.organization_id = a.organization_id AND v.id = a.current_published_version_id
+		JOIN model.resource_models rm
+		  ON rm.organization_id = a.organization_id AND rm.id = a.resource_model_id
+		 AND rm.model_key = $3 AND rm.status = 'active'
+		WHERE b.site_id = $2::uuid AND b.organization_id = $1::uuid
+		GROUP BY 1
+	`, item.OrganizationID, item.ID, modelKey)
+	if err != nil {
+		return nil, fmt.Errorf("count directory categories: %w", err)
+	}
+	defer rows.Close()
+	counts := map[string]int{}
+	for rows.Next() {
+		var category string
+		var count int
+		if err := rows.Scan(&category, &count); err != nil {
+			return nil, fmt.Errorf("scan directory category count: %w", err)
+		}
+		counts[category] = count
+	}
+	return counts, rows.Err()
+}
