@@ -7,8 +7,7 @@
   data-quota-limit="{{.QuotaLimit}}"
   data-login-href="/login">
   <h1>{{i18n "ask"}}</h1>
-  {{if .LoggedIn}}
-  <p class="ask-note">{{i18n "ask_note"}} <span class="ask-quota">{{i18n "ask_quota_label"}} {{.QuotaUsed}}/{{.QuotaLimit}}</span></p>
+  <p class="ask-note">{{i18n "ask_note"}}{{if .LoggedIn}} <span class="ask-quota">{{i18n "ask_quota_label"}} {{.QuotaUsed}}/{{.QuotaLimit}}</span>{{end}}</p>
   <div class="chat-window">
     <div class="chat-messages" id="chat-messages">
       <div class="chat-msg chat-msg-ai">{{i18n "ask_greeting"}}</div>
@@ -19,11 +18,8 @@
     </form>
   </div>
   {{chatIsland}}
-  {{else}}
-  <div class="ask-login-cta">
-    <p>{{i18n "ask_login_required"}}</p>
-    <a class="btn btn-primary" href="/login">{{i18n "ask_go_login"}}</a>
-  </div>
+  {{if not .LoggedIn}}
+  <p class="ask-login-hint">{{i18n "ask_login_required"}} <a href="/login">{{i18n "ask_go_login"}}</a></p>
   {{end}}
 </div>
 {{end}}

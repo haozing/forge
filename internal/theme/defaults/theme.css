@@ -140,6 +140,9 @@ h1,h2,h3{font-family:var(--font-heading)}
 .chat-send:disabled{opacity:.45;cursor:not-allowed}
 .ask-note{color:var(--c-muted);font-size:14px;margin:0 0 12px}
 .ask-quota{display:inline-block;background:var(--c-surface);border:1px solid var(--c-border);border-radius:999px;padding:1px 10px;font-size:12px}
+.ask-login-hint{color:var(--c-muted);font-size:14px;margin:12px 0 0;text-align:center}
+.ask-login-hint a{color:var(--c-primary)}
+.chat-msg-login{background:var(--c-surface);border:1px dashed var(--c-accent);color:var(--c-muted);font-size:14px}
 @media (max-width: 720px){
   .chat-window{height:calc(100vh - 300px);min-height:360px}
 }

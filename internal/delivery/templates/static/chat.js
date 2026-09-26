@@ -18,12 +18,12 @@
   var quotaEl = document.querySelector(".ask-quota");
   var sessionId = shell.getAttribute("data-session-id") || "";
   var busy = false;
-  if (!loggedIn) return;
 
   function quotaLeft() {
     return Math.max(0, quotaLimit - quotaUsed);
   }
   function renderQuota() {
+    if (!loggedIn) return; // 匿名访客：无额度徽章，不禁输入（登录闸在提交时）
     if (quotaEl) quotaEl.textContent = "今日额度 " + quotaUsed + "/" + quotaLimit;
     if (quotaLeft() <= 0) {
       input.disabled = true;
@@ -58,6 +58,14 @@
     event.stopPropagation();
     var question = (input.value || "").trim();
     if (!question || busy) return;
+    // 登录闸门在提问动作上：匿名访客可看可输入，点发送时才引导登录。
+    if (!loggedIn) {
+      var tip = appendBubble("ai", "AI 问答需要登录后使用（登录后每日可提问 " + quotaLimit + " 次）。正在前往登录页…");
+      tip.className += " chat-msg-login";
+      busy = true;
+      setTimeout(function () { window.location.href = loginHref; }, 1200);
+      return;
+    }
     if (quotaLeft() <= 0) {
       appendBubble("ai", "今日额度已用完，明日恢复。");
       return;
