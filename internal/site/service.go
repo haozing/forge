@@ -458,6 +458,14 @@ func (s Service) UpdateSite(ctx context.Context, principal auth.Principal, works
 	if input.CommentsMode != nil && !ValidCommentsMode(*input.CommentsMode) {
 		return Site{}, ErrInvalidInput
 	}
+	// directory_config 必须是 JSON 数组（元素契约见 delivery.DirectoryConfigEntry）：
+	// 存成字符串/对象会让 delivery 的 unmarshal 失败、目录页整族 404。
+	if input.DirectoryConfig != nil {
+		var probe []any
+		if json.Unmarshal(*input.DirectoryConfig, &probe) != nil || probe == nil {
+			return Site{}, fmt.Errorf("%w: directory_config 必须是 JSON 数组", ErrInvalidInput)
+		}
+	}
 	if err := s.validateBrandingAttachments(ctx, principal.OrganizationID, input); err != nil {
 		return Site{}, err
 	}
