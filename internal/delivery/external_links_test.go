@@ -57,7 +57,7 @@ func TestGroupExternalEntries(t *testing.T) {
 	if len(groups) != 2 {
 		t.Fatalf("expected 2 groups, got %d", len(groups))
 	}
-	if groups[0].Key != "seo-tools" || groups[0].Label != "SEO & Keyword Tools" || len(groups[0].Items) != 2 {
+	if groups[0].Key != "seo-tools" || groups[0].Label != "SEO 与关键词工具" || len(groups[0].Items) != 2 {
 		t.Fatalf("unexpected first group: %+v", groups[0])
 	}
 	if groups[1].Key != "monetization" {

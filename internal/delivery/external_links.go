@@ -35,13 +35,14 @@ type DirectoryConfigEntry struct {
 	OutlinkNofollow   bool   `json:"outlink_nofollow"`
 }
 
-// 分类枚举（与 SEO 执行方案 §2.2 一一对应）；label 为公开展示名。
+// 分类枚举（与 SEO 执行方案 §2.2 一一对应）；label 为公开展示名（中文）。
+// key 是 URL 形态保持英文，站内展示一律走这里。
 var directoryCategoryLabels = map[string]string{
-	"seo-tools":        "SEO & Keyword Tools",
-	"content-creation": "Content Creation Resources",
-	"monetization":     "Monetization & SaaS Guides",
-	"operations":       "Operations & Compliance",
-	"website-building": "Website Building Tools",
+	"seo-tools":        "SEO 与关键词工具",
+	"content-creation": "内容创作资源",
+	"monetization":     "变现与 SaaS 指南",
+	"operations":       "运营与合规",
+	"website-building": "建站工具",
 }
 
 func DirectoryCategoryValid(category string) bool {
@@ -156,11 +157,11 @@ const externalFormMarker = "EXT_SUBMIT_FORM_PLACEHOLDER"
 // externalFAQPairs 是总目录页 FAQ 区的问答对（与模板渲染文案一致），
 // 同时驱动 FAQPage 结构化数据。
 var externalFAQPairs = [][2]string{
-	{"What is an external link in SEO?", "An external link is a hyperlink that points from your website to a page on a different domain. It cites sources and helps search engines understand your content's context."},
-	{"Are external links good for search engine rankings?", "Yes — linking out to relevant, authoritative sources is a positive quality signal, and earning external links from other sites to your pages is one of the strongest ranking factors."},
-	{"What's the difference between internal and external links?", "Internal links connect pages on the same domain; external links point to other domains. A healthy site uses both: internal links for structure, external links for citations and trust."},
-	{"How do you build external links for a new website?", "Start with curated directories in your niche (like this one — submission is free), publish original tools or data worth citing, and do genuine outreach to sites that cover your topic."},
-	{"Do follow vs nofollow external links: which matters more?", "Dofollow links pass ranking signals; nofollow links are hints. A natural profile contains mostly dofollow links from relevant, reviewed sources — exactly what this directory provides."},
+	{"什么是 SEO 里的外链？", "外链（外部链接）是指从你的网页指向其他域名的超链接。它引用了信息来源，帮助搜索引擎理解你内容的语境与可信度。"},
+	{"外链对搜索引擎排名有用吗？", "有用——链接到相关、权威的来源是正面的质量信号；而从其他站点获得外链，至今仍是最强的排名因素之一。"},
+	{"内链和外链有什么区别？", "内链连接同一域名下的页面，决定爬取权重在站内如何流动；外链指向其他域名，用于引用来源、建立信任。健康的站点两者兼备：内链管结构，外链管引用。"},
+	{"新网站如何积累外链？", "从本行业的精选目录开始（比如本目录——提交免费），发布值得被引用的原创工具或数据，再向覆盖你主题的站点做真诚的推荐。"},
+	{"dofollow 和 nofollow 外链哪个更重要？", "dofollow 传递排名信号，nofollow 只是提示。自然的外链画像应以来自相关、经人工审核来源的 dofollow 链接为主——这正是本目录提供的。"},
 }
 
 // externalSubmitFormHTML 构建公开提交表单（服务端可信注入，不过主题扫描）。
@@ -168,21 +169,21 @@ func externalSubmitFormHTML(categories []string) string {
 	var b strings.Builder
 	b.WriteString(`<form method="post" action="` + externalSubmitAction + `" class="ext-form">`)
 	b.WriteString(`<input type="text" name="` + externalHoneypotField + `" value="" tabindex="-1" autocomplete="off" aria-hidden="true" class="ext-hp">`)
-	b.WriteString(`<label>Site Name<input type="text" name="site_name" required maxlength="120"></label>`)
-	b.WriteString(`<label>Site URL<input type="text" name="site_url" required maxlength="500" placeholder="https://example.com"></label>`)
-	b.WriteString(`<label>Category<select name="category" required>`)
+	b.WriteString(`<label>站点名称<input type="text" name="site_name" required maxlength="120"></label>`)
+	b.WriteString(`<label>站点网址<input type="text" name="site_url" required maxlength="500" placeholder="https://example.com"></label>`)
+	b.WriteString(`<label>分类<select name="category" required>`)
 	for _, key := range categories {
-		b.WriteString(`<option value="` + key + `">` + key + `</option>`)
+		b.WriteString(`<option value="` + key + `">` + directoryCategoryLabel(key) + `</option>`)
 	}
 	b.WriteString(`</select></label>`)
-	b.WriteString(`<label>Short Description<textarea name="description" required maxlength="400" rows="3" placeholder="What does this site do, in one or two sentences?"></textarea></label>`)
-	b.WriteString(`<fieldset><legend>Your Website (optional — get listed in Community Picks too)</legend>`)
-	b.WriteString(`<label>Your Site Name<input type="text" name="submitter_site_name" maxlength="120"></label>`)
-	b.WriteString(`<label>Your Site URL<input type="text" name="submitter_site_url" maxlength="500" placeholder="https://yoursite.com"></label>`)
+	b.WriteString(`<label>一句话介绍<textarea name="description" required maxlength="400" rows="3" placeholder="用一两句话说明这个站点是做什么的"></textarea></label>`)
+	b.WriteString(`<fieldset><legend>你的网站（选填——同时收录进社区推荐）</legend>`)
+	b.WriteString(`<label>你的站点名称<input type="text" name="submitter_site_name" maxlength="120"></label>`)
+	b.WriteString(`<label>你的站点网址<input type="text" name="submitter_site_url" maxlength="500" placeholder="https://yoursite.com"></label>`)
 	b.WriteString(`</fieldset>`)
-	b.WriteString(`<label>Contact Email<input type="email" name="contact_email" required maxlength="200"></label>`)
-	b.WriteString(`<label>Agent Skill (optional)<textarea name="agent_skill" maxlength="8000" rows="5" placeholder="SKILL.md style steps an AI agent can follow to submit to this site..."></textarea></label>`)
-	b.WriteString(`<button type="submit">Submit Site</button></form>`)
+	b.WriteString(`<label>联系邮箱<input type="email" name="contact_email" required maxlength="200"></label>`)
+	b.WriteString(`<label>Agent Skill（选填）<textarea name="agent_skill" maxlength="8000" rows="5" placeholder="SKILL.md 风格的步骤说明，供 AI agent 自动向你的站点提交收录……"></textarea></label>`)
+	b.WriteString(`<button type="submit">提交站点</button></form>`)
 	return b.String()
 }
 

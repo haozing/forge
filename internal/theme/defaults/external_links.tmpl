@@ -1,15 +1,15 @@
 {{define "content"}}
 <div class="hub">
   <nav class="ext-breadcrumbs" aria-label="Breadcrumb">
-    <a href="{{.Site.HomeHref}}">Home</a> <span aria-hidden="true">&gt;</span>
-    {{if .IsCategory}}<a href="/external-links">External Links</a> <span aria-hidden="true">&gt;</span> <span>{{.CategoryLabel}}</span>
-    {{else}}<span>External Links</span>{{end}}
+    <a href="{{.Site.HomeHref}}">首页</a> <span aria-hidden="true">&gt;</span>
+    {{if .IsCategory}}<a href="/external-links">外链目录</a> <span aria-hidden="true">&gt;</span> <span>{{.CategoryLabel}}</span>
+    {{else}}<span>外链目录</span>{{end}}
   </nav>
 
-  <h1 class="hub-h2">{{if .IsCategory}}{{.CategoryLabel}} External Links Directory{{else}}External Links Directory &amp; SEO Guide{{end}}</h1>
+  <h1 class="hub-h2">{{if .IsCategory}}{{.CategoryLabel}}外链目录{{else}}出海外链目录 &amp; 外链 SEO 指南{{end}}</h1>
 
   {{if .SubmittedThanks}}
-  <p class="ext-thanks">✅ Your submission has been received. We manually review every site within 1-3 business days and will notify you by email.</p>
+  <p class="ext-thanks">✅ 提交已收到。我们会在 1-3 个工作日内人工审核每个站点，并通过邮件通知你结果。</p>
   {{end}}
 
   {{if .Intro}}<p class="ext-intro">{{.Intro}}</p>{{end}}
@@ -28,15 +28,15 @@
 
   {{if and (not .IsCategory) .Featured}}
   <section class="ext-featured">
-    <h2>Featured Sites</h2>
+    <h2>推荐站点</h2>
     <ul class="ext-links">
       {{range .Featured}}
       <li>
         <a href="{{.URL}}" target="_blank" {{with .Rel}}rel="{{.}}"{{end}}>{{.Name}}</a>
         <span class="ext-url">{{.URL}}</span>
         <span class="ext-desc">{{.Description}}</span>
-        {{if .TestedOn}}<span class="ext-tested">Tested on {{.TestedOn}}</span>{{end}}
-        {{with .Skill}}<details class="ext-skill"><summary>Agent Skill — auto-submit via AI agent</summary><pre><code>{{.}}</code></pre></details>{{end}}
+        {{if .TestedOn}}<span class="ext-tested">实测于 {{.TestedOn}}</span>{{end}}
+        {{with .Skill}}<details class="ext-skill"><summary>Agent Skill — AI agent 可按此自动提交</summary><pre><code>{{.}}</code></pre></details>{{end}}
       </li>
       {{end}}
     </ul>
@@ -45,20 +45,20 @@
 
   {{if .IsCategory}}
   <section class="ext-listing">
-    <h2>{{.CategoryLabel}} — All Listings</h2>
+    <h2>{{.CategoryLabel}} — 全部收录</h2>
     <ul class="ext-links">
       {{range .Groups}}{{range .Items}}
       <li>
         <a href="{{.URL}}" target="_blank" {{with .Rel}}rel="{{.}}"{{end}}>{{.Name}}</a>
         <span class="ext-url">{{.URL}}</span>
         <span class="ext-desc">{{.Description}}</span>
-        {{if .TestedOn}}<span class="ext-tested">Tested on {{.TestedOn}}</span>{{end}}
-        {{with .Skill}}<details class="ext-skill"><summary>Agent Skill — auto-submit via AI agent</summary><pre><code>{{.}}</code></pre></details>{{end}}
+        {{if .TestedOn}}<span class="ext-tested">实测于 {{.TestedOn}}</span>{{end}}
+        {{with .Skill}}<details class="ext-skill"><summary>Agent Skill — AI agent 可按此自动提交</summary><pre><code>{{.}}</code></pre></details>{{end}}
       </li>
       {{end}}{{end}}
     </ul>
     {{if .CommunityPicks}}
-    <h3>Community Picks — sites recommended by our submitters</h3>
+    <h3>社区推荐 — 来自提交者们的站点</h3>
     <ul class="ext-links ext-picks">
       {{range .CommunityPicks}}
       <li>
@@ -70,17 +70,17 @@
   </section>
   {{else}}
   <section class="ext-groups">
-    <h2>External Links by Category</h2>
+    <h2>按分类浏览外链</h2>
     {{range .Groups}}
     <h3 id="{{.Key}}"><a href="/external-links/{{.Key}}">{{.Label}}</a></h3>
-    <p class="ext-viewall"><a href="/external-links/{{.Key}}">View all in {{.Label}} &rarr;</a></p>
+    <p class="ext-viewall"><a href="/external-links/{{.Key}}">查看「{{.Label}}」全部收录 &rarr;</a></p>
     <ul class="ext-links">
       {{range .Items}}
       <li>
         <a href="{{.URL}}" target="_blank" {{with .Rel}}rel="{{.}}"{{end}}>{{.Name}}</a>
         <span class="ext-url">{{.URL}}</span>
         <span class="ext-desc">{{.Description}}</span>
-        {{if .TestedOn}}<span class="ext-tested">Tested on {{.TestedOn}}</span>{{end}}
+        {{if .TestedOn}}<span class="ext-tested">实测于 {{.TestedOn}}</span>{{end}}
       </li>
       {{end}}
     </ul>
@@ -90,47 +90,47 @@
 
   {{if .Submit.Enabled}}
   <section class="ext-submit" id="submit">
-    <h2>Submit Your Site for a Free External Link</h2>
-    <p>Submit your indie site, micro-SaaS tool or niche blog to our directory. Approved sites receive a quality backlink from qidu.site and are listed in the most relevant category. Recommend someone else's tool? You may also leave your own site to get listed in our Community Picks.</p>
+    <h2>免费提交你的站点，获取外链</h2>
+    <p>把你的独立站、微型 SaaS 工具或垂类博客提交到我们的目录。审核通过后，你将获得来自 qidu.site 的高质量外链，并归入最相关的分类。想推荐别人的工具？也可以留下你自己的站点，进入社区推荐位。</p>
     EXT_SUBMIT_FORM_PLACEHOLDER
-    <p class="ext-guidelines-link">Read the <a href="/external-links/submission-guidelines">Submission Guidelines</a> before submitting.</p>
+    <p class="ext-guidelines-link">提交前请先阅读<a href="/external-links/submission-guidelines">收录规则</a>。</p>
   </section>
   {{end}}
 
   {{if not .IsCategory}}
   <section class="ext-guide">
-    <h2>External Linking SEO Best Practices</h2>
-    <h3>What Are External Links?</h3>
-    <p>An external link (also called an outbound link) points from your page to a page on another domain. Search engines treat external references as relevance and trust signals: linking to authoritative, relevant resources helps both users and crawlers understand what your content is about.</p>
-    <h3>How Do External Links Help SEO?</h3>
-    <p>External links to quality sources support topical relevance and credibility. On the other side of the equation, earning external links from relevant sites remains one of the strongest ranking signals — which is exactly why directories like this one exist: a listing here is an external link to your site.</p>
-    <h3>Internal vs External Links: Key Differences</h3>
-    <p>Internal links connect pages within the same domain and control how crawl weight flows through your site. External links connect your content to other domains — they cite sources, build trust, and (when others link back to you) drive rankings and referral traffic.</p>
-    <h3>Tips for Building Quality External Links</h3>
-    <p>Ship something worth linking to (free tools, original data, honest teardowns), submit to curated directories in your niche, and keep every listing description original. Avoid bulk automated links — modern search engines discount them fast.</p>
+    <h2>外链 SEO 实战指南</h2>
+    <h3>什么是外链？</h3>
+    <p>外链（也叫导出链接）是从你的页面指向其他域名的链接。搜索引擎把对外引用视为相关性与信任信号：链接到权威、相关的资源，能帮助用户和爬虫同时理解你的内容主题。</p>
+    <h3>外链如何帮助 SEO？</h3>
+    <p>链接到高质量来源能支撑主题相关性与可信度。而等式的另一端——从相关站点获得外链——至今仍是最强的排名信号之一，这正是本目录存在的意义：被这里收录，就是一条指向你站点的外链。</p>
+    <h3>内链与外链的关键区别</h3>
+    <p>内链连接同一域名内的页面，控制爬取权重在站内的流动；外链把你的内容与其他域名连接起来——引用来源、建立信任，并在别人链接回你时带来排名与引荐流量。</p>
+    <h3>建设高质量外链的建议</h3>
+    <p>做出值得被链接的东西（免费工具、原创数据、真诚的拆解），提交到本行业的精选目录，并保证每条收录描述都是原创。避免批量自动化外链——现代搜索引擎很快就会把它们贬值。</p>
   </section>
 
   <section class="ext-faq">
-    <h2>Frequently Asked Questions</h2>
-    <h3>What is an external link in SEO?</h3>
-    <p>An external link is a hyperlink that points from your website to a page on a different domain. It cites sources and helps search engines understand your content's context.</p>
-    <h3>Are external links good for search engine rankings?</h3>
-    <p>Yes — linking out to relevant, authoritative sources is a positive quality signal, and earning external links from other sites to your pages is one of the strongest ranking factors.</p>
-    <h3>What's the difference between internal and external links?</h3>
-    <p>Internal links connect pages on the same domain; external links point to other domains. A healthy site uses both: internal links for structure, external links for citations and trust.</p>
-    <h3>How do you build external links for a new website?</h3>
-    <p>Start with curated directories in your niche (like this one — submission is free), publish original tools or data worth citing, and do genuine outreach to sites that cover your topic.</p>
-    <h3>Do follow vs nofollow external links: which matters more?</h3>
-    <p>Dofollow links pass ranking signals; nofollow links are hints. A natural profile contains mostly dofollow links from relevant, reviewed sources — exactly what this directory provides.</p>
+    <h2>常见问题</h2>
+    <h3>什么是 SEO 里的外链？</h3>
+    <p>外链是从你的网站指向其他域名页面的超链接。它引用了信息来源，帮助搜索引擎理解你内容的语境与可信度。</p>
+    <h3>外链对搜索引擎排名有用吗？</h3>
+    <p>有用——链接到相关、权威的来源是正面的质量信号；而从其他站点获得外链，至今仍是最强的排名因素之一。</p>
+    <h3>内链和外链有什么区别？</h3>
+    <p>内链连接同一域名下的页面；外链指向其他域名。健康的站点两者兼备：内链管结构，外链管引用与信任。</p>
+    <h3>新网站如何积累外链？</h3>
+    <p>从本行业的精选目录开始（比如本目录——提交免费），发布值得被引用的原创工具或数据，再向覆盖你主题的站点做真诚的推荐。</p>
+    <h3>dofollow 和 nofollow 外链哪个更重要？</h3>
+    <p>dofollow 传递排名信号，nofollow 只是提示。自然的外链画像应以来自相关、经人工审核来源的 dofollow 链接为主——这正是本目录提供的。</p>
   </section>
   {{end}}
 
   {{with .Pagination}}
   {{if or .PrevHref .NextHref}}
   <nav class="ext-pagination">
-    {{with .PrevHref}}<a href="{{.}}">&larr; Previous</a>{{end}}
-    <span>Page {{.Page}}</span>
-    {{with .NextHref}}<a href="{{.}}">Next &rarr;</a>{{end}}
+    {{with .PrevHref}}<a href="{{.}}">&larr; 上一页</a>{{end}}
+    <span>第 {{.Page}} 页</span>
+    {{with .NextHref}}<a href="{{.}}">下一页 &rarr;</a>{{end}}
   </nav>
   {{end}}
   {{end}}
