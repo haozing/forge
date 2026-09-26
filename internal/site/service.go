@@ -111,6 +111,9 @@ type UpdateSiteInput struct {
 	StyleConfig         *json.RawMessage
 	CommentsMode        *string
 	Status              *string
+	// 公开目录页配置（JSON 数组，元素契约见 delivery.DirectoryConfigEntry）：
+	// 整体更新语义（nil = 不动）。
+	DirectoryConfig *json.RawMessage
 	// 品牌媒体附件（image/*）：整体更新语义（nil = 不动；空串 = 清除）。
 	LogoAttachmentID        *string
 	FaviconAttachmentID     *string
@@ -578,6 +581,9 @@ func applySiteUpdate(ctx context.Context, tx pgx.Tx, principal auth.Principal, w
 	}
 	if input.Status != nil {
 		sets = append(sets, "status = "+arg(*input.Status))
+	}
+	if input.DirectoryConfig != nil {
+		sets = append(sets, "directory_config = "+arg([]byte(*input.DirectoryConfig))+"::jsonb")
 	}
 	item, err := scanSiteRow(tx.QueryRow(ctx, `
 		UPDATE site.public_sites

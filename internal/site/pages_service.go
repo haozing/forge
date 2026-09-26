@@ -254,7 +254,7 @@ func (s *Service) siteRowByID(ctx context.Context, organizationID, siteID string
 		&item.DefaultLocale, &item.EnabledLocales, &item.FallbackToDefault,
 		&item.CommentsMode, &item.PublishedReleaseID, &item.CreatedAt, &item.UpdatedAt,
 		&item.LogoAttachmentID, &item.FaviconAttachmentID, &item.SocialImageAttachmentID,
-		&item.DraftThemeRevisionID, &item.PublishedThemeRevisionID)
+		&item.DraftThemeRevisionID, &item.PublishedThemeRevisionID, &item.DirectoryConfig)
 	return item, err
 }
 

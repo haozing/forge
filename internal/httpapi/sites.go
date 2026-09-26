@@ -87,10 +87,11 @@ type UpdateSiteRequest struct {
 	EnabledLocales          *[]string `json:"enabled_locales"`
 	FallbackToDefault       *bool     `json:"fallback_to_default"`
 	CommentsMode            *string   `json:"comments_mode"`
-	Status                  *string   `json:"status"`
-	LogoAttachmentID        *string   `json:"logo_attachment_id"`
-	FaviconAttachmentID     *string   `json:"favicon_attachment_id"`
-	SocialImageAttachmentID *string   `json:"social_image_attachment_id"`
+	Status                  *string          `json:"status"`
+	LogoAttachmentID        *string          `json:"logo_attachment_id"`
+	FaviconAttachmentID     *string          `json:"favicon_attachment_id"`
+	SocialImageAttachmentID *string          `json:"social_image_attachment_id"`
+	DirectoryConfig         *json.RawMessage `json:"directory_config"`
 }
 
 // SitesCollection serves GET/POST /api/workspaces/{workspaceId}/sites.
@@ -191,6 +192,7 @@ func SiteResource(deps Dependencies) http.HandlerFunc {
 					LogoAttachmentID:        input.LogoAttachmentID,
 					FaviconAttachmentID:     input.FaviconAttachmentID,
 					SocialImageAttachmentID: input.SocialImageAttachmentID,
+					DirectoryConfig:         input.DirectoryConfig,
 				})
 			if err != nil {
 				SiteError(w, err, "slug_conflict")
